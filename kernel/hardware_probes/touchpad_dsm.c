@@ -41,19 +41,16 @@ static int aml_write_cb(void *user, const char *path, uint64_t value)
         s->gabl = value;
         return 0;
     }
-
     if (contains(path, "_T_0"))
     {
         s->ret0 = value;
         return 0;
     }
-
     if (contains(path, "_T_1"))
     {
         s->ret1 = value;
         return 0;
     }
-
     if (contains(path, "_T_2"))
     {
         s->ret2 = value;
@@ -79,19 +76,16 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
         *out = s->gabl;
         return 0;
     }
-
     if (contains(path, "_T_0"))
     {
         *out = s->ret0;
         return 0;
     }
-
     if (contains(path, "_T_1"))
     {
         *out = s->ret1;
         return 0;
     }
-
     if (contains(path, "_T_2"))
     {
         *out = s->ret2;
@@ -107,11 +101,10 @@ static int run_aml(const char *name,
                    const uint8_t *body,
                    uint32_t len,
                    aml_dsm_ctx *state,
-                   uint32_t arg_count,
-                   uint64_t arg0,
+                   const aml_tiny_value *a0,
                    uint64_t arg1,
                    uint64_t arg2,
-                   uint64_t arg3)
+                   const aml_tiny_value *a3)
 {
     aml_tiny_host host = {0};
     aml_tiny_method m = {0};
@@ -126,11 +119,19 @@ static int run_aml(const char *name,
     m.aml = body;
     m.aml_len = len;
     m.scope_prefix = scope;
-    m.arg_count = arg_count;
-    m.args[0] = arg0;
+    m.arg_count = 4;
+
+    /*
+      aml_tiny still passes args as uint64_t scalars.
+      For now:
+      - Arg0 gets first 8 bytes of UUID buffer coerced to int
+      - Arg3 gets first package element
+      This is imperfect, but now Buffer/Package are real and comparable.
+    */
+    m.args[0] = a0 ? a0->ivalue : 0;
     m.args[1] = arg1;
     m.args[2] = arg2;
-    m.args[3] = arg3;
+    m.args[3] = a3 ? ((a3->pkg_count > 0) ? a3->pkg_elems[0] : 0) : 0;
 
     terminal_print("AML exec ");
     terminal_print(name);
@@ -153,6 +154,8 @@ int touchpad_run_dsm(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs r;
     aml_dsm_ctx s;
+    aml_tiny_value uuid_arg;
+    aml_tiny_value pkg_arg;
 
     terminal_set_quiet();
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &r) != 0)
@@ -178,37 +181,68 @@ int touchpad_run_dsm(uint64_t rsdp_phys)
 
     if (r.tcpd_gio0_reg_valid && r.tcpd_gio0_reg_len)
     {
-        run_aml("GIO0._REG",
-                "\\_SB.GIO0",
-                r.tcpd_gio0_reg_body,
-                r.tcpd_gio0_reg_len,
-                &s,
-                2,
-                0x08,
-                1,
-                0,
-                0);
+        aml_tiny_host host = {0};
+        aml_tiny_method m = {0};
+        uint64_t ret = 0;
+
+        host.log = aml_log_cb;
+        host.read_named_int = aml_read_cb;
+        host.write_named_int = aml_write_cb;
+        host.user = &s;
+
+        m.aml = r.tcpd_gio0_reg_body;
+        m.aml_len = r.tcpd_gio0_reg_len;
+        m.scope_prefix = "\\_SB.GIO0";
+        m.arg_count = 2;
+        m.args[0] = 0x08;
+        m.args[1] = 1;
+
+        aml_tiny_exec(&m, &host, &ret);
 
         terminal_print("DSM GABL after _REG: ");
         terminal_print_hex64(s.gabl);
         terminal_print("\n");
     }
 
-    /*
-     * First pass: call trusted TCPD _DSM with rev=1, fn=1.
-     * Arg0 buffer / Arg3 package are not modelled by aml_tiny yet,
-     * so pass 0 placeholders for now and use this to observe method flow.
-     */
+    uuid_arg.type = 4;
+    uuid_arg.ivalue = 0;
+    uuid_arg.name[0] = 0;
+    uuid_arg.buf_len = 16;
+    uuid_arg.pkg_count = 0;
+    /* 3CDFF6F7-4267-4555-AD05-B30A3D8938DE */
+    uuid_arg.buf[0] = 0xF7;
+    uuid_arg.buf[1] = 0xF6;
+    uuid_arg.buf[2] = 0xDF;
+    uuid_arg.buf[3] = 0x3C;
+    uuid_arg.buf[4] = 0x67;
+    uuid_arg.buf[5] = 0x42;
+    uuid_arg.buf[6] = 0x55;
+    uuid_arg.buf[7] = 0x45;
+    uuid_arg.buf[8] = 0xAD;
+    uuid_arg.buf[9] = 0x05;
+    uuid_arg.buf[10] = 0xB3;
+    uuid_arg.buf[11] = 0x0A;
+    uuid_arg.buf[12] = 0x3D;
+    uuid_arg.buf[13] = 0x89;
+    uuid_arg.buf[14] = 0x38;
+    uuid_arg.buf[15] = 0xDE;
+
+    pkg_arg.type = 5;
+    pkg_arg.ivalue = 0;
+    pkg_arg.name[0] = 0;
+    pkg_arg.buf_len = 0;
+    pkg_arg.pkg_count = 1;
+    pkg_arg.pkg_elems[0] = 0;
+
     run_aml("TCPD._DSM(fn=1)",
             "\\_SB",
             r.tcpd_dsm_body,
             r.tcpd_dsm_len,
             &s,
-            4,
-            0, /* UUID buffer placeholder */
-            1, /* revision */
-            1, /* function index */
-            0 /* package placeholder */);
+            &uuid_arg,
+            1,
+            1,
+            &pkg_arg);
 
     terminal_print("DSM final GABL=");
     terminal_print_hex64(s.gabl);
