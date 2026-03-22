@@ -9,20 +9,6 @@ extern "C"
 {
 #endif
 
-    /*
-      Tiny AML executor.
-
-      This is NOT a full AML interpreter.
-      It is intended for very small ACPI control methods such as _PS0/_PS3,
-      where the opcode set is simple and known.
-
-      Supported object/value model:
-      - Integer values only
-      - Named integer objects via callbacks
-      - No heap allocation
-      - No package/buffer/string objects yet
-    */
-
 #define AML_TINY_OK 0
 #define AML_TINY_ERR_BAD_ARG -1
 #define AML_TINY_ERR_EOF -2
@@ -34,6 +20,9 @@ extern "C"
 #define AML_TINY_MAX_NAMESEG 4
 #define AML_TINY_MAX_NAMESTRING 64
 #define AML_TINY_MAX_IF_DEPTH 8
+#define AML_TINY_MAX_BUFFER_BYTES 64
+#define AML_TINY_MAX_PACKAGE_ELEMS 8
+#define AML_TINY_MAX_WHILE_ITERS 16
 
     typedef struct aml_tiny_ctx aml_tiny_ctx;
 
@@ -63,7 +52,7 @@ extern "C"
     {
         const uint8_t *aml;
         uint32_t aml_len;
-        const char *scope_prefix; /* example: "\\_SB.I2C1.TPD0" */
+        const char *scope_prefix;
 
         uint32_t arg_count;
         uint64_t args[7];
@@ -71,9 +60,23 @@ extern "C"
 
     typedef struct
     {
-        uint8_t type;    /* 0 = integer, 1 = name ref, 2 = local ref, 3 = arg ref */
-        uint64_t ivalue; /* integer value OR local/arg index */
+        /*
+          0 = integer
+          1 = name ref
+          2 = local ref
+          3 = arg ref
+          4 = buffer
+          5 = package
+        */
+        uint8_t type;
+        uint64_t ivalue;
         char name[AML_TINY_MAX_NAMESTRING];
+
+        uint32_t buf_len;
+        uint8_t buf[AML_TINY_MAX_BUFFER_BYTES];
+
+        uint32_t pkg_count;
+        uint64_t pkg_elems[AML_TINY_MAX_PACKAGE_ELEMS];
     } aml_tiny_value;
 
     struct aml_tiny_ctx
@@ -92,27 +95,11 @@ extern "C"
         uint64_t locals[8];
     };
 
-    /*
-      Execute AML bytes which should be the *body* of a control method,
-      not the surrounding MethodOp object.
-
-      Example:
-        aml_tiny_method m = {
-            .aml = body_ptr,
-            .aml_len = body_len,
-            .scope_prefix = "\\_SB.I2C1.TPD0"
-        };
-        aml_tiny_exec(&m, &host, &ret);
-    */
     int aml_tiny_exec(
         const aml_tiny_method *method,
         const aml_tiny_host *host,
         uint64_t *out_return_value);
 
-    /*
-      Utility for tracing names in a method body without executing writes.
-      Good for first-pass probing.
-    */
     int aml_tiny_trace_names(
         const aml_tiny_method *method,
         const aml_tiny_host *host);

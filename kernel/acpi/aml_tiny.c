@@ -4,8 +4,6 @@
 #define NULL ((void *)0)
 #endif
 
-/* ---------- small local helpers ---------- */
-
 static uint8_t rd8(const uint8_t *p) { return p[0]; }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24)); }
@@ -149,18 +147,6 @@ static int aml_parse_nameseg(aml_tiny_ctx *ctx, char out4[5])
     return AML_TINY_OK;
 }
 
-/*
-  Very small AML NameString parser.
-
-  Supports:
-  - Root prefix '\'
-  - Parent prefix '^' repeated
-  - SimpleNameSeg
-  - DualNamePrefix 0x2E
-  - MultiNamePrefix 0x2F
-
-  Does not support every AML namespace feature.
-*/
 static int aml_parse_namestring(aml_tiny_ctx *ctx, char *out, uint32_t out_sz)
 {
     uint32_t at = 0;
@@ -183,11 +169,8 @@ static int aml_parse_namestring(aml_tiny_ctx *ctx, char *out, uint32_t out_sz)
     }
     else
     {
-        /* relative to current scope */
         if (ctx->method.scope_prefix && ctx->method.scope_prefix[0])
-        {
             append_str(out, out_sz, &at, ctx->method.scope_prefix);
-        }
     }
 
     while (!aml_eof(ctx, 1) && *ctx->p == '^')
@@ -201,7 +184,7 @@ static int aml_parse_namestring(aml_tiny_ctx *ctx, char *out, uint32_t out_sz)
 
     b = *ctx->p++;
 
-    if (b == 0x2E) /* DualNamePrefix */
+    if (b == 0x2E)
     {
         char seg[5];
         if (at && out[at - 1] != '\\' && out[at - 1] != '^')
@@ -217,7 +200,7 @@ static int aml_parse_namestring(aml_tiny_ctx *ctx, char *out, uint32_t out_sz)
         append_str(out, out_sz, &at, seg);
         return AML_TINY_OK;
     }
-    else if (b == 0x2F) /* MultiNamePrefix */
+    else if (b == 0x2F)
     {
         uint8_t count;
         uint32_t i;
@@ -240,7 +223,7 @@ static int aml_parse_namestring(aml_tiny_ctx *ctx, char *out, uint32_t out_sz)
     else
     {
         char seg[5];
-        ctx->p--; /* unread */
+        ctx->p--;
         if (at && out[at - 1] != '\\' && out[at - 1] != '^')
             copy_char(out, out_sz, &at, '.');
         if (aml_parse_nameseg(ctx, seg) != AML_TINY_OK)
@@ -255,13 +238,13 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
     if (!ctx || !v || !out)
         return AML_TINY_ERR_BAD_ARG;
 
-    if (v->type == 0) /* integer */
+    if (v->type == 0)
     {
         *out = v->ivalue;
         return AML_TINY_OK;
     }
 
-    if (v->type == 1) /* name ref */
+    if (v->type == 1)
     {
         if (!ctx->host.read_named_int)
             return AML_TINY_ERR_NAMESPACE;
@@ -277,21 +260,36 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
         return AML_TINY_OK;
     }
 
-    if (v->type == 2) /* local ref */
+    if (v->type == 2)
     {
         if (v->ivalue >= 8u)
             return AML_TINY_ERR_INTERNAL;
-
         *out = ctx->locals[(uint32_t)v->ivalue];
         return AML_TINY_OK;
     }
 
-    if (v->type == 3) /* arg ref */
+    if (v->type == 3)
     {
         if (v->ivalue >= 7u)
             return AML_TINY_ERR_INTERNAL;
-
         *out = (ctx->method.arg_count > v->ivalue) ? ctx->method.args[(uint32_t)v->ivalue] : 0u;
+        return AML_TINY_OK;
+    }
+
+    if (v->type == 4)
+    {
+        /* for now expose first dword-ish value when coerced to int */
+        uint64_t r = 0;
+        uint32_t i, n = (v->buf_len > 8u) ? 8u : v->buf_len;
+        for (i = 0; i < n; ++i)
+            r |= ((uint64_t)v->buf[i] << (8u * i));
+        *out = r;
+        return AML_TINY_OK;
+    }
+
+    if (v->type == 5)
+    {
+        *out = (v->pkg_count > 0u) ? v->pkg_elems[0] : 0u;
         return AML_TINY_OK;
     }
 
@@ -308,26 +306,24 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
         return AML_TINY_ERR_NAMESPACE;
 
-    if (dst->type == 2) /* local ref */
+    if (dst->type == 2)
     {
         if (dst->ivalue >= 8u)
             return AML_TINY_ERR_INTERNAL;
-
         ctx->locals[(uint32_t)dst->ivalue] = v;
         return AML_TINY_OK;
     }
 
-    if (dst->type == 3) /* arg ref */
+    if (dst->type == 3)
     {
         if (dst->ivalue >= 7u)
             return AML_TINY_ERR_INTERNAL;
-
         if (ctx->method.arg_count > dst->ivalue)
             ctx->method.args[(uint32_t)dst->ivalue] = v;
         return AML_TINY_OK;
     }
 
-    if (dst->type != 1) /* must be name ref from here on */
+    if (dst->type != 1)
         return AML_TINY_ERR_UNSUPPORTED;
 
     if (!ctx->host.write_named_int)
@@ -343,20 +339,114 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     return AML_TINY_OK;
 }
 
-/* ---------- forward decls ---------- */
-
 static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out);
 static int aml_exec_one_term(aml_tiny_ctx *ctx);
 static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit);
-
-/* ---------- evaluator ---------- */
 
 static int aml_eval_namestring_as_ref(aml_tiny_ctx *ctx, aml_tiny_value *out)
 {
     out->type = 1;
     out->ivalue = 0;
     out->name[0] = 0;
+    out->buf_len = 0;
+    out->pkg_count = 0;
     return aml_parse_namestring(ctx, out->name, sizeof(out->name));
+}
+
+static int aml_parse_buffer_object(aml_tiny_ctx *ctx, aml_tiny_value *out)
+{
+    uint32_t pkg_len, pkg_bytes, remain, i;
+    aml_tiny_value lenv;
+    uint64_t declared_len;
+
+    if (aml_pkg_length(ctx, &pkg_len, &pkg_bytes) != AML_TINY_OK)
+        return AML_TINY_ERR_EOF;
+    if (pkg_len < pkg_bytes)
+        return AML_TINY_ERR_PARSE;
+
+    remain = pkg_len - pkg_bytes;
+    if (ctx->p + remain > ctx->end)
+        remain = (uint32_t)(ctx->end - ctx->p);
+
+    if (aml_eval_termarg(ctx, &lenv) != AML_TINY_OK)
+        return AML_TINY_ERR_PARSE;
+    if (aml_value_as_int(ctx, &lenv, &declared_len) != AML_TINY_OK)
+        return AML_TINY_ERR_PARSE;
+
+    out->type = 4;
+    out->ivalue = 0;
+    out->name[0] = 0;
+    out->buf_len = 0;
+    out->pkg_count = 0;
+
+    for (i = 0; i < remain && out->buf_len < AML_TINY_MAX_BUFFER_BYTES; ++i)
+        out->buf[out->buf_len++] = *ctx->p++;
+
+    while (i < remain)
+    {
+        ctx->p++;
+        ++i;
+    }
+
+    (void)declared_len;
+    return AML_TINY_OK;
+}
+
+static int aml_parse_package_object(aml_tiny_ctx *ctx, aml_tiny_value *out, int is_varpkg)
+{
+    uint32_t pkg_len, pkg_bytes, remain;
+    uint8_t count8 = 0;
+    aml_tiny_value countv;
+    uint64_t count64 = 0;
+    const uint8_t *pkg_end;
+    uint32_t i;
+
+    if (aml_pkg_length(ctx, &pkg_len, &pkg_bytes) != AML_TINY_OK)
+        return AML_TINY_ERR_EOF;
+    if (pkg_len < pkg_bytes)
+        return AML_TINY_ERR_PARSE;
+
+    remain = pkg_len - pkg_bytes;
+    if (ctx->p + remain > ctx->end)
+        remain = (uint32_t)(ctx->end - ctx->p);
+
+    if (is_varpkg)
+    {
+        if (aml_eval_termarg(ctx, &countv) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+        if (aml_value_as_int(ctx, &countv, &count64) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+    }
+    else
+    {
+        if (aml_take_u8(ctx, &count8) != AML_TINY_OK)
+            return AML_TINY_ERR_EOF;
+        count64 = count8;
+    }
+
+    pkg_end = ctx->p + remain;
+    if (pkg_end > ctx->end)
+        pkg_end = ctx->end;
+
+    out->type = 5;
+    out->ivalue = 0;
+    out->name[0] = 0;
+    out->buf_len = 0;
+    out->pkg_count = 0;
+
+    for (i = 0; i < (uint32_t)count64 && ctx->p < pkg_end && out->pkg_count < AML_TINY_MAX_PACKAGE_ELEMS; ++i)
+    {
+        aml_tiny_value elem;
+        uint64_t iv = 0;
+        if (aml_eval_termarg(ctx, &elem) != AML_TINY_OK)
+            break;
+        if (aml_value_as_int(ctx, &elem, &iv) != AML_TINY_OK)
+            iv = 0;
+        out->pkg_elems[out->pkg_count++] = iv;
+    }
+
+    ctx->p = pkg_end;
+    return AML_TINY_OK;
 }
 
 static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
@@ -368,34 +458,36 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
     if (aml_eof(ctx, 1))
         return AML_TINY_ERR_EOF;
 
+    out->type = 0;
+    out->ivalue = 0;
+    out->name[0] = 0;
+    out->buf_len = 0;
+    out->pkg_count = 0;
+
     op = *ctx->p;
 
-    /* Integer constants */
-    if (op == 0x00) /* ZeroOp */
+    if (op == 0x00)
     {
         ctx->p++;
         out->type = 0;
         out->ivalue = 0;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
-    if (op == 0x01) /* OneOp */
+    if (op == 0x01)
     {
         ctx->p++;
         out->type = 0;
         out->ivalue = 1;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
-    if (op == 0xFF) /* OnesOp */
+    if (op == 0xFF)
     {
         ctx->p++;
         out->type = 0;
         out->ivalue = ~0ull;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
-    if (op == 0x0A) /* ByteConst */
+    if (op == 0x0A)
     {
         uint8_t v;
         ctx->p++;
@@ -403,10 +495,9 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_EOF;
         out->type = 0;
         out->ivalue = v;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
-    if (op == 0x0B) /* WordConst */
+    if (op == 0x0B)
     {
         uint16_t v;
         ctx->p++;
@@ -414,10 +505,9 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_EOF;
         out->type = 0;
         out->ivalue = v;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
-    if (op == 0x0C) /* DWordConst */
+    if (op == 0x0C)
     {
         uint32_t v;
         ctx->p++;
@@ -425,86 +515,68 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_EOF;
         out->type = 0;
         out->ivalue = v;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    /* Method arguments */
-    if (op == 0x68) /* Arg0Op */
+    if (op == 0x68)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 0u) ? ctx->method.args[0] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 0;
         return AML_TINY_OK;
     }
-
-    if (op == 0x69) /* Arg1Op */
+    if (op == 0x69)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 1u) ? ctx->method.args[1] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 1;
         return AML_TINY_OK;
     }
-
-    if (op == 0x6A) /* Arg2Op */
+    if (op == 0x6A)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 2u) ? ctx->method.args[2] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 2;
         return AML_TINY_OK;
     }
-
-    if (op == 0x6B) /* Arg3Op */
+    if (op == 0x6B)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 3u) ? ctx->method.args[3] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 3;
         return AML_TINY_OK;
     }
-
-    if (op == 0x6C) /* Arg4Op */
+    if (op == 0x6C)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 4u) ? ctx->method.args[4] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 4;
         return AML_TINY_OK;
     }
-
-    if (op == 0x6D) /* Arg5Op */
+    if (op == 0x6D)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 5u) ? ctx->method.args[5] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 5;
         return AML_TINY_OK;
     }
-
-    if (op == 0x6E) /* Arg6Op */
+    if (op == 0x6E)
     {
         ctx->p++;
-        out->type = 0;
-        out->ivalue = (ctx->method.arg_count > 6u) ? ctx->method.args[6] : 0u;
-        out->name[0] = 0;
+        out->type = 3;
+        out->ivalue = 6;
         return AML_TINY_OK;
     }
 
-    /* Method locals */
-    if (op >= 0x60 && op <= 0x67) /* Local0Op .. Local7Op */
+    if (op >= 0x60 && op <= 0x67)
     {
         ctx->p++;
         out->type = 2;
         out->ivalue = (uint64_t)(op - 0x60u);
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    /* Logical / integer ops */
-    if (op == 0x93) /* LEqualOp */
+    if (op == 0x93)
     {
         aml_tiny_value a, b;
         uint64_t av, bv;
@@ -519,11 +591,10 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_NAMESPACE;
         out->type = 0;
         out->ivalue = (av == bv) ? 1ull : 0ull;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    if (op == 0x92) /* LNotOp */
+    if (op == 0x92)
     {
         aml_tiny_value a;
         uint64_t av;
@@ -534,11 +605,10 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_NAMESPACE;
         out->type = 0;
         out->ivalue = av ? 0ull : 1ull;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    if (op == 0x7B) /* AndOp */
+    if (op == 0x7B)
     {
         aml_tiny_value a, b;
         uint64_t av, bv;
@@ -553,11 +623,10 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_NAMESPACE;
         out->type = 0;
         out->ivalue = av & bv;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    if (op == 0x7D) /* OrOp */
+    if (op == 0x7D)
     {
         aml_tiny_value a, b;
         uint64_t av, bv;
@@ -572,78 +641,38 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_NAMESPACE;
         out->type = 0;
         out->ivalue = av | bv;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    /* BufferOp */
     if (op == 0x11)
     {
-        uint32_t body_len;
         ctx->p++;
-
-        /*
-          We do not model Buffer objects fully yet.
-          Skip the package body and treat the buffer value as integer 0.
-        */
-        if (aml_skip_pkg_body(ctx, &body_len) != AML_TINY_OK)
-            return AML_TINY_ERR_EOF;
-
-        out->type = 0;
-        out->ivalue = 0;
-        out->name[0] = 0;
-        return AML_TINY_OK;
+        return aml_parse_buffer_object(ctx, out);
     }
 
-    /* PackageOp */
     if (op == 0x12)
     {
-        uint32_t body_len;
         ctx->p++;
-
-        if (aml_skip_pkg_body(ctx, &body_len) != AML_TINY_OK)
-            return AML_TINY_ERR_EOF;
-
-        out->type = 0;
-        out->ivalue = 0;
-        out->name[0] = 0;
-        return AML_TINY_OK;
+        return aml_parse_package_object(ctx, out, 0);
     }
 
-    /* VarPackageOp */
     if (op == 0x13)
     {
-        uint32_t body_len;
         ctx->p++;
-
-        if (aml_skip_pkg_body(ctx, &body_len) != AML_TINY_OK)
-            return AML_TINY_ERR_EOF;
-
-        out->type = 0;
-        out->ivalue = 0;
-        out->name[0] = 0;
-        return AML_TINY_OK;
+        return aml_parse_package_object(ctx, out, 1);
     }
 
-    /* MethodOp encountered in a context we do not execute directly */
     if (op == 0x14)
     {
         uint32_t body_len;
         ctx->p++;
-
         if (aml_skip_pkg_body(ctx, &body_len) != AML_TINY_OK)
             return AML_TINY_ERR_EOF;
-
         out->type = 0;
         out->ivalue = 0;
-        out->name[0] = 0;
         return AML_TINY_OK;
     }
 
-    /*
-      Otherwise treat as NameString reference.
-      This is a simplification, but useful for tiny control methods.
-    */
     return aml_eval_namestring_as_ref(ctx, out);
 }
 
@@ -657,25 +686,18 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     uint64_t pv;
     int rc;
 
-    /* current byte should be 0xA0 */
     ctx->p++;
 
     rc = aml_pkg_length(ctx, &pkg_len, &pkg_bytes);
     if (rc != AML_TINY_OK)
         return rc;
 
-    /*
-      AML PkgLength includes the bytes of the PkgLength encoding itself.
-      Since ctx->p is already positioned *after* those bytes, the remaining
-      package body is (pkg_len - pkg_bytes) bytes long.
-    */
     pkg_start = ctx->p;
 
     if (pkg_len < pkg_bytes)
         return AML_TINY_ERR_PARSE;
 
     pkg_end = pkg_start + (pkg_len - pkg_bytes);
-
     if (pkg_end > ctx->end)
         pkg_end = ctx->end;
 
@@ -696,7 +718,7 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
             return rc;
         ctx->p = pkg_end;
 
-        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1) /* ElseOp */
+        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1)
         {
             uint32_t else_len;
             uint32_t else_pkg_bytes;
@@ -705,7 +727,6 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
             rc = aml_pkg_length(ctx, &else_len, &else_pkg_bytes);
             if (rc != AML_TINY_OK)
                 return rc;
-
             if (else_len < else_pkg_bytes)
                 return AML_TINY_ERR_PARSE;
 
@@ -719,7 +740,7 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     {
         ctx->p = pkg_end;
 
-        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1) /* ElseOp */
+        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1)
         {
             uint32_t else_len;
             uint32_t else_pkg_bytes;
@@ -729,7 +750,6 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
             rc = aml_pkg_length(ctx, &else_len, &else_pkg_bytes);
             if (rc != AML_TINY_OK)
                 return rc;
-
             if (else_len < else_pkg_bytes)
                 return AML_TINY_ERR_PARSE;
 
@@ -754,7 +774,6 @@ static int aml_exec_store(aml_tiny_ctx *ctx)
     aml_tiny_value src, dst;
     int rc;
 
-    /* current byte should be 0x70 */
     ctx->p++;
 
     rc = aml_eval_termarg(ctx, &src);
@@ -774,7 +793,6 @@ static int aml_exec_return(aml_tiny_ctx *ctx)
     uint64_t iv;
     int rc;
 
-    /* current byte should be 0xA4 */
     ctx->p++;
 
     rc = aml_eval_termarg(ctx, &v);
@@ -796,7 +814,6 @@ static int aml_exec_notify(aml_tiny_ctx *ctx)
     uint64_t iv;
     int rc;
 
-    /* current byte should be 0x86 */
     ctx->p++;
 
     rc = aml_eval_termarg(ctx, &target);
@@ -821,10 +838,8 @@ static int aml_exec_notify(aml_tiny_ctx *ctx)
     if (rc != AML_TINY_OK)
         return rc;
 
-    /* Tiny interpreter: consume Notify and log it, but do not require backend support yet */
     aml_log(ctx, "notify");
     aml_log(ctx, target.name[0] ? target.name : "(non-name target)");
-
     return AML_TINY_OK;
 }
 
@@ -834,15 +849,14 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
     uint32_t pkg_bytes;
     const uint8_t *pkg_start;
     const uint8_t *pkg_end;
+    uint32_t iter = 0;
     int rc;
 
-    /* current byte should be 0xA2 */
     ctx->p++;
 
     rc = aml_pkg_length(ctx, &pkg_len, &pkg_bytes);
     if (rc != AML_TINY_OK)
         return rc;
-
     if (pkg_len < pkg_bytes)
         return AML_TINY_ERR_PARSE;
 
@@ -851,10 +865,36 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
     if (pkg_end > ctx->end)
         pkg_end = ctx->end;
 
-    /*
-      Bootstrapping-friendly behaviour:
-      do not actually iterate, just skip the while body.
-    */
+    while (iter++ < AML_TINY_MAX_WHILE_ITERS)
+    {
+        aml_tiny_value pred;
+        uint64_t pv;
+
+        ctx->p = pkg_start;
+        rc = aml_eval_termarg(ctx, &pred);
+        if (rc != AML_TINY_OK)
+            return rc;
+        rc = aml_value_as_int(ctx, &pred, &pv);
+        if (rc != AML_TINY_OK)
+            return rc;
+
+        if (!pv)
+        {
+            ctx->p = pkg_end;
+            return AML_TINY_OK;
+        }
+
+        rc = aml_exec_term_list(ctx, pkg_end);
+        if (rc == AML_TINY_ERR_EOF)
+            rc = AML_TINY_OK;
+        if (rc != AML_TINY_OK)
+            return rc;
+
+        if (ctx->returned)
+            return AML_TINY_OK;
+    }
+
+    aml_log(ctx, "while iteration cap");
     ctx->p = pkg_end;
     return AML_TINY_OK;
 }
@@ -870,19 +910,15 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
     switch (op)
     {
-    case 0x70: /* StoreOp */
+    case 0x70:
         return aml_exec_store(ctx);
-
-    case 0x86: /* NotifyOp */
+    case 0x86:
         return aml_exec_notify(ctx);
-
-    case 0xA0: /* IfOp */
+    case 0xA0:
         return aml_exec_if_else(ctx);
-
-    case 0xA2: /* WhileOp */
+    case 0xA2:
         return aml_exec_while(ctx);
-
-    case 0xA4: /* ReturnOp */
+    case 0xA4:
         return aml_exec_return(ctx);
 
     default:
@@ -892,13 +928,7 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
         if (rc != AML_TINY_OK)
         {
-            char msg[48];
-            uint8_t bad = *ctx->p;
-            msg[0] = 0;
-
             aml_log(ctx, "term parse fail");
-            (void)bad; /* keep simple for now */
-
             ctx->p++;
             return AML_TINY_OK;
         }
@@ -917,7 +947,6 @@ static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit)
         rc = aml_exec_one_term(ctx);
         if (rc == AML_TINY_ERR_EOF)
             return AML_TINY_OK;
-
         if (rc != AML_TINY_OK)
             return rc;
     }
@@ -928,8 +957,6 @@ static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit)
     return AML_TINY_OK;
 }
 
-/* ---------- public API ---------- */
-
 int aml_tiny_exec(
     const aml_tiny_method *method,
     const aml_tiny_host *host,
@@ -937,6 +964,7 @@ int aml_tiny_exec(
 {
     aml_tiny_ctx ctx;
     int rc;
+    uint32_t i;
 
     if (!method || !method->aml || !host)
         return AML_TINY_ERR_BAD_ARG;
@@ -949,7 +977,7 @@ int aml_tiny_exec(
     ctx.return_value = 0;
     ctx.last_error = AML_TINY_OK;
 
-    for (uint32_t i = 0; i < 8u; ++i)
+    for (i = 0; i < 8u; ++i)
         ctx.locals[i] = 0u;
 
     rc = aml_exec_term_list(&ctx, ctx.end);
@@ -971,6 +999,7 @@ int aml_tiny_trace_names(
 {
     aml_tiny_ctx ctx;
     int rc;
+    uint32_t i;
 
     if (!method || !method->aml || !host)
         return AML_TINY_ERR_BAD_ARG;
@@ -983,7 +1012,7 @@ int aml_tiny_trace_names(
     ctx.return_value = 0;
     ctx.last_error = AML_TINY_OK;
 
-    for (uint32_t i = 0; i < 8u; ++i)
+    for (i = 0; i < 8u; ++i)
         ctx.locals[i] = 0u;
 
     while (ctx.p < ctx.end && !ctx.returned)
