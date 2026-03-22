@@ -12,4 +12,4 @@ build/
 # Ignore specific files
 efi_main.S
 main.c
-README.md
+cmds.md
