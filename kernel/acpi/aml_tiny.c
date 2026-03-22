@@ -607,46 +607,54 @@ static int aml_eval_namestring_as_ref(aml_tiny_ctx *ctx, aml_tiny_value *out)
 
 static int aml_parse_buffer_object(aml_tiny_ctx *ctx, aml_tiny_value *out)
 {
-    uint32_t pkg_len, pkg_bytes, remain, i;
+    uint32_t pkg_len, pkg_bytes;
     aml_tiny_value lenv;
-    uint64_t declared_len;
+    uint64_t declared_len = 0;
+    const uint8_t *pkg_end;
+    uint32_t remain, i;
 
     if (aml_pkg_length(ctx, &pkg_len, &pkg_bytes) != AML_TINY_OK)
         return AML_TINY_ERR_EOF;
     if (pkg_len < pkg_bytes)
         return AML_TINY_ERR_PARSE;
 
-    remain = pkg_len - pkg_bytes;
-    if (ctx->p + remain > ctx->end)
-        remain = (uint32_t)(ctx->end - ctx->p);
+    pkg_end = ctx->p + (pkg_len - pkg_bytes);
+    if (pkg_end > ctx->end)
+        pkg_end = ctx->end;
 
     if (aml_eval_termarg(ctx, &lenv) != AML_TINY_OK)
         return AML_TINY_ERR_PARSE;
     if (aml_value_as_int(ctx, &lenv, &declared_len) != AML_TINY_OK)
         return AML_TINY_ERR_PARSE;
 
+    aml_value_zero(out);
     out->type = 4;
-    out->ivalue = 0;
-    out->name[0] = 0;
-    out->buf_len = 0;
-    out->pkg_count = 0;
 
-    for (i = 0; i < remain && out->buf_len < AML_TINY_MAX_BUFFER_BYTES; ++i)
-        out->buf[out->buf_len++] = *ctx->p++;
+    remain = (uint32_t)(pkg_end - ctx->p);
 
-    while (i < remain)
-    {
-        ctx->p++;
-        ++i;
-    }
+    /*
+     * Copy only the actual initializer bytes left inside this BufferOp package.
+     * Do NOT copy past pkg_end.
+     */
+    out->buf_len = (uint32_t)declared_len;
+    if (out->buf_len > AML_TINY_MAX_BUFFER_BYTES)
+        out->buf_len = AML_TINY_MAX_BUFFER_BYTES;
 
-    (void)declared_len;
+    for (i = 0; i < out->buf_len; ++i)
+        out->buf[i] = 0;
+
+    for (i = 0; i < remain && i < out->buf_len; ++i)
+        out->buf[i] = *ctx->p++;
+
+    /* skip any trailing bytes still inside this package */
+    ctx->p = pkg_end;
+
     return AML_TINY_OK;
 }
 
 static int aml_parse_package_object(aml_tiny_ctx *ctx, aml_tiny_value *out, int is_varpkg)
 {
-    uint32_t pkg_len, pkg_bytes, remain;
+    uint32_t pkg_len, pkg_bytes;
     uint8_t count8 = 0;
     aml_tiny_value countv;
     uint64_t count64 = 0;
@@ -658,9 +666,9 @@ static int aml_parse_package_object(aml_tiny_ctx *ctx, aml_tiny_value *out, int 
     if (pkg_len < pkg_bytes)
         return AML_TINY_ERR_PARSE;
 
-    remain = pkg_len - pkg_bytes;
-    if (ctx->p + remain > ctx->end)
-        remain = (uint32_t)(ctx->end - ctx->p);
+    pkg_end = ctx->p + (pkg_len - pkg_bytes);
+    if (pkg_end > ctx->end)
+        pkg_end = ctx->end;
 
     if (is_varpkg)
     {
@@ -676,24 +684,20 @@ static int aml_parse_package_object(aml_tiny_ctx *ctx, aml_tiny_value *out, int 
         count64 = count8;
     }
 
-    pkg_end = ctx->p + remain;
-    if (pkg_end > ctx->end)
-        pkg_end = ctx->end;
-
+    aml_value_zero(out);
     out->type = 5;
-    out->ivalue = 0;
-    out->name[0] = 0;
-    out->buf_len = 0;
-    out->pkg_count = 0;
 
     for (i = 0; i < (uint32_t)count64 && ctx->p < pkg_end && out->pkg_count < AML_TINY_MAX_PACKAGE_ELEMS; ++i)
     {
         aml_tiny_value elem;
         uint64_t iv = 0;
+
         if (aml_eval_termarg(ctx, &elem) != AML_TINY_OK)
             break;
+
         if (aml_value_as_int(ctx, &elem, &iv) != AML_TINY_OK)
             iv = 0;
+
         out->pkg_elems[out->pkg_count++] = iv;
     }
 
@@ -1212,6 +1216,12 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
         if (rc != AML_TINY_OK)
         {
+            if (*ctx->p == 0x00)
+            {
+                ctx->p++;
+                return AML_TINY_OK;
+            }
+
             aml_log(ctx, "term parse fail");
             aml_log_badop(ctx, *ctx->p);
             ctx->p++;
