@@ -27,19 +27,47 @@ static void aml_log_cb(void *user, const char *msg)
     terminal_print("\n");
 }
 
+static void tp_delay(volatile uint32_t n)
+{
+    while (n--)
+        __asm__ volatile("" ::: "memory");
+}
+
 static void drive_touchpad_line(aml_gpio_ctx *s, uint64_t value)
 {
     if (!s || !s->gabl)
         return;
 
     gpio_set_direction(s->gpio_pin, GPIO_DIR_OUTPUT);
-    gpio_write(s->gpio_pin, value ? GPIO_VALUE_HIGH : GPIO_VALUE_LOW);
 
-    terminal_print("AML drive GPIO pin ");
-    terminal_print_hex32(s->gpio_pin);
-    terminal_print(" <- ");
-    terminal_print_hex64(value);
-    terminal_print("\n");
+    /*
+     * Current evidence says a steady HIGH is not enough.
+     * So when AML asks for 1, generate a rising-edge style wake:
+     *   drive low briefly, then high.
+     *
+     * When AML asks for 0, just drive low.
+     */
+    if (value)
+    {
+        gpio_write(s->gpio_pin, GPIO_VALUE_LOW);
+        tp_delay(300000);
+
+        gpio_write(s->gpio_pin, GPIO_VALUE_HIGH);
+        tp_delay(1500000);
+
+        terminal_print("AML kick GPIO pin ");
+        terminal_print_hex32(s->gpio_pin);
+        terminal_print(" LOW->HIGH\n");
+    }
+    else
+    {
+        gpio_write(s->gpio_pin, GPIO_VALUE_LOW);
+        tp_delay(300000);
+
+        terminal_print("AML drive GPIO pin ");
+        terminal_print_hex32(s->gpio_pin);
+        terminal_print(" <- 0\n");
+    }
 }
 
 static int aml_write_cb(void *user, const char *path, uint64_t value)
@@ -222,6 +250,12 @@ int touchpad_run_ps0(uint64_t rsdp_phys)
             0,
             0,
             0);
+
+    if (s.gabl && s.lidb)
+    {
+        terminal_print("Post-PS0 kick\n");
+        drive_touchpad_line(&s, 1);
+    }
 
     terminal_print("AML final GABL=");
     terminal_print_hex64(s.gabl);
