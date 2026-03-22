@@ -85,6 +85,13 @@ extern "C"
         aml_tiny_value typed_args[7];
     } aml_tiny_method;
 
+    typedef struct
+    {
+        uint8_t used;
+        char name[AML_TINY_MAX_NAMESTRING];
+        aml_tiny_value value;
+    } aml_tiny_named_obj;
+
     struct aml_tiny_ctx
     {
         aml_tiny_host host;
@@ -99,6 +106,7 @@ extern "C"
         int last_error;
 
         aml_tiny_value locals[8];
+        aml_tiny_named_obj named_objs[8];
     };
 
     int aml_tiny_exec(

@@ -192,6 +192,73 @@ static void aml_value_copy(aml_tiny_value *dst, const aml_tiny_value *src)
         dst->pkg_elems[i] = src->pkg_elems[i];
 }
 
+static int aml_str_eq(const char *a, const char *b)
+{
+    uint32_t i = 0;
+
+    if (!a || !b)
+        return 0;
+
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i])
+            return 0;
+        ++i;
+    }
+
+    return a[i] == 0 && b[i] == 0;
+}
+
+static aml_tiny_named_obj *aml_find_named_obj(aml_tiny_ctx *ctx, const char *name)
+{
+    uint32_t i;
+
+    if (!ctx || !name)
+        return NULL;
+
+    for (i = 0; i < 8u; ++i)
+    {
+        if (ctx->named_objs[i].used && aml_str_eq(ctx->named_objs[i].name, name))
+            return &ctx->named_objs[i];
+    }
+
+    return NULL;
+}
+
+static aml_tiny_named_obj *aml_get_or_create_named_obj(aml_tiny_ctx *ctx, const char *name)
+{
+    uint32_t i;
+    aml_tiny_named_obj *slot;
+
+    slot = aml_find_named_obj(ctx, name);
+    if (slot)
+        return slot;
+
+    if (!ctx || !name)
+        return NULL;
+
+    for (i = 0; i < 8u; ++i)
+    {
+        if (!ctx->named_objs[i].used)
+        {
+            uint32_t j = 0;
+            ctx->named_objs[i].used = 1;
+
+            while (name[j] && j + 1u < AML_TINY_MAX_NAMESTRING)
+            {
+                ctx->named_objs[i].name[j] = name[j];
+                ++j;
+            }
+            ctx->named_objs[i].name[j] = 0;
+
+            aml_value_zero(&ctx->named_objs[i].value);
+            return &ctx->named_objs[i];
+        }
+    }
+
+    return NULL;
+}
+
 static int aml_parse_nameseg(aml_tiny_ctx *ctx, char out4[5])
 {
     uint32_t i;
@@ -309,6 +376,12 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
 
     if (v->type == 1)
     {
+        {
+            aml_tiny_named_obj *obj = aml_find_named_obj(ctx, v->name);
+            if (obj)
+                return aml_value_as_int(ctx, &obj->value, out);
+        }
+
         if (!ctx->host.read_named_int)
             return AML_TINY_ERR_NAMESPACE;
 
@@ -494,6 +567,17 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     if (dst->type != 1)
         return AML_TINY_ERR_UNSUPPORTED;
 
+    /* Only keep method-local temp names locally */
+    if (dst->name[0] != '\\')
+    {
+        aml_tiny_named_obj *obj = aml_get_or_create_named_obj(ctx, dst->name);
+        if (obj)
+        {
+            aml_value_copy(&obj->value, src);
+            return AML_TINY_OK;
+        }
+    }
+
     if (!ctx->host.write_named_int)
         return AML_TINY_ERR_NAMESPACE;
 
@@ -614,6 +698,33 @@ static int aml_parse_package_object(aml_tiny_ctx *ctx, aml_tiny_value *out, int 
     }
 
     ctx->p = pkg_end;
+    return AML_TINY_OK;
+}
+
+static int aml_exec_nameop(aml_tiny_ctx *ctx, aml_tiny_value *out)
+{
+    aml_tiny_value name_ref;
+    aml_tiny_value init_val;
+    aml_tiny_named_obj *obj;
+    int rc;
+
+    ctx->p++; /* consume 0x08 */
+
+    rc = aml_eval_namestring_as_ref(ctx, &name_ref);
+    if (rc != AML_TINY_OK)
+        return rc;
+
+    rc = aml_eval_termarg(ctx, &init_val);
+    if (rc != AML_TINY_OK)
+        return rc;
+
+    obj = aml_get_or_create_named_obj(ctx, name_ref.name);
+    if (!obj)
+        return AML_TINY_ERR_INTERNAL;
+
+    aml_value_copy(&obj->value, &init_val);
+
+    aml_value_copy(out, &name_ref);
     return AML_TINY_OK;
 }
 
@@ -810,6 +921,11 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
         out->type = 0;
         out->ivalue = av | bv;
         return AML_TINY_OK;
+    }
+
+    if (op == 0x08)
+    {
+        return aml_exec_nameop(ctx, out);
     }
 
     if (op == 0x11)
@@ -1163,6 +1279,13 @@ int aml_tiny_exec(
     for (i = 0; i < 8u; ++i)
         aml_value_zero(&ctx.locals[i]);
 
+    for (i = 0; i < 8u; ++i)
+    {
+        ctx.named_objs[i].used = 0;
+        ctx.named_objs[i].name[0] = 0;
+        aml_value_zero(&ctx.named_objs[i].value);
+    }
+
     rc = aml_exec_term_list(&ctx, ctx.end);
     if (rc != AML_TINY_OK)
     {
@@ -1197,6 +1320,13 @@ int aml_tiny_trace_names(
 
     for (i = 0; i < 8u; ++i)
         aml_value_zero(&ctx.locals[i]);
+
+    for (i = 0; i < 8u; ++i)
+    {
+        ctx.named_objs[i].used = 0;
+        ctx.named_objs[i].name[0] = 0;
+        aml_value_zero(&ctx.named_objs[i].value);
+    }
 
     while (ctx.p < ctx.end && !ctx.returned)
     {
