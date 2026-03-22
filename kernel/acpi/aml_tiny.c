@@ -4,6 +4,8 @@
 #define NULL ((void *)0)
 #endif
 
+#define AML_TINY_RC_BREAK 0x7001
+
 static uint8_t rd8(const uint8_t *p) { return p[0]; }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24)); }
@@ -1103,6 +1105,30 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
         return AML_TINY_OK;
     }
 
+    if (op == 0x0D) /* StringPrefix */
+    {
+        uint32_t i = 0;
+
+        ctx->p++; /* skip prefix */
+
+        aml_value_zero(out);
+        out->type = 4; /* keep it simple: represent strings as byte buffers */
+
+        while (!aml_eof(ctx, 1) && *ctx->p != 0)
+        {
+            if (out->buf_len < AML_TINY_MAX_BUFFER_BYTES)
+                out->buf[out->buf_len++] = *ctx->p;
+            ctx->p++;
+            ++i;
+        }
+
+        if (aml_eof(ctx, 1))
+            return AML_TINY_ERR_EOF;
+
+        ctx->p++; /* consume trailing NUL */
+        return AML_TINY_OK;
+    }
+
     return aml_eval_namestring_as_ref(ctx, out);
 }
 
@@ -1275,38 +1301,50 @@ static int aml_exec_notify(aml_tiny_ctx *ctx)
 
 static int aml_exec_while(aml_tiny_ctx *ctx)
 {
-    uint32_t pkg_len;
-    uint32_t pkg_bytes;
+    uint32_t pkg_len, pkg_bytes;
     const uint8_t *pkg_start;
     const uint8_t *pkg_end;
-    uint32_t iter = 0;
+    const uint8_t *pred_start;
+    const uint8_t *body_start;
+    aml_tiny_value pred;
+    uint64_t pv;
+    uint32_t iter;
     int rc;
 
-    ctx->p++;
+    ctx->p++; /* skip WhileOp */
 
     rc = aml_pkg_length(ctx, &pkg_len, &pkg_bytes);
     if (rc != AML_TINY_OK)
         return rc;
+
+    pkg_start = ctx->p;
     if (pkg_len < pkg_bytes)
         return AML_TINY_ERR_PARSE;
 
-    pkg_start = ctx->p;
     pkg_end = pkg_start + (pkg_len - pkg_bytes);
     if (pkg_end > ctx->end)
         pkg_end = ctx->end;
 
-    while (iter++ < AML_TINY_MAX_WHILE_ITERS)
-    {
-        aml_tiny_value pred;
-        uint64_t pv;
+    /* parse once to discover where predicate ends and body begins */
+    pred_start = ctx->p;
+    rc = aml_eval_termarg(ctx, &pred);
+    if (rc != AML_TINY_OK)
+        return rc;
+    body_start = ctx->p;
 
-        ctx->p = pkg_start;
+    for (iter = 0; iter < 256u; ++iter)
+    {
+        ctx->p = pred_start;
+
         rc = aml_eval_termarg(ctx, &pred);
         if (rc != AML_TINY_OK)
             return rc;
+
         rc = aml_value_as_int(ctx, &pred, &pv);
         if (rc != AML_TINY_OK)
             return rc;
+
+        body_start = ctx->p;
 
         if (!pv)
         {
@@ -1314,14 +1352,20 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
             return AML_TINY_OK;
         }
 
+        ctx->p = body_start;
+
         rc = aml_exec_term_list(ctx, pkg_end);
+        if (rc == AML_TINY_RC_BREAK)
+        {
+            ctx->p = pkg_end;
+            return AML_TINY_OK;
+        }
+
         if (rc == AML_TINY_ERR_EOF)
             rc = AML_TINY_OK;
+
         if (rc != AML_TINY_OK)
             return rc;
-
-        if (ctx->returned)
-            return AML_TINY_OK;
     }
 
     aml_log(ctx, "while iteration cap");
@@ -1337,6 +1381,12 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
         return AML_TINY_ERR_EOF;
 
     op = *ctx->p;
+
+    if (op == 0xA5) /* BreakOp */
+    {
+        ctx->p++;
+        return AML_TINY_RC_BREAK;
+    }
 
     switch (op)
     {
@@ -1382,8 +1432,10 @@ static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit)
     while (ctx->p < end_limit && !ctx->returned)
     {
         rc = aml_exec_one_term(ctx);
-        if (rc == AML_TINY_ERR_EOF)
-            return AML_TINY_OK;
+
+        if (rc == AML_TINY_RC_BREAK)
+            return rc;
+
         if (rc != AML_TINY_OK)
             return rc;
     }
