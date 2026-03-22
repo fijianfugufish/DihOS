@@ -27,6 +27,21 @@ static void aml_log_cb(void *user, const char *msg)
     terminal_print("\n");
 }
 
+static void drive_touchpad_line(aml_gpio_ctx *s, uint64_t value)
+{
+    if (!s || !s->gabl)
+        return;
+
+    gpio_set_direction(s->gpio_pin, GPIO_DIR_OUTPUT);
+    gpio_write(s->gpio_pin, value ? GPIO_VALUE_HIGH : GPIO_VALUE_LOW);
+
+    terminal_print("AML drive GPIO pin ");
+    terminal_print_hex32(s->gpio_pin);
+    terminal_print(" <- ");
+    terminal_print_hex64(value);
+    terminal_print("\n");
+}
+
 static int aml_write_cb(void *user, const char *path, uint64_t value)
 {
     aml_gpio_ctx *s = (aml_gpio_ctx *)user;
@@ -43,21 +58,23 @@ static int aml_write_cb(void *user, const char *path, uint64_t value)
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
-    {
-        s->lidb = value;
-        return 0;
-    }
-
     if (path_eq(path, "\\_SB.GIO0.LIDR") || path_eq(path, "\\_SB_.GIO0.LIDR"))
     {
         s->lidr = value;
+        drive_touchpad_line(s, value);
+        return 0;
+    }
 
-        if (s->gabl)
-        {
-            gpio_set_direction(s->gpio_pin, GPIO_DIR_OUTPUT);
-            gpio_write(s->gpio_pin, value ? GPIO_VALUE_HIGH : GPIO_VALUE_LOW);
-        }
+    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
+    {
+        s->lidb = value;
+
+        /*
+         * In this firmware path _PS0 does:
+         *   Store(GIO0.LIDR, LID0.LIDB)
+         * So mirror that write to the real line too.
+         */
+        drive_touchpad_line(s, value);
         return 0;
     }
 
@@ -71,21 +88,25 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
     if (!s || !path || !out)
         return -1;
 
+    terminal_print("AML read ");
+    terminal_print(path);
+    terminal_print("\n");
+
     if (path_eq(path, "\\_SB.GIO0.GABL") || path_eq(path, "\\_SB_.GIO0.GABL"))
     {
         *out = s->gabl;
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
-    {
-        *out = s->lidb;
-        return 0;
-    }
-
     if (path_eq(path, "\\_SB.GIO0.LIDR") || path_eq(path, "\\_SB_.GIO0.LIDR"))
     {
         *out = s->lidr;
+        return 0;
+    }
+
+    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
+    {
+        *out = s->lidb;
         return 0;
     }
 
@@ -99,7 +120,7 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
     return 0;
 }
 
-static int run_one(const uint8_t *body, uint32_t len, aml_gpio_ctx *state)
+static int run_one(const char *name, const uint8_t *body, uint32_t len, aml_gpio_ctx *state)
 {
     aml_tiny_host host = {0};
     aml_tiny_method m = {0};
@@ -114,6 +135,12 @@ static int run_one(const uint8_t *body, uint32_t len, aml_gpio_ctx *state)
     m.aml = body;
     m.aml_len = len;
     m.scope_prefix = "\\_SB";
+
+    terminal_print("AML exec ");
+    terminal_print(name);
+    terminal_print(" len=");
+    terminal_print_hex32(len);
+    terminal_print("\n");
 
     rc = aml_tiny_exec(&m, &host, &ret);
 
@@ -132,14 +159,12 @@ int touchpad_run_ps0(uint64_t rsdp_phys)
     aml_gpio_ctx s;
 
     terminal_set_quiet();
-
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &r) != 0)
     {
         terminal_set_loud();
         terminal_error("PS0: ACPI parse fail\n");
         return -1;
     }
-
     terminal_set_loud();
 
     if (!r.tcpd_ps0_valid || r.tcpd_ps0_len == 0)
@@ -150,16 +175,19 @@ int touchpad_run_ps0(uint64_t rsdp_phys)
 
     s.gpio_pin = (uint32_t)r.tcpd_gpio_pin;
     s.gabl = 0;
-    s.lidr = 0;
-    s.lidb = 1;
-    s.lids = 0;
+    s.lidb = 0;
+    s.lidr = 1; /* key change */
+    s.lids = 0; /* keep LEqual(LIDS, Zero) true */
 
     terminal_print("PS0: executing...\n");
 
     if (r.tcpd_gio0_reg_valid && r.tcpd_gio0_reg_len)
-        run_one(r.tcpd_gio0_reg_body, r.tcpd_gio0_reg_len, &s);
+        run_one("GIO0._REG", r.tcpd_gio0_reg_body, r.tcpd_gio0_reg_len, &s);
 
-    run_one(r.tcpd_ps0_body, r.tcpd_ps0_len, &s);
+    if (r.tcpd_ps3_valid && r.tcpd_ps3_len)
+        run_one("_PS3", r.tcpd_ps3_body, r.tcpd_ps3_len, &s);
+
+    run_one("_PS0", r.tcpd_ps0_body, r.tcpd_ps0_len, &s);
 
     terminal_print("AML final GABL=");
     terminal_print_hex64(s.gabl);

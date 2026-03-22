@@ -892,12 +892,13 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
         if (rc != AML_TINY_OK)
         {
-            /*
-              Bootstrapping-friendly resync:
-              if we cannot parse this byte as a term, skip one byte and keep
-              going instead of aborting the whole AML method.
-            */
+            char msg[48];
+            uint8_t bad = *ctx->p;
+            msg[0] = 0;
+
             aml_log(ctx, "term parse fail");
+            (void)bad; /* keep simple for now */
+
             ctx->p++;
             return AML_TINY_OK;
         }
