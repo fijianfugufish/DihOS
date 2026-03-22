@@ -44,11 +44,16 @@ int touchpad_try_wake_from_acpi(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs r;
 
+    terminal_set_quiet();
+
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &r) != 0)
     {
+        terminal_set_loud();
         terminal_error("touchpad: ACPI parse failed\n");
         return -1;
     }
+
+    terminal_set_loud();
 
     if (!r.have_tcpd)
     {
