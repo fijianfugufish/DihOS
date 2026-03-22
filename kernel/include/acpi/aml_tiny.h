@@ -50,16 +50,6 @@ extern "C"
 
     typedef struct
     {
-        const uint8_t *aml;
-        uint32_t aml_len;
-        const char *scope_prefix;
-
-        uint32_t arg_count;
-        uint64_t args[7];
-    } aml_tiny_method;
-
-    typedef struct
-    {
         /*
           0 = integer
           1 = name ref
@@ -78,6 +68,22 @@ extern "C"
         uint32_t pkg_count;
         uint64_t pkg_elems[AML_TINY_MAX_PACKAGE_ELEMS];
     } aml_tiny_value;
+
+    typedef struct
+    {
+        const uint8_t *aml;
+        uint32_t aml_len;
+        const char *scope_prefix;
+
+        uint32_t arg_count;
+
+        /* legacy scalar args */
+        uint64_t args[7];
+
+        /* new typed args */
+        uint8_t use_typed_args;
+        aml_tiny_value typed_args[7];
+    } aml_tiny_method;
 
     struct aml_tiny_ctx
     {

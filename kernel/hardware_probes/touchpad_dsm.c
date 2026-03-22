@@ -120,18 +120,29 @@ static int run_aml(const char *name,
     m.aml_len = len;
     m.scope_prefix = scope;
     m.arg_count = 4;
+    m.use_typed_args = 1;
 
-    /*
-      aml_tiny still passes args as uint64_t scalars.
-      For now:
-      - Arg0 gets first 8 bytes of UUID buffer coerced to int
-      - Arg3 gets first package element
-      This is imperfect, but now Buffer/Package are real and comparable.
-    */
-    m.args[0] = a0 ? a0->ivalue : 0;
+    /* keep legacy scalars populated too */
+    m.args[0] = 0;
     m.args[1] = arg1;
     m.args[2] = arg2;
-    m.args[3] = a3 ? ((a3->pkg_count > 0) ? a3->pkg_elems[0] : 0) : 0;
+    m.args[3] = 0;
+
+    m.typed_args[0] = *a0;
+
+    m.typed_args[1].type = 0;
+    m.typed_args[1].ivalue = arg1;
+    m.typed_args[1].name[0] = 0;
+    m.typed_args[1].buf_len = 0;
+    m.typed_args[1].pkg_count = 0;
+
+    m.typed_args[2].type = 0;
+    m.typed_args[2].ivalue = arg2;
+    m.typed_args[2].name[0] = 0;
+    m.typed_args[2].buf_len = 0;
+    m.typed_args[2].pkg_count = 0;
+
+    m.typed_args[3] = *a3;
 
     terminal_print("AML exec ");
     terminal_print(name);
@@ -203,6 +214,9 @@ int touchpad_run_dsm(uint64_t rsdp_phys)
         terminal_print_hex64(s.gabl);
         terminal_print("\n");
     }
+
+    __builtin_memset(&uuid_arg, 0, sizeof(uuid_arg));
+    __builtin_memset(&pkg_arg, 0, sizeof(pkg_arg));
 
     uuid_arg.type = 4;
     uuid_arg.ivalue = 0;

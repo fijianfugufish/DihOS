@@ -270,9 +270,61 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
 
     if (v->type == 3)
     {
+        const aml_tiny_value *av;
+
         if (v->ivalue >= 7u)
             return AML_TINY_ERR_INTERNAL;
-        *out = (ctx->method.arg_count > v->ivalue) ? ctx->method.args[(uint32_t)v->ivalue] : 0u;
+
+        if (ctx->method.arg_count <= v->ivalue)
+        {
+            *out = 0;
+            return AML_TINY_OK;
+        }
+
+        if (!ctx->method.use_typed_args)
+        {
+            *out = ctx->method.args[(uint32_t)v->ivalue];
+            return AML_TINY_OK;
+        }
+
+        av = &ctx->method.typed_args[(uint32_t)v->ivalue];
+
+        if (av->type == 0)
+        {
+            *out = av->ivalue;
+            return AML_TINY_OK;
+        }
+
+        if (av->type == 4)
+        {
+            uint64_t r = 0;
+            uint32_t i, n = (av->buf_len > 8u) ? 8u : av->buf_len;
+            for (i = 0; i < n; ++i)
+                r |= ((uint64_t)av->buf[i] << (8u * i));
+            *out = r;
+            return AML_TINY_OK;
+        }
+
+        if (av->type == 5)
+        {
+            *out = (av->pkg_count > 0u) ? av->pkg_elems[0] : 0u;
+            return AML_TINY_OK;
+        }
+
+        if (av->type == 1)
+        {
+            if (!ctx->host.read_named_int)
+                return AML_TINY_ERR_NAMESPACE;
+
+            if (ctx->host.read_named_int(ctx->host.user, av->name, out) != 0)
+            {
+                *out = 0;
+                return AML_TINY_OK;
+            }
+            return AML_TINY_OK;
+        }
+
+        *out = 0;
         return AML_TINY_OK;
     }
 
@@ -318,8 +370,23 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     {
         if (dst->ivalue >= 7u)
             return AML_TINY_ERR_INTERNAL;
+
         if (ctx->method.arg_count > dst->ivalue)
-            ctx->method.args[(uint32_t)dst->ivalue] = v;
+        {
+            if (ctx->method.use_typed_args)
+            {
+                aml_tiny_value *av = &ctx->method.typed_args[(uint32_t)dst->ivalue];
+                av->type = 0;
+                av->ivalue = v;
+                av->name[0] = 0;
+                av->buf_len = 0;
+                av->pkg_count = 0;
+            }
+            else
+            {
+                ctx->method.args[(uint32_t)dst->ivalue] = v;
+            }
+        }
         return AML_TINY_OK;
     }
 
@@ -971,6 +1038,20 @@ int aml_tiny_exec(
 
     ctx.host = *host;
     ctx.method = *method;
+
+    if (!ctx.method.use_typed_args)
+    {
+        uint32_t i;
+        for (i = 0; i < 7u; ++i)
+        {
+            ctx.method.typed_args[i].type = 0;
+            ctx.method.typed_args[i].ivalue = ctx.method.args[i];
+            ctx.method.typed_args[i].name[0] = 0;
+            ctx.method.typed_args[i].buf_len = 0;
+            ctx.method.typed_args[i].pkg_count = 0;
+        }
+    }
+
     ctx.p = method->aml;
     ctx.end = method->aml + method->aml_len;
     ctx.returned = 0;
