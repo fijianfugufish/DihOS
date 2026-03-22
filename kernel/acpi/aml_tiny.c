@@ -14,6 +14,27 @@ static void aml_log(aml_tiny_ctx *ctx, const char *msg)
         ctx->host.log(ctx->host.user, msg);
 }
 
+static void aml_log_badop(aml_tiny_ctx *ctx, uint8_t op)
+{
+    char msg[32];
+    const char hex[] = "0123456789ABCDEF";
+
+    msg[0] = 'b';
+    msg[1] = 'a';
+    msg[2] = 'd';
+    msg[3] = ' ';
+    msg[4] = 'o';
+    msg[5] = 'p';
+    msg[6] = ' ';
+    msg[7] = '0';
+    msg[8] = 'x';
+    msg[9] = hex[(op >> 4) & 0xF];
+    msg[10] = hex[op & 0xF];
+    msg[11] = 0;
+
+    aml_log(ctx, msg);
+}
+
 static int aml_eof(aml_tiny_ctx *ctx, uint32_t n)
 {
     if (!ctx || !ctx->p || !ctx->end)
@@ -127,6 +148,48 @@ static void append_str(char *dst, uint32_t dst_sz, uint32_t *at, const char *src
         copy_char(dst, dst_sz, at, *src);
         src++;
     }
+}
+
+static void aml_value_zero(aml_tiny_value *v)
+{
+    uint32_t i;
+
+    if (!v)
+        return;
+
+    v->type = 0;
+    v->ivalue = 0;
+    v->name[0] = 0;
+    v->buf_len = 0;
+    v->pkg_count = 0;
+
+    for (i = 0; i < AML_TINY_MAX_BUFFER_BYTES; ++i)
+        v->buf[i] = 0;
+
+    for (i = 0; i < AML_TINY_MAX_PACKAGE_ELEMS; ++i)
+        v->pkg_elems[i] = 0;
+}
+
+static void aml_value_copy(aml_tiny_value *dst, const aml_tiny_value *src)
+{
+    uint32_t i;
+
+    if (!dst || !src)
+        return;
+
+    dst->type = src->type;
+    dst->ivalue = src->ivalue;
+
+    for (i = 0; i < AML_TINY_MAX_NAMESTRING; ++i)
+        dst->name[i] = src->name[i];
+
+    dst->buf_len = src->buf_len;
+    for (i = 0; i < AML_TINY_MAX_BUFFER_BYTES; ++i)
+        dst->buf[i] = src->buf[i];
+
+    dst->pkg_count = src->pkg_count;
+    for (i = 0; i < AML_TINY_MAX_PACKAGE_ELEMS; ++i)
+        dst->pkg_elems[i] = src->pkg_elems[i];
 }
 
 static int aml_parse_nameseg(aml_tiny_ctx *ctx, char out4[5])
@@ -262,9 +325,50 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
 
     if (v->type == 2)
     {
+        const aml_tiny_value *lv;
+
         if (v->ivalue >= 8u)
             return AML_TINY_ERR_INTERNAL;
-        *out = ctx->locals[(uint32_t)v->ivalue];
+
+        lv = &ctx->locals[(uint32_t)v->ivalue];
+
+        if (lv->type == 0)
+        {
+            *out = lv->ivalue;
+            return AML_TINY_OK;
+        }
+
+        if (lv->type == 4)
+        {
+            uint64_t r = 0;
+            uint32_t i, n = (lv->buf_len > 8u) ? 8u : lv->buf_len;
+            for (i = 0; i < n; ++i)
+                r |= ((uint64_t)lv->buf[i] << (8u * i));
+            *out = r;
+            return AML_TINY_OK;
+        }
+
+        if (lv->type == 5)
+        {
+            *out = (lv->pkg_count > 0u) ? lv->pkg_elems[0] : 0u;
+            return AML_TINY_OK;
+        }
+
+        if (lv->type == 1)
+        {
+            if (!ctx->host.read_named_int)
+                return AML_TINY_ERR_NAMESPACE;
+
+            if (ctx->host.read_named_int(ctx->host.user, lv->name, out) != 0)
+            {
+                *out = 0;
+                return AML_TINY_OK;
+            }
+
+            return AML_TINY_OK;
+        }
+
+        *out = 0;
         return AML_TINY_OK;
     }
 
@@ -362,7 +466,8 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     {
         if (dst->ivalue >= 8u)
             return AML_TINY_ERR_INTERNAL;
-        ctx->locals[(uint32_t)dst->ivalue] = v;
+
+        aml_value_copy(&ctx->locals[(uint32_t)dst->ivalue], src);
         return AML_TINY_OK;
     }
 
@@ -376,11 +481,7 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
             if (ctx->method.use_typed_args)
             {
                 aml_tiny_value *av = &ctx->method.typed_args[(uint32_t)dst->ivalue];
-                av->type = 0;
-                av->ivalue = v;
-                av->name[0] = 0;
-                av->buf_len = 0;
-                av->pkg_count = 0;
+                aml_value_copy(av, src);
             }
             else
             {
@@ -996,6 +1097,7 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
         if (rc != AML_TINY_OK)
         {
             aml_log(ctx, "term parse fail");
+            aml_log_badop(ctx, *ctx->p);
             ctx->p++;
             return AML_TINY_OK;
         }
@@ -1059,7 +1161,7 @@ int aml_tiny_exec(
     ctx.last_error = AML_TINY_OK;
 
     for (i = 0; i < 8u; ++i)
-        ctx.locals[i] = 0u;
+        aml_value_zero(&ctx.locals[i]);
 
     rc = aml_exec_term_list(&ctx, ctx.end);
     if (rc != AML_TINY_OK)
@@ -1094,7 +1196,7 @@ int aml_tiny_trace_names(
     ctx.last_error = AML_TINY_OK;
 
     for (i = 0; i < 8u; ++i)
-        ctx.locals[i] = 0u;
+        aml_value_zero(&ctx.locals[i]);
 
     while (ctx.p < ctx.end && !ctx.returned)
     {

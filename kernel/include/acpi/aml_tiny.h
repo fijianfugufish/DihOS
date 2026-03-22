@@ -98,7 +98,7 @@ extern "C"
 
         int last_error;
 
-        uint64_t locals[8];
+        aml_tiny_value locals[8];
     };
 
     int aml_tiny_exec(
