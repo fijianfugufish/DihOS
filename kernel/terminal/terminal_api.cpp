@@ -52,6 +52,21 @@ extern "C" void terminal_success(const char *s)
     g_terminal.Success(s);
 }
 
+extern "C" void terminal_toggle_quiet()
+{
+    g_terminal.ToggleQuiet();
+}
+
+extern "C" void terminal_set_quiet()
+{
+    g_terminal.SetQuiet();
+}
+
+extern "C" void terminal_set_loud()
+{
+    g_terminal.SetLoud();
+}
+
 static void hex_to_str64(uint64_t v, char *out)
 {
     const char *hex = "0123456789ABCDEF";

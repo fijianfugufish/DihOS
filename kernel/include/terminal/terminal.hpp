@@ -22,6 +22,10 @@ public:
     void Error(const char *text);
     void Success(const char *text);
 
+    void ToggleQuiet();
+    void SetQuiet();
+    void SetLoud();
+
 private:
     void ResetState();
     void AddLine(const char *text, kcolor color);

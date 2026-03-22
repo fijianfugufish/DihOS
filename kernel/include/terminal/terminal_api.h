@@ -25,6 +25,10 @@ extern "C"
     void terminal_print_inline_hex32(uint32_t v);
     void terminal_print_inline_hex8(uint32_t v);
 
+    void terminal_toggle_quiet();
+    void terminal_set_quiet();
+    void terminal_set_loud();
+
 #ifdef __cplusplus
 }
 #endif

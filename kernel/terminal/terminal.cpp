@@ -15,6 +15,8 @@ static int g_log_line_open = 0;
 static char g_log_pending[262144];
 static int g_log_pending_len = 0;
 
+static int terminal_quiet = 0;
+
 static void log_line_clear(void)
 {
     g_log_line_len = 0;
@@ -292,6 +294,9 @@ void Terminal::AddLine(const char *text, kcolor color)
 
 void Terminal::PrintInline(const char *text)
 {
+    if (terminal_quiet)
+        return;
+
     if (!text || !text_ptr)
         return;
 
@@ -309,24 +314,48 @@ void Terminal::PrintInline(const char *text)
 
 void Terminal::Print(const char *text)
 {
+    if (terminal_quiet)
+        return;
+
     terminal_log_start_line("", text);
     AddLine(text, white);
 }
 
 void Terminal::Warn(const char *text)
 {
+    if (terminal_quiet)
+        return;
+
     terminal_log_start_line("[WARN]     ", text);
     AddLine(text, orange);
 }
 
 void Terminal::Error(const char *text)
 {
+    if (terminal_quiet)
+        return;
+
     terminal_log_start_line("[ERROR]    ", text);
     AddLine(text, red);
 }
 
 void Terminal::Success(const char *text)
 {
+    if (terminal_quiet)
+        return;
+
     terminal_log_start_line("[SUCCESS]  ", text);
     AddLine(text, green);
 }
+
+void Terminal::ToggleQuiet()
+{
+    if (terminal_quiet)
+        terminal_quiet = 0;
+    else
+        terminal_quiet = 1;
+}
+
+void Terminal::SetQuiet() { terminal_quiet = 0; }
+
+void Terminal::SetLoud() { terminal_quiet = 0; }
