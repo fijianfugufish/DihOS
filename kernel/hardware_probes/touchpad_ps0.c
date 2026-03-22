@@ -1,6 +1,7 @@
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "acpi/aml_tiny.h"
 #include "terminal/terminal_api.h"
+#include "kwrappers/string.h"
 #include <stdint.h>
 
 static void aml_log_cb(void *user, const char *msg)
