@@ -120,7 +120,13 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
     return 0;
 }
 
-static int run_one(const char *name, const uint8_t *body, uint32_t len, aml_gpio_ctx *state)
+static int run_one(const char *name,
+                   const uint8_t *body,
+                   uint32_t len,
+                   aml_gpio_ctx *state,
+                   uint32_t arg_count,
+                   uint64_t arg0,
+                   uint64_t arg1)
 {
     aml_tiny_host host = {0};
     aml_tiny_method m = {0};
@@ -135,6 +141,9 @@ static int run_one(const char *name, const uint8_t *body, uint32_t len, aml_gpio
     m.aml = body;
     m.aml_len = len;
     m.scope_prefix = "\\_SB";
+    m.arg_count = arg_count;
+    m.args[0] = arg0;
+    m.args[1] = arg1;
 
     terminal_print("AML exec ");
     terminal_print(name);
@@ -176,18 +185,17 @@ int touchpad_run_ps0(uint64_t rsdp_phys)
     s.gpio_pin = (uint32_t)r.tcpd_gpio_pin;
     s.gabl = 0;
     s.lidb = 0;
-    s.lidr = 1; /* key change */
-    s.lids = 0; /* keep LEqual(LIDS, Zero) true */
+    s.lidr = 1; /* important */
+    s.lids = 0; /* make LEqual(LIDS, Zero) true */
 
     terminal_print("PS0: executing...\n");
 
+    /* _REG(SpaceId=0x08, Connect=1) */
     if (r.tcpd_gio0_reg_valid && r.tcpd_gio0_reg_len)
-        run_one("GIO0._REG", r.tcpd_gio0_reg_body, r.tcpd_gio0_reg_len, &s);
+        run_one("GIO0._REG", r.tcpd_gio0_reg_body, r.tcpd_gio0_reg_len, &s, 2, 0x08, 1);
 
-    if (r.tcpd_ps3_valid && r.tcpd_ps3_len)
-        run_one("_PS3", r.tcpd_ps3_body, r.tcpd_ps3_len, &s);
-
-    run_one("_PS0", r.tcpd_ps0_body, r.tcpd_ps0_len, &s);
+    /* do NOT run _PS3 here */
+    run_one("_PS0", r.tcpd_ps0_body, r.tcpd_ps0_len, &s, 0, 0, 0);
 
     terminal_print("AML final GABL=");
     terminal_print_hex64(s.gabl);
