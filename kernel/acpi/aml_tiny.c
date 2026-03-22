@@ -525,6 +525,66 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
     return AML_TINY_ERR_INTERNAL;
 }
 
+static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out);
+static int aml_exec_one_term(aml_tiny_ctx *ctx);
+static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit);
+
+static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml_tiny_value *b)
+{
+    uint32_t i;
+
+    if (!ctx || !a || !b)
+        return 0;
+
+    /* Buffer-vs-buffer equality for things like _DSM UUID compares */
+    if (a->type == 4 && b->type == 4)
+    {
+        if (a->buf_len != b->buf_len)
+            return 0;
+
+        for (i = 0; i < a->buf_len; ++i)
+        {
+            if (a->buf[i] != b->buf[i])
+                return 0;
+        }
+
+        return 1;
+    }
+
+    /* Fallback to integer coercion */
+    {
+        uint64_t av = 0;
+        uint64_t bv = 0;
+
+        if (aml_value_as_int(ctx, a, &av) != AML_TINY_OK)
+            return 0;
+        if (aml_value_as_int(ctx, b, &bv) != AML_TINY_OK)
+            return 0;
+
+        return av == bv;
+    }
+}
+
+static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int *is_null)
+{
+    if (!ctx || !out || !is_null)
+        return AML_TINY_ERR_BAD_ARG;
+
+    if (aml_eof(ctx, 1))
+        return AML_TINY_ERR_EOF;
+
+    if (*ctx->p == 0x00)
+    {
+        ctx->p++;
+        aml_value_zero(out);
+        *is_null = 1;
+        return AML_TINY_OK;
+    }
+
+    *is_null = 0;
+    return aml_eval_termarg(ctx, out);
+}
+
 static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, const aml_tiny_value *dst)
 {
     uint64_t v;
@@ -590,10 +650,6 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
 
     return AML_TINY_OK;
 }
-
-static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out);
-static int aml_exec_one_term(aml_tiny_ctx *ctx);
-static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit);
 
 static int aml_eval_namestring_as_ref(aml_tiny_ctx *ctx, aml_tiny_value *out)
 {
@@ -862,18 +918,13 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
     if (op == 0x93)
     {
         aml_tiny_value a, b;
-        uint64_t av, bv;
         ctx->p++;
         if (aml_eval_termarg(ctx, &a) != AML_TINY_OK)
             return AML_TINY_ERR_PARSE;
         if (aml_eval_termarg(ctx, &b) != AML_TINY_OK)
             return AML_TINY_ERR_PARSE;
-        if (aml_value_as_int(ctx, &a, &av) != AML_TINY_OK)
-            return AML_TINY_ERR_NAMESPACE;
-        if (aml_value_as_int(ctx, &b, &bv) != AML_TINY_OK)
-            return AML_TINY_ERR_NAMESPACE;
         out->type = 0;
-        out->ivalue = (av == bv) ? 1ull : 0ull;
+        out->ivalue = aml_value_equal(ctx, &a, &b) ? 1ull : 0ull;
         return AML_TINY_OK;
     }
 
@@ -958,6 +1009,97 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
             return AML_TINY_ERR_EOF;
         out->type = 0;
         out->ivalue = 0;
+        return AML_TINY_OK;
+    }
+
+    if (op == 0x96) /* ToBuffer */
+    {
+        aml_tiny_value src, target;
+        uint64_t iv = 0;
+        int is_null = 0;
+        uint32_t i;
+
+        ctx->p++;
+
+        if (aml_eval_termarg(ctx, &src) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+
+        if (aml_parse_target_or_null(ctx, &target, &is_null) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+
+        aml_value_zero(out);
+        out->type = 4;
+
+        if (src.type == 4)
+        {
+            aml_value_copy(out, &src);
+        }
+        else if (aml_value_as_int(ctx, &src, &iv) == AML_TINY_OK)
+        {
+            out->buf_len = 8u;
+            for (i = 0; i < out->buf_len; ++i)
+                out->buf[i] = (uint8_t)((iv >> (8u * i)) & 0xFFu);
+        }
+        else
+        {
+            return AML_TINY_ERR_NAMESPACE;
+        }
+
+        if (!is_null)
+        {
+            if (aml_store_to_target(ctx, out, &target) != AML_TINY_OK)
+                return AML_TINY_ERR_NAMESPACE;
+        }
+
+        return AML_TINY_OK;
+    }
+
+    if (op == 0x99) /* ToInteger */
+    {
+        aml_tiny_value src, target;
+        uint64_t iv = 0;
+        int is_null = 0;
+
+        ctx->p++;
+
+        if (aml_eval_termarg(ctx, &src) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+
+        if (aml_parse_target_or_null(ctx, &target, &is_null) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+
+        if (aml_value_as_int(ctx, &src, &iv) != AML_TINY_OK)
+            return AML_TINY_ERR_NAMESPACE;
+
+        aml_value_zero(out);
+        out->type = 0;
+        out->ivalue = iv;
+
+        if (!is_null)
+        {
+            if (aml_store_to_target(ctx, out, &target) != AML_TINY_OK)
+                return AML_TINY_ERR_NAMESPACE;
+        }
+
+        return AML_TINY_OK;
+    }
+
+    if (op == 0x9D) /* ToUUID */
+    {
+        uint32_t i;
+
+        ctx->p++;
+
+        if (aml_eof(ctx, 16))
+            return AML_TINY_ERR_EOF;
+
+        aml_value_zero(out);
+        out->type = 4;
+        out->buf_len = 16u;
+
+        for (i = 0; i < 16u; ++i)
+            out->buf[i] = *ctx->p++;
+
         return AML_TINY_OK;
     }
 
