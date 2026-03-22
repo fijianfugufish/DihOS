@@ -52,20 +52,20 @@ static int aml_write_cb(void *user, const char *path, uint64_t value)
     terminal_print_hex64(value);
     terminal_print("\n");
 
-    if (path_eq(path, "\\_SB.GIO0.GABL") || path_eq(path, "\\_SB_.GIO0.GABL"))
+    if (strstr(path, "GABL"))
     {
         s->gabl = value;
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.GIO0.LIDR") || path_eq(path, "\\_SB_.GIO0.LIDR"))
+    if (strstr(path, "LIDR"))
     {
         s->lidr = value;
         drive_touchpad_line(s, value);
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
+    if (strstr(path, "LIDB"))
     {
         s->lidb = value;
 
@@ -75,6 +75,12 @@ static int aml_write_cb(void *user, const char *path, uint64_t value)
          * So mirror that write to the real line too.
          */
         drive_touchpad_line(s, value);
+        return 0;
+    }
+
+    if (path_eq(path, "\\_SB.GABL"))
+    {
+        s->gabl = value;
         return 0;
     }
 
@@ -92,27 +98,33 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
     terminal_print(path);
     terminal_print("\n");
 
-    if (path_eq(path, "\\_SB.GIO0.GABL") || path_eq(path, "\\_SB_.GIO0.GABL"))
+    if (strstr(path, "GABL"))
     {
         *out = s->gabl;
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.GIO0.LIDR") || path_eq(path, "\\_SB_.GIO0.LIDR"))
+    if (strstr(path, "LIDR"))
     {
         *out = s->lidr;
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.LID0.LIDB") || path_eq(path, "\\_SB_.LID0.LIDB"))
+    if (strstr(path, "LIDB"))
     {
         *out = s->lidb;
         return 0;
     }
 
-    if (path_eq(path, "\\_SB.LID0.LIDS") || path_eq(path, "\\_SB_.LID0.LIDS"))
+    if (strstr(path, "LIDS"))
     {
         *out = s->lids;
+        return 0;
+    }
+
+    if (path_eq(path, "\\_SB.GABL"))
+    {
+        *out = s->gabl;
         return 0;
     }
 
@@ -121,6 +133,7 @@ static int aml_read_cb(void *user, const char *path, uint64_t *out)
 }
 
 static int run_one(const char *name,
+                   const char *scope,
                    const uint8_t *body,
                    uint32_t len,
                    aml_gpio_ctx *state,
@@ -140,7 +153,7 @@ static int run_one(const char *name,
 
     m.aml = body;
     m.aml_len = len;
-    m.scope_prefix = "\\_SB";
+    m.scope_prefix = scope;
     m.arg_count = arg_count;
     m.args[0] = arg0;
     m.args[1] = arg1;
@@ -192,10 +205,23 @@ int touchpad_run_ps0(uint64_t rsdp_phys)
 
     /* _REG(SpaceId=0x08, Connect=1) */
     if (r.tcpd_gio0_reg_valid && r.tcpd_gio0_reg_len)
-        run_one("GIO0._REG", r.tcpd_gio0_reg_body, r.tcpd_gio0_reg_len, &s, 2, 0x08, 1);
+        run_one("GIO0._REG",
+                "\\_SB.GIO0",
+                r.tcpd_gio0_reg_body,
+                r.tcpd_gio0_reg_len,
+                &s,
+                2,
+                0x08,
+                1);
 
-    /* do NOT run _PS3 here */
-    run_one("_PS0", r.tcpd_ps0_body, r.tcpd_ps0_len, &s, 0, 0, 0);
+    run_one("_PS0",
+            "\\_SB",
+            r.tcpd_ps0_body,
+            r.tcpd_ps0_len,
+            &s,
+            0,
+            0,
+            0);
 
     terminal_print("AML final GABL=");
     terminal_print_hex64(s.gabl);
