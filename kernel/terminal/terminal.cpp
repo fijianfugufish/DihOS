@@ -356,6 +356,6 @@ void Terminal::ToggleQuiet()
         terminal_quiet = 1;
 }
 
-void Terminal::SetQuiet() { terminal_quiet = 0; }
+void Terminal::SetQuiet() { terminal_quiet = 1; }
 
 void Terminal::SetLoud() { terminal_quiet = 0; }
