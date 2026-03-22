@@ -1,0 +1,15 @@
+# Ignore folders
+.vscode/
+backups/
+build/
+
+# Ignore all PowerShell scripts
+*.ps1
+
+# BUT allow this one
+!build.ps1
+
+# Ignore specific files
+efi_main.S
+main.c
+README.md
