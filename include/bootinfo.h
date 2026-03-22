@@ -28,4 +28,7 @@ typedef struct
 
     uint64_t acpi_rsdp;      // physical address of ACPI RSDP (from UEFI)
     uint64_t xhci_mmio_base; // 0 if unknown; else kernel will use this
+
+    uint64_t tlmm_mmio_base; /* 0 if unknown */
+    uint64_t tlmm_mmio_size; /* 0 if unknown */
 } boot_info;

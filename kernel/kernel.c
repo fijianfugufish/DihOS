@@ -9,6 +9,7 @@
 #include "kwrappers/string.h"
 #include "kwrappers/kinput.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
+#include "hardware_probes/touchpad_wake.h"
 
 #include "terminal/terminal_api.h"
 
@@ -79,6 +80,11 @@ void kmain(const boot_info *bi)
 
     terminal_initialize(&font);
     terminal_print("terminal online");
+
+    if (bi->acpi_rsdp)
+    {
+        touchpad_try_wake_from_acpi(bi->acpi_rsdp);
+    }
 
     kinput_init(bi->acpi_rsdp);
 

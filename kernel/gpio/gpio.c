@@ -1,123 +1,106 @@
 #include "gpio/gpio.h"
+#include "gpio/qcom_tlmm.h"
 #include "terminal/terminal_api.h"
+#include "bootinfo.h"
 #include <stdint.h>
 
-/*
-  IMPORTANT:
-  This file is a generic GPIO layer scaffold.
-
-  Right now it does NOT drive real hardware yet.
-  It exists so the rest of the kernel can call a stable GPIO API.
-
-  To make it real, replace the stub sections below with your SoC-specific
-  GPIO/TLMM register accesses.
-*/
+extern const boot_info *k_bootinfo_ptr;
 
 static uint8_t g_gpio_init_done = 0;
+static uint8_t g_tlmm_ready = 0;
+static qcom_tlmm_t g_tlmm;
 
-/*
-  Optional shadow state so calls have predictable behaviour even before
-  hardware backing exists.
-*/
-#define GPIO_SHADOW_MAX_PINS 256u
+/* Temporary fallback for X1E80100 bring-up */
+#define TLMM_FALLBACK_BASE 0x0F100000ull
+#define TLMM_FALLBACK_SIZE 0x00F00000u
 
-static uint8_t g_gpio_dir_shadow[GPIO_SHADOW_MAX_PINS];
-static uint8_t g_gpio_val_shadow[GPIO_SHADOW_MAX_PINS];
+static int gpio_backend_init_once(void)
+{
+    uintptr_t base = 0;
+    uint32_t size = 0;
+
+    if (g_tlmm_ready)
+        return 0;
+
+    if (k_bootinfo_ptr && k_bootinfo_ptr->tlmm_mmio_base)
+    {
+        base = (uintptr_t)k_bootinfo_ptr->tlmm_mmio_base;
+        size = (uint32_t)k_bootinfo_ptr->tlmm_mmio_size;
+    }
+    else
+    {
+        base = (uintptr_t)TLMM_FALLBACK_BASE;
+        size = TLMM_FALLBACK_SIZE;
+    }
+
+    if (!base || !size)
+        return -1;
+
+    tlmm_init(&g_tlmm, base, size);
+    g_tlmm_ready = 1;
+
+    terminal_print("TLMM base:");
+    terminal_print_hex64((uint64_t)base);
+    terminal_print("\n");
+
+    return 0;
+}
 
 int gpio_init(void)
 {
-    uint32_t i;
-
     if (g_gpio_init_done)
         return 0;
 
-    for (i = 0; i < GPIO_SHADOW_MAX_PINS; ++i)
+    if (gpio_backend_init_once() != 0)
     {
-        g_gpio_dir_shadow[i] = 0u;
-        g_gpio_val_shadow[i] = 0u;
+        terminal_error("GPIO backend init failed\n");
+        return -1;
     }
 
-    g_gpio_init_done = 1u;
+    g_gpio_init_done = 1;
     terminal_print("GPIO init ok\n");
     return 0;
 }
 
 int gpio_set_direction(uint32_t pin, gpio_direction dir)
 {
-    if (!g_gpio_init_done)
-        gpio_init();
+    if (!g_gpio_init_done && gpio_init() != 0)
+        return -1;
 
-    if (pin < GPIO_SHADOW_MAX_PINS)
-        g_gpio_dir_shadow[pin] = (uint8_t)dir;
+    if (!tlmm_valid_gpio(&g_tlmm, pin))
+        return -2;
 
-    /*
-      TODO: SoC-specific backend here.
-
-      Example later:
-        - compute register address for pin
-        - configure function as GPIO
-        - set OE/output enable bit
-    */
-
-    terminal_print("GPIO dir pin:");
-    terminal_print_hex32(pin);
-    terminal_print(" dir:");
-    terminal_print_hex32((uint32_t)dir);
-    terminal_print("\n");
+    if (dir == GPIO_DIR_OUTPUT)
+        tlmm_gpio_config_output(&g_tlmm, pin, false, TLMM_PULL_NONE, TLMM_DRV_3);
+    else
+        tlmm_gpio_config_input(&g_tlmm, pin, TLMM_PULL_NONE);
 
     return 0;
 }
 
 int gpio_write(uint32_t pin, gpio_value value)
 {
-    if (!g_gpio_init_done)
-        gpio_init();
+    if (!g_gpio_init_done && gpio_init() != 0)
+        return -1;
 
-    if (pin < GPIO_SHADOW_MAX_PINS)
-        g_gpio_val_shadow[pin] = (uint8_t)value;
+    if (!tlmm_valid_gpio(&g_tlmm, pin))
+        return -2;
 
-    /*
-      TODO: SoC-specific backend here.
-
-      Example later:
-        - compute register address for pin
-        - write output bit high/low
-    */
-
-    terminal_print("GPIO write pin:");
-    terminal_print_hex32(pin);
-    terminal_print(" val:");
-    terminal_print_hex32((uint32_t)value);
-    terminal_print("\n");
-
+    tlmm_gpio_write(&g_tlmm, pin, value == GPIO_VALUE_HIGH);
     return 0;
 }
 
 int gpio_read(uint32_t pin, uint32_t *out_value)
 {
-    uint32_t v = 0u;
-
     if (!out_value)
         return -1;
 
-    if (!g_gpio_init_done)
-        gpio_init();
+    if (!g_gpio_init_done && gpio_init() != 0)
+        return -1;
 
-    /*
-      TODO: SoC-specific backend here.
+    if (!tlmm_valid_gpio(&g_tlmm, pin))
+        return -2;
 
-      For now, return shadow value.
-    */
-    if (pin < GPIO_SHADOW_MAX_PINS)
-        v = g_gpio_val_shadow[pin];
-
-    *out_value = v;
-
-    terminal_print("GPIO read pin:");
-    terminal_print_hex32(pin);
-    terminal_print(" val:");
-    terminal_print_hex32(v);
-    terminal_print("\n");
-
+    *out_value = tlmm_gpio_read(&g_tlmm, pin) ? 1u : 0u;
     return 0;
 }
