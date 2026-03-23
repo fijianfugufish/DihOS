@@ -248,14 +248,14 @@ int touchpad_run_dsm(uint64_t rsdp_phys)
     pkg_arg.pkg_count = 1;
     pkg_arg.pkg_elems[0] = 0;
 
-    run_aml("TCPD._DSM(fn=1)",
-            "\\_SB",
+    run_aml("TCPD._DSM(fn=1, rev=0)",
+            "\\_SB.D0?_",
             r.tcpd_dsm_body,
             r.tcpd_dsm_len,
             &s,
             &uuid_arg,
             1,
-            1,
+            0,
             &pkg_arg);
 
     terminal_print("DSM final GABL=");

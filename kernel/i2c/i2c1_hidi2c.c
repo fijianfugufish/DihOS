@@ -1,6 +1,7 @@
 #include "i2c/i2c1_hidi2c.h"
 #include "terminal/terminal_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
+#include "hardware_probes/touchpad_dsm.h"
 #include "acpi/aml_tiny.h"
 #include "gpio/gpio.h"
 #include "kwrappers/string.h"
@@ -1034,6 +1035,9 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_sta_from_acpi(&regs);
         tcpd_try_ini_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
+
+        /* Run the dedicated TCPD _DSM helper before the bus wake nudges. */
+        (void)touchpad_run_dsm(rsdp_phys);
 
         tcpd_gpio_reset_pulse(&regs);
 
