@@ -152,6 +152,49 @@ static void append_str(char *dst, uint32_t dst_sz, uint32_t *at, const char *src
     }
 }
 
+static void aml_make_effective_name(aml_tiny_ctx *ctx, const char *in, char *out, uint32_t out_sz)
+{
+    uint32_t at = 0;
+    uint32_t i = 0;
+
+    if (!out || out_sz == 0)
+        return;
+
+    out[0] = 0;
+
+    if (!in || !in[0])
+        return;
+
+    /* Already absolute or upward-relative: keep as-is */
+    if (in[0] == '\\' || in[0] == '^')
+    {
+        while (in[i] && at + 1u < out_sz)
+        {
+            out[at++] = in[i++];
+        }
+        out[at] = 0;
+        return;
+    }
+
+    /* Otherwise bind it to the current method scope, if any */
+    if (ctx && ctx->method.scope_prefix && ctx->method.scope_prefix[0])
+    {
+        const char *sp = ctx->method.scope_prefix;
+
+        while (*sp && at + 1u < out_sz)
+            out[at++] = *sp++;
+
+        if (at && out[at - 1] != '.' && out[at - 1] != '\\' && at + 1u < out_sz)
+            out[at++] = '.';
+    }
+
+    i = 0;
+    while (in[i] && at + 1u < out_sz)
+        out[at++] = in[i++];
+
+    out[at] = 0;
+}
+
 static void aml_value_zero(aml_tiny_value *v)
 {
     uint32_t i;
@@ -378,23 +421,30 @@ static int aml_value_as_int(aml_tiny_ctx *ctx, const aml_tiny_value *v, uint64_t
 
     if (v->type == 1)
     {
-        {
-            aml_tiny_named_obj *obj = aml_find_named_obj(ctx, v->name);
-            if (obj)
-                return aml_value_as_int(ctx, &obj->value, out);
-        }
+        char full_name[AML_TINY_MAX_NAMESTRING];
+        aml_tiny_named_obj *obj;
+
+        aml_make_effective_name(ctx, v->name, full_name, sizeof(full_name));
+
+        obj = aml_find_named_obj(ctx, full_name);
+        if (!obj)
+            obj = aml_find_named_obj(ctx, v->name);
+
+        if (obj)
+            return aml_value_as_int(ctx, &obj->value, out);
 
         if (!ctx->host.read_named_int)
             return AML_TINY_ERR_NAMESPACE;
 
-        if (ctx->host.read_named_int(ctx->host.user, v->name, out) != 0)
-        {
-            aml_log(ctx, "namespace miss");
-            aml_log(ctx, v->name);
-            *out = 0;
+        if (ctx->host.read_named_int(ctx->host.user, full_name, out) == 0)
             return AML_TINY_OK;
-        }
 
+        if (ctx->host.read_named_int(ctx->host.user, v->name, out) == 0)
+            return AML_TINY_OK;
+
+        aml_log(ctx, "namespace miss");
+        aml_log(ctx, full_name);
+        *out = 0;
         return AML_TINY_OK;
     }
 
@@ -659,34 +709,41 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     if (dst->type != 1)
         return AML_TINY_ERR_UNSUPPORTED;
 
-    /* For non-integer objects, always keep a local copy, even if the
-       namestring is absolute like \_SB._T_0. This avoids losing buffers
-       through host.write_named_int(). */
-    if (src->type != 0)
     {
-        obj = aml_get_or_create_named_obj(ctx, dst->name);
+        char full_name[AML_TINY_MAX_NAMESTRING];
+
+        aml_make_effective_name(ctx, dst->name, full_name, sizeof(full_name));
+
+        /* Keep local copy under the fully-scoped name first */
+        obj = aml_get_or_create_named_obj(ctx, full_name);
+        if (!obj)
+            obj = aml_get_or_create_named_obj(ctx, dst->name);
+
         if (!obj)
             return AML_TINY_ERR_NAMESPACE;
 
         aml_value_copy(&obj->value, src);
+
+        /* Non-integer objects live only in the tiny namespace cache */
+        if (src->type != 0)
+            return AML_TINY_OK;
+
+        if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
+            return AML_TINY_ERR_NAMESPACE;
+
+        /* Best effort host write: try scoped name first, then raw name.
+           Do not fail if host write is unavailable; keep local value. */
+        if (ctx->host.write_named_int)
+        {
+            if (ctx->host.write_named_int(ctx->host.user, full_name, v) == 0)
+                return AML_TINY_OK;
+
+            if (ctx->host.write_named_int(ctx->host.user, dst->name, v) == 0)
+                return AML_TINY_OK;
+        }
+
         return AML_TINY_OK;
     }
-
-    /* Integer stores may still go to the host-backed namespace. */
-    obj = aml_get_or_create_named_obj(ctx, dst->name);
-    if (obj)
-        aml_value_copy(&obj->value, src);
-
-    if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
-        return AML_TINY_ERR_NAMESPACE;
-
-    if (!ctx->host.write_named_int)
-        return AML_TINY_ERR_NAMESPACE;
-
-    if (ctx->host.write_named_int(ctx->host.user, dst->name, v) != 0)
-        return AML_TINY_ERR_NAMESPACE;
-
-    return AML_TINY_OK;
 }
 
 static int aml_eval_namestring_as_ref(aml_tiny_ctx *ctx, aml_tiny_value *out)
