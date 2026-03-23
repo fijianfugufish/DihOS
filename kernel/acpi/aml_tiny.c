@@ -1510,6 +1510,13 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
 
     for (iter = 0; iter < 256u; ++iter)
     {
+        /* If a nested Return already happened, unwind now */
+        if (ctx->returned)
+        {
+            ctx->p = pkg_end;
+            return AML_TINY_OK;
+        }
+
         ctx->p = pred_start;
 
         rc = aml_eval_termarg(ctx, &pred);
@@ -1531,6 +1538,7 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
         ctx->p = body_start;
 
         rc = aml_exec_term_list(ctx, pkg_end);
+
         if (rc == AML_TINY_RC_BREAK)
         {
             ctx->p = pkg_end;
@@ -1542,6 +1550,13 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
 
         if (rc != AML_TINY_OK)
             return rc;
+
+        /* This is the missing part: Return inside the loop body must end the loop */
+        if (ctx->returned)
+        {
+            ctx->p = pkg_end;
+            return AML_TINY_OK;
+        }
     }
 
     aml_log(ctx, "while iteration cap");
