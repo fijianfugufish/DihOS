@@ -667,20 +667,101 @@ static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int 
     return aml_eval_termarg(ctx, out);
 }
 
+static int aml_materialize_value(aml_tiny_ctx *ctx, const aml_tiny_value *src, aml_tiny_value *out)
+{
+    aml_tiny_named_obj *obj;
+    uint64_t iv = 0;
+
+    if (!ctx || !src || !out)
+        return AML_TINY_ERR_BAD_ARG;
+
+    aml_value_zero(out);
+
+    /* Already concrete */
+    if (src->type == 0 || src->type == 4 || src->type == 5)
+    {
+        aml_value_copy(out, src);
+        return AML_TINY_OK;
+    }
+
+    /* LocalX */
+    if (src->type == 2)
+    {
+        if (src->ivalue >= 8u)
+            return AML_TINY_ERR_INTERNAL;
+
+        return aml_materialize_value(ctx, &ctx->locals[(uint32_t)src->ivalue], out);
+    }
+
+    /* ArgX */
+    if (src->type == 3)
+    {
+        if (src->ivalue >= 7u)
+            return AML_TINY_ERR_INTERNAL;
+
+        if (ctx->method.arg_count <= src->ivalue)
+        {
+            aml_value_zero(out);
+            out->type = 0;
+            out->ivalue = 0;
+            return AML_TINY_OK;
+        }
+
+        if (ctx->method.use_typed_args)
+            return aml_materialize_value(ctx, &ctx->method.typed_args[(uint32_t)src->ivalue], out);
+
+        aml_value_zero(out);
+        out->type = 0;
+        out->ivalue = ctx->method.args[(uint32_t)src->ivalue];
+        return AML_TINY_OK;
+    }
+
+    /* Named ref */
+    if (src->type == 1)
+    {
+        char full_name[AML_TINY_MAX_NAMESTRING];
+
+        aml_make_effective_name(ctx, src->name, full_name, sizeof(full_name));
+
+        obj = aml_find_named_obj(ctx, full_name);
+        if (!obj)
+            obj = aml_find_named_obj(ctx, src->name);
+
+        if (obj)
+            return aml_materialize_value(ctx, &obj->value, out);
+
+        if (aml_value_as_int(ctx, src, &iv) == AML_TINY_OK)
+        {
+            aml_value_zero(out);
+            out->type = 0;
+            out->ivalue = iv;
+            return AML_TINY_OK;
+        }
+
+        return AML_TINY_ERR_NAMESPACE;
+    }
+
+    return AML_TINY_ERR_UNSUPPORTED;
+}
+
 static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, const aml_tiny_value *dst)
 {
     uint64_t v;
     aml_tiny_named_obj *obj;
+    aml_tiny_value resolved;
 
     if (!ctx || !src || !dst)
         return AML_TINY_ERR_BAD_ARG;
+
+    if (aml_materialize_value(ctx, src, &resolved) != AML_TINY_OK)
+        return AML_TINY_ERR_NAMESPACE;
 
     if (dst->type == 2)
     {
         if (dst->ivalue >= 8u)
             return AML_TINY_ERR_INTERNAL;
 
-        aml_value_copy(&ctx->locals[(uint32_t)dst->ivalue], src);
+        aml_value_copy(&ctx->locals[(uint32_t)dst->ivalue], &resolved);
         return AML_TINY_OK;
     }
 
@@ -694,11 +775,11 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
             if (ctx->method.use_typed_args)
             {
                 aml_tiny_value *av = &ctx->method.typed_args[(uint32_t)dst->ivalue];
-                aml_value_copy(av, src);
+                aml_value_copy(av, &resolved);
             }
             else
             {
-                if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
+                if (aml_value_as_int(ctx, &resolved, &v) != AML_TINY_OK)
                     return AML_TINY_ERR_NAMESPACE;
                 ctx->method.args[(uint32_t)dst->ivalue] = v;
             }
@@ -714,7 +795,6 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
 
         aml_make_effective_name(ctx, dst->name, full_name, sizeof(full_name));
 
-        /* Keep local copy under the fully-scoped name first */
         obj = aml_get_or_create_named_obj(ctx, full_name);
         if (!obj)
             obj = aml_get_or_create_named_obj(ctx, dst->name);
@@ -722,17 +802,15 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
         if (!obj)
             return AML_TINY_ERR_NAMESPACE;
 
-        aml_value_copy(&obj->value, src);
+        aml_value_copy(&obj->value, &resolved);
 
-        /* Non-integer objects live only in the tiny namespace cache */
-        if (src->type != 0)
+        /* Buffers/packages stay in the tiny namespace only */
+        if (resolved.type != 0)
             return AML_TINY_OK;
 
-        if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
+        if (aml_value_as_int(ctx, &resolved, &v) != AML_TINY_OK)
             return AML_TINY_ERR_NAMESPACE;
 
-        /* Best effort host write: try scoped name first, then raw name.
-           Do not fail if host write is unavailable; keep local value. */
         if (ctx->host.write_named_int)
         {
             if (ctx->host.write_named_int(ctx->host.user, full_name, v) == 0)
