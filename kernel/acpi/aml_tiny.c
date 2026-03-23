@@ -1174,7 +1174,7 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
 
     if (op == 0x96) /* ToBuffer */
     {
-        aml_tiny_value src, target;
+        aml_tiny_value src, target, resolved;
         uint64_t iv = 0;
         int is_null = 0;
         uint32_t i;
@@ -1187,14 +1187,24 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
         if (aml_parse_target_or_null(ctx, &target, &is_null) != AML_TINY_OK)
             return AML_TINY_ERR_PARSE;
 
+        if (aml_materialize_value(ctx, &src, &resolved) != AML_TINY_OK)
+            return AML_TINY_ERR_NAMESPACE;
+
         aml_value_zero(out);
         out->type = 4;
 
-        if (src.type == 4)
+        if (resolved.type == 4)
         {
-            aml_value_copy(out, &src);
+            aml_value_copy(out, &resolved);
         }
-        else if (aml_value_as_int(ctx, &src, &iv) == AML_TINY_OK)
+        else if (resolved.type == 0)
+        {
+            iv = resolved.ivalue;
+            out->buf_len = 8u;
+            for (i = 0; i < out->buf_len; ++i)
+                out->buf[i] = (uint8_t)((iv >> (8u * i)) & 0xFFu);
+        }
+        else if (aml_value_as_int(ctx, &resolved, &iv) == AML_TINY_OK)
         {
             out->buf_len = 8u;
             for (i = 0; i < out->buf_len; ++i)
