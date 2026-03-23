@@ -37,6 +37,7 @@ void kmain(const boot_info *bi)
     if (kgfx_init(bi) != 0)
         for (;;)
             __asm__ __volatile__("wfe");
+
     pmem_init(bi);
 
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;

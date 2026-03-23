@@ -1086,21 +1086,26 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
         return AML_TINY_OK;
     }
 
-    if (op == 0x9D) /* ToUUID */
+    if (op == 0x9D) /* CopyObject */
     {
-        uint32_t i;
+        aml_tiny_value src, target;
+        int is_null = 0;
 
         ctx->p++;
 
-        if (aml_eof(ctx, 16))
-            return AML_TINY_ERR_EOF;
+        if (aml_eval_termarg(ctx, &src) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
 
-        aml_value_zero(out);
-        out->type = 4;
-        out->buf_len = 16u;
+        if (aml_parse_target_or_null(ctx, &target, &is_null) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
 
-        for (i = 0; i < 16u; ++i)
-            out->buf[i] = *ctx->p++;
+        aml_value_copy(out, &src);
+
+        if (!is_null)
+        {
+            if (aml_store_to_target(ctx, out, &target) != AML_TINY_OK)
+                return AML_TINY_ERR_NAMESPACE;
+        }
 
         return AML_TINY_OK;
     }
