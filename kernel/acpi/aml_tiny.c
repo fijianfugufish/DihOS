@@ -581,92 +581,6 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out);
 static int aml_exec_one_term(aml_tiny_ctx *ctx);
 static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit);
 
-static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml_tiny_value *b)
-{
-    aml_tiny_named_obj *obj_a;
-    aml_tiny_named_obj *obj_b;
-    uint32_t i;
-
-    if (!ctx || !a || !b)
-        return 0;
-
-    /* Resolve named refs first so buffers/packages stored in temp names
-       compare by real value, not by integer coercion. */
-    if (a->type == 1)
-    {
-        obj_a = aml_find_named_obj(ctx, a->name);
-        if (obj_a)
-            return aml_value_equal(ctx, &obj_a->value, b);
-    }
-
-    if (b->type == 1)
-    {
-        obj_b = aml_find_named_obj(ctx, b->name);
-        if (obj_b)
-            return aml_value_equal(ctx, a, &obj_b->value);
-    }
-
-    if (a->type == 4 && b->type == 4)
-    {
-        if (a->buf_len != b->buf_len)
-            return 0;
-
-        for (i = 0; i < a->buf_len; ++i)
-        {
-            if (a->buf[i] != b->buf[i])
-                return 0;
-        }
-
-        return 1;
-    }
-
-    if (a->type == 5 && b->type == 5)
-    {
-        if (a->pkg_count != b->pkg_count)
-            return 0;
-
-        for (i = 0; i < a->pkg_count; ++i)
-        {
-            if (a->pkg_elems[i] != b->pkg_elems[i])
-                return 0;
-        }
-
-        return 1;
-    }
-
-    {
-        uint64_t av = 0;
-        uint64_t bv = 0;
-
-        if (aml_value_as_int(ctx, a, &av) != AML_TINY_OK)
-            return 0;
-        if (aml_value_as_int(ctx, b, &bv) != AML_TINY_OK)
-            return 0;
-
-        return av == bv;
-    }
-}
-
-static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int *is_null)
-{
-    if (!ctx || !out || !is_null)
-        return AML_TINY_ERR_BAD_ARG;
-
-    if (aml_eof(ctx, 1))
-        return AML_TINY_ERR_EOF;
-
-    if (*ctx->p == 0x00)
-    {
-        ctx->p++;
-        aml_value_zero(out);
-        *is_null = 1;
-        return AML_TINY_OK;
-    }
-
-    *is_null = 0;
-    return aml_eval_termarg(ctx, out);
-}
-
 static int aml_materialize_value(aml_tiny_ctx *ctx, const aml_tiny_value *src, aml_tiny_value *out)
 {
     aml_tiny_named_obj *obj;
@@ -742,6 +656,79 @@ static int aml_materialize_value(aml_tiny_ctx *ctx, const aml_tiny_value *src, a
     }
 
     return AML_TINY_ERR_UNSUPPORTED;
+}
+
+static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml_tiny_value *b)
+{
+    aml_tiny_value av;
+    aml_tiny_value bv;
+    uint32_t i;
+    uint64_t ai = 0;
+    uint64_t bi = 0;
+
+    if (!ctx || !a || !b)
+        return 0;
+
+    if (aml_materialize_value(ctx, a, &av) != AML_TINY_OK)
+        aml_value_copy(&av, a);
+
+    if (aml_materialize_value(ctx, b, &bv) != AML_TINY_OK)
+        aml_value_copy(&bv, b);
+
+    if (av.type == 4 && bv.type == 4)
+    {
+        if (av.buf_len != bv.buf_len)
+            return 0;
+
+        for (i = 0; i < av.buf_len; ++i)
+        {
+            if (av.buf[i] != bv.buf[i])
+                return 0;
+        }
+
+        return 1;
+    }
+
+    if (av.type == 5 && bv.type == 5)
+    {
+        if (av.pkg_count != bv.pkg_count)
+            return 0;
+
+        for (i = 0; i < av.pkg_count; ++i)
+        {
+            if (av.pkg_elems[i] != bv.pkg_elems[i])
+                return 0;
+        }
+
+        return 1;
+    }
+
+    if (aml_value_as_int(ctx, &av, &ai) != AML_TINY_OK)
+        return 0;
+    if (aml_value_as_int(ctx, &bv, &bi) != AML_TINY_OK)
+        return 0;
+
+    return ai == bi;
+}
+
+static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int *is_null)
+{
+    if (!ctx || !out || !is_null)
+        return AML_TINY_ERR_BAD_ARG;
+
+    if (aml_eof(ctx, 1))
+        return AML_TINY_ERR_EOF;
+
+    if (*ctx->p == 0x00)
+    {
+        ctx->p++;
+        aml_value_zero(out);
+        *is_null = 1;
+        return AML_TINY_OK;
+    }
+
+    *is_null = 0;
+    return aml_eval_termarg(ctx, out);
 }
 
 static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, const aml_tiny_value *dst)
