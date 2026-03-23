@@ -533,12 +533,29 @@ static int aml_exec_term_list(aml_tiny_ctx *ctx, const uint8_t *end_limit);
 
 static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml_tiny_value *b)
 {
+    aml_tiny_named_obj *obj_a;
+    aml_tiny_named_obj *obj_b;
     uint32_t i;
 
     if (!ctx || !a || !b)
         return 0;
 
-    /* Buffer-vs-buffer equality for things like _DSM UUID compares */
+    /* Resolve named refs first so buffers/packages stored in temp names
+       compare by real value, not by integer coercion. */
+    if (a->type == 1)
+    {
+        obj_a = aml_find_named_obj(ctx, a->name);
+        if (obj_a)
+            return aml_value_equal(ctx, &obj_a->value, b);
+    }
+
+    if (b->type == 1)
+    {
+        obj_b = aml_find_named_obj(ctx, b->name);
+        if (obj_b)
+            return aml_value_equal(ctx, a, &obj_b->value);
+    }
+
     if (a->type == 4 && b->type == 4)
     {
         if (a->buf_len != b->buf_len)
@@ -553,7 +570,20 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
         return 1;
     }
 
-    /* Fallback to integer coercion */
+    if (a->type == 5 && b->type == 5)
+    {
+        if (a->pkg_count != b->pkg_count)
+            return 0;
+
+        for (i = 0; i < a->pkg_count; ++i)
+        {
+            if (a->pkg_elems[i] != b->pkg_elems[i])
+                return 0;
+        }
+
+        return 1;
+    }
+
     {
         uint64_t av = 0;
         uint64_t bv = 0;
@@ -590,12 +620,10 @@ static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int 
 static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, const aml_tiny_value *dst)
 {
     uint64_t v;
+    aml_tiny_named_obj *obj;
 
     if (!ctx || !src || !dst)
         return AML_TINY_ERR_BAD_ARG;
-
-    if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
-        return AML_TINY_ERR_NAMESPACE;
 
     if (dst->type == 2)
     {
@@ -620,6 +648,8 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
             }
             else
             {
+                if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
+                    return AML_TINY_ERR_NAMESPACE;
                 ctx->method.args[(uint32_t)dst->ivalue] = v;
             }
         }
@@ -629,26 +659,32 @@ static int aml_store_to_target(aml_tiny_ctx *ctx, const aml_tiny_value *src, con
     if (dst->type != 1)
         return AML_TINY_ERR_UNSUPPORTED;
 
-    /* Only keep method-local temp names locally */
-    if (dst->name[0] != '\\')
+    /* For non-integer objects, always keep a local copy, even if the
+       namestring is absolute like \_SB._T_0. This avoids losing buffers
+       through host.write_named_int(). */
+    if (src->type != 0)
     {
-        aml_tiny_named_obj *obj = aml_get_or_create_named_obj(ctx, dst->name);
-        if (obj)
-        {
-            aml_value_copy(&obj->value, src);
-            return AML_TINY_OK;
-        }
+        obj = aml_get_or_create_named_obj(ctx, dst->name);
+        if (!obj)
+            return AML_TINY_ERR_NAMESPACE;
+
+        aml_value_copy(&obj->value, src);
+        return AML_TINY_OK;
     }
+
+    /* Integer stores may still go to the host-backed namespace. */
+    obj = aml_get_or_create_named_obj(ctx, dst->name);
+    if (obj)
+        aml_value_copy(&obj->value, src);
+
+    if (aml_value_as_int(ctx, src, &v) != AML_TINY_OK)
+        return AML_TINY_ERR_NAMESPACE;
 
     if (!ctx->host.write_named_int)
         return AML_TINY_ERR_NAMESPACE;
 
     if (ctx->host.write_named_int(ctx->host.user, dst->name, v) != 0)
-    {
-        aml_log(ctx, "store miss");
-        aml_log(ctx, dst->name);
         return AML_TINY_ERR_NAMESPACE;
-    }
 
     return AML_TINY_OK;
 }
