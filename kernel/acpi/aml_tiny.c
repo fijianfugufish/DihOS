@@ -1309,6 +1309,8 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 {
     aml_tiny_ctx tmp;
     aml_tiny_value v;
+    uint32_t pkg_len, pkg_bytes;
+    int rc;
 
     if (!p || !end || p >= end)
         return p;
@@ -1325,6 +1327,8 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
     tmp.p = p;
     tmp.end = end;
     tmp.returned = 0;
+    tmp.return_value = 0;
+    tmp.last_error = AML_TINY_OK;
 
     for (uint32_t i = 0; i < 8u; ++i)
     {
@@ -1336,10 +1340,74 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
         tmp.named_objs[i].value.ivalue = 0;
     }
 
-    if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
-        return tmp.p;
+    switch (*tmp.p)
+    {
+    case 0xA0: /* IfOp */
+    case 0xA1: /* ElseOp */
+    case 0xA2: /* WhileOp */
+    case 0x14: /* MethodOp */
+    case 0x11: /* BufferOp */
+    case 0x12: /* PackageOp */
+    case 0x13: /* VarPackageOp */
+    {
+        tmp.p++; /* consume opcode */
+        rc = aml_pkg_length(&tmp, &pkg_len, &pkg_bytes);
+        if (rc == AML_TINY_OK && pkg_len >= pkg_bytes)
+        {
+            const uint8_t *q = tmp.p + (pkg_len - pkg_bytes);
+            if (q > end)
+                q = end;
+            return q;
+        }
+        return p + 1;
+    }
 
-    return p + 1;
+    case 0x70: /* StoreOp */
+    {
+        tmp.p++; /* opcode */
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        return tmp.p;
+    }
+
+    case 0x86: /* NotifyOp */
+    {
+        tmp.p++; /* opcode */
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        return tmp.p;
+    }
+
+    case 0xA4: /* ReturnOp */
+    {
+        tmp.p++; /* opcode */
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        return tmp.p;
+    }
+
+    case 0xA5: /* BreakOp */
+        return p + 1;
+
+    case 0x08: /* NameOp */
+    {
+        tmp.p++; /* opcode */
+        if (aml_parse_namestring(&tmp, v.name, sizeof(v.name)) != AML_TINY_OK)
+            return p + 1;
+        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+            return p + 1;
+        return tmp.p;
+    }
+
+    default:
+        if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
+            return tmp.p;
+        return p + 1;
+    }
 }
 
 static int aml_exec_if_else(aml_tiny_ctx *ctx)
