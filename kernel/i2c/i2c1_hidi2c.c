@@ -1036,7 +1036,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_ini_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
 
-        /* Run the dedicated TCPD _DSM helper before the bus wake nudges. */
+        /* Run the dedicated TCPD _DSM helper as part of the real wake path. */
         (void)touchpad_run_dsm(rsdp_phys);
 
         tcpd_gpio_reset_pulse(&regs);

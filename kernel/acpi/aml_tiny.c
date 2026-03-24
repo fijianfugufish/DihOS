@@ -1305,6 +1305,43 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
     return aml_eval_namestring_as_ref(ctx, out);
 }
 
+static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
+{
+    aml_tiny_ctx tmp;
+    aml_tiny_value v;
+
+    if (!p || !end || p >= end)
+        return p;
+
+    tmp.method.aml = NULL;
+    tmp.method.aml_len = 0;
+    tmp.method.scope_prefix = NULL;
+    tmp.method.arg_count = 0;
+    tmp.method.use_typed_args = 0;
+    tmp.host.log = NULL;
+    tmp.host.read_named_int = NULL;
+    tmp.host.write_named_int = NULL;
+    tmp.host.user = NULL;
+    tmp.p = p;
+    tmp.end = end;
+    tmp.returned = 0;
+
+    for (uint32_t i = 0; i < 8u; ++i)
+    {
+        tmp.locals[i].type = 0;
+        tmp.locals[i].ivalue = 0;
+        tmp.named_objs[i].used = 0;
+        tmp.named_objs[i].name[0] = 0;
+        tmp.named_objs[i].value.type = 0;
+        tmp.named_objs[i].value.ivalue = 0;
+    }
+
+    if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
+        return tmp.p;
+
+    return p + 1;
+}
+
 static int aml_exec_if_else(aml_tiny_ctx *ctx)
 {
     uint32_t pkg_len;
@@ -1342,25 +1379,29 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
 
     then_start = ctx->p;
 
-    /* Find the start of ElseOp at top level within this If package. */
+    /* Walk AML objects, not raw bytes, so we only stop at a top-level ElseOp. */
     then_end = then_start;
     while (then_end < pkg_end)
     {
         if (*then_end == 0xA1)
             break;
-        ++then_end;
+
+        then_end = aml_skip_one_object(then_end, pkg_end);
+        if (!then_end || then_end <= then_start)
+            break;
     }
 
     if (pv)
     {
+        ctx->p = then_start;
         rc = aml_exec_term_list(ctx, then_end);
         if (rc == AML_TINY_ERR_EOF)
             rc = AML_TINY_OK;
         if (rc != AML_TINY_OK)
             return rc;
 
-        /* Skip optional Else package if present */
         ctx->p = then_end;
+
         if (ctx->p < pkg_end && *ctx->p == 0xA1)
         {
             uint32_t else_len;
@@ -1382,7 +1423,6 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
         return AML_TINY_OK;
     }
 
-    /* False path: skip then-arm and run only Else arm if present */
     ctx->p = then_end;
 
     if (ctx->p < pkg_end && *ctx->p == 0xA1)
