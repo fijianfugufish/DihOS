@@ -1402,11 +1402,25 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
             return p + 1;
         return tmp.p;
     }
-
     default:
+    {
+        uint8_t op = *tmp.p;
+
+        /* Do NOT try to treat control-flow opcodes as termargs */
+        if (op == 0xA0 || /* If */
+            op == 0xA1 || /* Else */
+            op == 0xA2 || /* While */
+            op == 0xA4 || /* Return */
+            op == 0xA5)   /* Break */
+        {
+            return p + 1;
+        }
+
         if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
             return tmp.p;
+
         return p + 1;
+    }
     }
 }
 
