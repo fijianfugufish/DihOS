@@ -1311,11 +1311,13 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     uint32_t pkg_bytes;
     const uint8_t *pkg_start;
     const uint8_t *pkg_end;
+    const uint8_t *then_start;
+    const uint8_t *then_end;
     aml_tiny_value pred;
     uint64_t pv;
     int rc;
 
-    ctx->p++;
+    ctx->p++; /* skip IfOp */
 
     rc = aml_pkg_length(ctx, &pkg_len, &pkg_bytes);
     if (rc != AML_TINY_OK)
@@ -1338,21 +1340,33 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     if (rc != AML_TINY_OK)
         return rc;
 
+    then_start = ctx->p;
+
+    /* Find the start of ElseOp at top level within this If package. */
+    then_end = then_start;
+    while (then_end < pkg_end)
+    {
+        if (*then_end == 0xA1)
+            break;
+        ++then_end;
+    }
+
     if (pv)
     {
-        rc = aml_exec_term_list(ctx, pkg_end);
+        rc = aml_exec_term_list(ctx, then_end);
         if (rc == AML_TINY_ERR_EOF)
             rc = AML_TINY_OK;
         if (rc != AML_TINY_OK)
             return rc;
-        ctx->p = pkg_end;
 
-        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1)
+        /* Skip optional Else package if present */
+        ctx->p = then_end;
+        if (ctx->p < pkg_end && *ctx->p == 0xA1)
         {
             uint32_t else_len;
             uint32_t else_pkg_bytes;
 
-            ctx->p++;
+            ctx->p++; /* consume ElseOp */
             rc = aml_pkg_length(ctx, &else_len, &else_pkg_bytes);
             if (rc != AML_TINY_OK)
                 return rc;
@@ -1364,37 +1378,41 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
             else
                 ctx->p += (else_len - else_pkg_bytes);
         }
+
+        return AML_TINY_OK;
     }
-    else
+
+    /* False path: skip then-arm and run only Else arm if present */
+    ctx->p = then_end;
+
+    if (ctx->p < pkg_end && *ctx->p == 0xA1)
     {
-        ctx->p = pkg_end;
+        uint32_t else_len;
+        uint32_t else_pkg_bytes;
+        const uint8_t *else_end;
 
-        if (!aml_eof(ctx, 1) && *ctx->p == 0xA1)
-        {
-            uint32_t else_len;
-            uint32_t else_pkg_bytes;
-            const uint8_t *else_end;
+        ctx->p++; /* consume ElseOp */
+        rc = aml_pkg_length(ctx, &else_len, &else_pkg_bytes);
+        if (rc != AML_TINY_OK)
+            return rc;
+        if (else_len < else_pkg_bytes)
+            return AML_TINY_ERR_PARSE;
 
-            ctx->p++;
-            rc = aml_pkg_length(ctx, &else_len, &else_pkg_bytes);
-            if (rc != AML_TINY_OK)
-                return rc;
-            if (else_len < else_pkg_bytes)
-                return AML_TINY_ERR_PARSE;
+        else_end = ctx->p + (else_len - else_pkg_bytes);
+        if (else_end > ctx->end)
+            else_end = ctx->end;
 
-            else_end = ctx->p + (else_len - else_pkg_bytes);
-            if (else_end > ctx->end)
-                else_end = ctx->end;
+        rc = aml_exec_term_list(ctx, else_end);
+        if (rc == AML_TINY_ERR_EOF)
+            rc = AML_TINY_OK;
+        if (rc != AML_TINY_OK)
+            return rc;
 
-            rc = aml_exec_term_list(ctx, else_end);
-            if (rc == AML_TINY_ERR_EOF)
-                rc = AML_TINY_OK;
-            if (rc != AML_TINY_OK)
-                return rc;
-            ctx->p = else_end;
-        }
+        ctx->p = else_end;
+        return AML_TINY_OK;
     }
 
+    ctx->p = pkg_end;
     return AML_TINY_OK;
 }
 

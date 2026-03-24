@@ -254,8 +254,8 @@ int touchpad_run_dsm(uint64_t rsdp_phys)
             r.tcpd_dsm_len,
             &s,
             &uuid_arg,
-            1,
             0,
+            1,
             &pkg_arg);
 
     terminal_print("DSM final GABL=");
