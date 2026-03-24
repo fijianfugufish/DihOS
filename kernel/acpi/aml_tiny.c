@@ -1749,13 +1749,7 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
         return AML_TINY_RC_BREAK;
     }
 
-    switch (op)
-    {
-    case 0x70:
-        return aml_exec_store(ctx);
-    case 0x86:
-        return aml_exec_notify(ctx);
-        if (op == 0xA1) /* ElseOp */
+    if (op == 0xA1) /* ElseOp */
     {
         uint32_t else_len, else_pkg_bytes;
 
@@ -1774,10 +1768,21 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
         return AML_TINY_OK;
     }
+
+    switch (op)
+    {
+    case 0x70:
+        return aml_exec_store(ctx);
+
+    case 0x86:
+        return aml_exec_notify(ctx);
+
     case 0xA0:
         return aml_exec_if_else(ctx);
+
     case 0xA2:
         return aml_exec_while(ctx);
+
     case 0xA4:
         return aml_exec_return(ctx);
 
