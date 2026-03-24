@@ -1347,9 +1347,6 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
         const uint8_t *q;
 
         tmp.p++; /* consume IfOp */
-
-        aml_log(&tmp, "SKIPOBJ: IF");
-
         rc = aml_pkg_length(&tmp, &pkg_len, &pkg_bytes);
         if (rc != AML_TINY_OK || pkg_len < pkg_bytes)
             return p + 1;
@@ -1358,16 +1355,13 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
         if (q > end)
             q = end;
 
-        /* IMPORTANT: If a matching Else follows, consume that too,
-           so nested If/Else stays one logical object. */
+        /* IMPORTANT: carry a directly attached Else with this If */
         if (q < end && *q == 0xA1)
         {
-            aml_log(&tmp, "SKIPOBJ: IF+ELSE");
-
             aml_tiny_ctx e = tmp;
             uint32_t else_len, else_pkg_bytes;
 
-            e.p = q + 1; /* after ElseOp */
+            e.p = q + 1; /* skip ElseOp */
             rc = aml_pkg_length(&e, &else_len, &else_pkg_bytes);
             if (rc == AML_TINY_OK && else_len >= else_pkg_bytes)
             {
