@@ -1755,6 +1755,25 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
         return aml_exec_store(ctx);
     case 0x86:
         return aml_exec_notify(ctx);
+        if (op == 0xA1) /* ElseOp */
+    {
+        uint32_t else_len, else_pkg_bytes;
+
+        ctx->p++; /* consume ElseOp */
+
+        if (aml_pkg_length(ctx, &else_len, &else_pkg_bytes) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+
+        if (else_len < else_pkg_bytes)
+            return AML_TINY_ERR_PARSE;
+
+        if (ctx->p + (else_len - else_pkg_bytes) > ctx->end)
+            ctx->p = ctx->end;
+        else
+            ctx->p += (else_len - else_pkg_bytes);
+
+        return AML_TINY_OK;
+    }
     case 0xA0:
         return aml_exec_if_else(ctx);
     case 0xA2:
