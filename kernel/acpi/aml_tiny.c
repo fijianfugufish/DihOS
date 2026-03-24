@@ -1469,7 +1469,9 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
 
     ctx->p++; /* skip IfOp */
 
+#ifdef AML_TINY_DEBUG_IF
     aml_log(ctx, "EXEC: IF");
+#endif
 
     rc = aml_pkg_length(ctx, &pkg_len, &pkg_bytes);
     if (rc != AML_TINY_OK)
@@ -1498,11 +1500,14 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     then_end = then_start;
     while (then_end < pkg_end)
     {
+        const uint8_t *prev = then_end;
+
         if (*then_end == 0xA1)
             break;
 
         then_end = aml_skip_one_object(then_end, pkg_end);
-        if (!then_end || then_end <= then_start)
+
+        if (!then_end || then_end <= prev)
             break;
     }
 
