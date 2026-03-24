@@ -1343,6 +1343,38 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
     switch (*tmp.p)
     {
     case 0xA0: /* IfOp */
+    {
+        const uint8_t *q;
+
+        tmp.p++; /* consume IfOp */
+        rc = aml_pkg_length(&tmp, &pkg_len, &pkg_bytes);
+        if (rc != AML_TINY_OK || pkg_len < pkg_bytes)
+            return p + 1;
+
+        q = tmp.p + (pkg_len - pkg_bytes);
+        if (q > end)
+            q = end;
+
+        /* IMPORTANT: If a matching Else follows, consume that too,
+           so nested If/Else stays one logical object. */
+        if (q < end && *q == 0xA1)
+        {
+            aml_tiny_ctx e = tmp;
+            uint32_t else_len, else_pkg_bytes;
+
+            e.p = q + 1; /* after ElseOp */
+            rc = aml_pkg_length(&e, &else_len, &else_pkg_bytes);
+            if (rc == AML_TINY_OK && else_len >= else_pkg_bytes)
+            {
+                q = e.p + (else_len - else_pkg_bytes);
+                if (q > end)
+                    q = end;
+            }
+        }
+
+        return q;
+    }
+
     case 0xA1: /* ElseOp */
     case 0xA2: /* WhileOp */
     case 0x14: /* MethodOp */
@@ -1364,7 +1396,7 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 
     case 0x70: /* StoreOp */
     {
-        tmp.p++; /* opcode */
+        tmp.p++;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
@@ -1374,7 +1406,7 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 
     case 0x86: /* NotifyOp */
     {
-        tmp.p++; /* opcode */
+        tmp.p++;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
@@ -1384,7 +1416,7 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 
     case 0xA4: /* ReturnOp */
     {
-        tmp.p++; /* opcode */
+        tmp.p++;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         return tmp.p;
@@ -1395,26 +1427,20 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 
     case 0x08: /* NameOp */
     {
-        tmp.p++; /* opcode */
+        tmp.p++;
         if (aml_parse_namestring(&tmp, v.name, sizeof(v.name)) != AML_TINY_OK)
             return p + 1;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         return tmp.p;
     }
+
     default:
     {
         uint8_t op = *tmp.p;
 
-        /* Do NOT try to treat control-flow opcodes as termargs */
-        if (op == 0xA0 || /* If */
-            op == 0xA1 || /* Else */
-            op == 0xA2 || /* While */
-            op == 0xA4 || /* Return */
-            op == 0xA5)   /* Break */
-        {
+        if (op == 0xA0 || op == 0xA1 || op == 0xA2 || op == 0xA4 || op == 0xA5)
             return p + 1;
-        }
 
         if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
             return tmp.p;
