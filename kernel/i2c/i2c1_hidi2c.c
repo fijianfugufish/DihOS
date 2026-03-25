@@ -1,7 +1,6 @@
 #include "i2c/i2c1_hidi2c.h"
 #include "terminal/terminal_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
-#include "hardware_probes/touchpad_dsm.h"
 #include "acpi/aml_tiny.h"
 #include "gpio/gpio.h"
 #include "kwrappers/string.h"
@@ -1031,22 +1030,30 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32((uint32_t)g_aml_gabl);
         terminal_print("\n");
 
-        tcpd_try_ps3_from_acpi(&regs);
+        /*
+          Query-ish methods can stay for logging, but do not use _DSM(fn=1)
+          as the wake primitive. The trusted TCPD _DSM function you found is
+          capability/reporting style, not the actual power-on side effect.
+        */
         tcpd_try_sta_from_acpi(&regs);
         tcpd_try_ini_from_acpi(&regs);
-        tcpd_try_ps0_from_acpi(&regs);
-
-        /* Run the dedicated TCPD _DSM helper as part of the real wake path. */
-        (void)touchpad_run_dsm(rsdp_phys);
-
-        tcpd_gpio_reset_pulse(&regs);
 
         /*
-          Give AML-side power sequencing time to settle before touching I2C.
+          Bring the device up cleanly:
+          1) ACPI power on
+          2) settle
+          3) hardware reset pulse
+          4) settle
+          5) I2C wake nudges
         */
-        delay_ms_approx(60u);
+        tcpd_try_ps0_from_acpi(&regs);
+        delay_ms_approx(30u);
+
+        tcpd_gpio_reset_pulse(&regs);
+        delay_ms_approx(80u);
 
         hidi2c_touchpad_wake_probe(&g_tpd);
+        delay_ms_approx(80u);
 
         /*
           Linux has a QTEC re-power-on quirk. We can't fully mirror it until
