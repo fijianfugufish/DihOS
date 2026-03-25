@@ -1194,17 +1194,68 @@ static void export_method_body(const uint8_t *aml,
 static void maybe_export_tcpd_methods(const uint8_t *aml,
                                       const hidi2c_acpi_summary_t *s)
 {
+    uint32_t chosen_start = 0;
+    uint32_t chosen_end = 0;
+    uint8_t chosen_has_ps0 = 0;
+    uint8_t chosen_has_ps3 = 0;
+    uint8_t chosen_has_sta = 0;
+    uint8_t chosen_has_ini = 0;
+    const char *chosen_tag = "ACPI TCPD scope";
+
     if (!aml || !s)
         return;
 
-    if (s->ggparent_body_end <= s->ggparent_body_start)
+    /*
+      Pick the scope that actually looks like a TCPD power scope.
+      Prefer ggparent, then grandparent, then parent.
+    */
+    if (s->ggparent_body_end > s->ggparent_body_start &&
+        body_looks_like_tcpd_power_method(aml, s->ggparent_body_start, s->ggparent_body_end))
+    {
+        chosen_start = s->ggparent_body_start;
+        chosen_end = s->ggparent_body_end;
+        chosen_has_ps0 = s->ggparent_has_ps0;
+        chosen_has_ps3 = s->ggparent_has_ps3;
+        chosen_has_sta = s->ggparent_has_sta;
+        chosen_has_ini = s->ggparent_has_ini;
+        chosen_tag = "ACPI TCPD scope: ggparent";
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start &&
+             body_looks_like_tcpd_power_method(aml, s->grandparent_body_start, s->grandparent_body_end))
+    {
+        chosen_start = s->grandparent_body_start;
+        chosen_end = s->grandparent_body_end;
+        chosen_has_ps0 = s->grandparent_has_ps0;
+        chosen_has_ps3 = s->grandparent_has_ps3;
+        chosen_has_sta = s->grandparent_has_sta;
+        chosen_has_ini = s->grandparent_has_ini;
+        chosen_tag = "ACPI TCPD scope: grandparent";
+    }
+    else if (s->parent_body_end > s->parent_body_start &&
+             body_looks_like_tcpd_power_method(aml, s->parent_body_start, s->parent_body_end))
+    {
+        chosen_start = s->parent_body_start;
+        chosen_end = s->parent_body_end;
+        chosen_has_ps0 = s->parent_has_ps0;
+        chosen_has_ps3 = s->parent_has_ps3;
+        chosen_has_sta = s->parent_has_sta;
+        chosen_has_ini = s->parent_has_ini;
+        chosen_tag = "ACPI TCPD scope: parent";
+    }
+    else
+    {
+        terminal_print("ACPI TCPD scope: no trusted power scope found\n");
         return;
+    }
 
-    if (s->ggparent_has_ps0)
+    terminal_print(chosen_tag);
+    terminal_print("\n");
+
+    if (chosen_has_ps0)
     {
         export_method_body(aml,
-                           s->ggparent_body_start,
-                           s->ggparent_body_end,
+                           chosen_start,
+                           chosen_end,
                            "_PS0",
                            &g_hidi2c_regs.tcpd_ps0_valid,
                            &g_hidi2c_regs.tcpd_ps0_len,
@@ -1213,11 +1264,11 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
                            "ACPI TCPD _PS0 bytes captured");
     }
 
-    if (s->ggparent_has_ps3)
+    if (chosen_has_ps3)
     {
         export_method_body(aml,
-                           s->ggparent_body_start,
-                           s->ggparent_body_end,
+                           chosen_start,
+                           chosen_end,
                            "_PS3",
                            &g_hidi2c_regs.tcpd_ps3_valid,
                            &g_hidi2c_regs.tcpd_ps3_len,
@@ -1226,11 +1277,11 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
                            "ACPI TCPD _PS3 bytes captured");
     }
 
-    if (s->ggparent_has_sta)
+    if (chosen_has_sta)
     {
         export_method_body(aml,
-                           s->ggparent_body_start,
-                           s->ggparent_body_end,
+                           chosen_start,
+                           chosen_end,
                            "_STA",
                            &g_hidi2c_regs.tcpd_sta_valid,
                            &g_hidi2c_regs.tcpd_sta_len,
@@ -1239,11 +1290,11 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
                            "ACPI TCPD _STA bytes captured");
     }
 
-    if (s->ggparent_has_ini)
+    if (chosen_has_ini)
     {
         export_method_body(aml,
-                           s->ggparent_body_start,
-                           s->ggparent_body_end,
+                           chosen_start,
+                           chosen_end,
                            "_INI",
                            &g_hidi2c_regs.tcpd_ini_valid,
                            &g_hidi2c_regs.tcpd_ini_len,
