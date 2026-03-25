@@ -9,7 +9,6 @@
 #include "kwrappers/string.h"
 #include "kwrappers/kinput.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
-#include "hardware_probes/touchpad_dsm.h"
 
 #include "terminal/terminal_api.h"
 
@@ -81,8 +80,6 @@ void kmain(const boot_info *bi)
 
     terminal_initialize(&font);
     terminal_print("terminal online");
-
-    touchpad_run_dsm(bi->acpi_rsdp);
 
     kinput_init(bi->acpi_rsdp);
 
