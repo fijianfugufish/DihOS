@@ -322,6 +322,15 @@ static void tcpd_try_method_from_acpi(const char *tag,
     tcpd_try_method_from_acpi_ex(tag, scope_prefix, body, len, valid, 0, 0);
 }
 
+static uint8_t aml_body_present(const uint8_t *body, uint16_t len, uint8_t valid)
+{
+    if (valid)
+        return 1;
+    if (body && len != 0u)
+        return 1;
+    return 0;
+}
+
 static void tcpd_try_ps3_from_acpi(const hidi2c_acpi_regs *regs)
 {
     if (!regs)
@@ -330,7 +339,9 @@ static void tcpd_try_ps3_from_acpi(const hidi2c_acpi_regs *regs)
                               "\\_SB.D0?_",
                               regs->tcpd_ps3_body,
                               regs->tcpd_ps3_len,
-                              regs->tcpd_ps3_valid);
+                              aml_body_present(regs->tcpd_ps3_body,
+                                               regs->tcpd_ps3_len,
+                                               regs->tcpd_ps3_valid));
 }
 
 static void tcpd_try_sta_from_acpi(const hidi2c_acpi_regs *regs)
@@ -341,7 +352,9 @@ static void tcpd_try_sta_from_acpi(const hidi2c_acpi_regs *regs)
                               "\\_SB.D0?_",
                               regs->tcpd_sta_body,
                               regs->tcpd_sta_len,
-                              regs->tcpd_sta_valid);
+                              aml_body_present(regs->tcpd_sta_body,
+                                               regs->tcpd_sta_len,
+                                               regs->tcpd_sta_valid));
 }
 
 static void tcpd_try_ini_from_acpi(const hidi2c_acpi_regs *regs)
@@ -352,7 +365,9 @@ static void tcpd_try_ini_from_acpi(const hidi2c_acpi_regs *regs)
                               "\\_SB.D0?_",
                               regs->tcpd_ini_body,
                               regs->tcpd_ini_len,
-                              regs->tcpd_ini_valid);
+                              aml_body_present(regs->tcpd_ini_body,
+                                               regs->tcpd_ini_len,
+                                               regs->tcpd_ini_valid));
 }
 
 static void tcpd_try_ps0_from_acpi(const hidi2c_acpi_regs *regs)
@@ -363,7 +378,9 @@ static void tcpd_try_ps0_from_acpi(const hidi2c_acpi_regs *regs)
                               "\\_SB.D0?_",
                               regs->tcpd_ps0_body,
                               regs->tcpd_ps0_len,
-                              regs->tcpd_ps0_valid);
+                              aml_body_present(regs->tcpd_ps0_body,
+                                               regs->tcpd_ps0_len,
+                                               regs->tcpd_ps0_valid));
 }
 
 static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
@@ -459,7 +476,14 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
 
 static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
 {
-    if (!regs || !regs->tcpd_gpio_valid)
+    if (!regs)
+    {
+        terminal_print("TCPD: no GPIO info\n");
+        return;
+    }
+
+    /* Trust discovered pin data even if the probe forgot to set tcpd_gpio_valid. */
+    if (!regs->tcpd_gpio_valid && regs->tcpd_gpio_pin == 0u)
     {
         terminal_print("TCPD: no GPIO info\n");
         return;
@@ -467,16 +491,18 @@ static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
 
     terminal_print("TCPD GPIO pulse pin:");
     terminal_print_hex32(regs->tcpd_gpio_pin);
+    terminal_print(" flags:");
+    terminal_print_hex32(regs->tcpd_gpio_flags);
     terminal_print("\n");
 
     (void)gpio_init();
     (void)gpio_set_output(regs->tcpd_gpio_pin);
 
     (void)gpio_write(regs->tcpd_gpio_pin, GPIO_VALUE_LOW);
-    delay_ms_approx(10u);
+    delay_ms_approx(20u);
 
     (void)gpio_write(regs->tcpd_gpio_pin, GPIO_VALUE_HIGH);
-    delay_ms_approx(50u);
+    delay_ms_approx(80u);
 }
 
 static int buf_any_nonzero(const uint8_t *buf, uint32_t len)
@@ -1029,31 +1055,20 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print("AML GABL after _REG:");
         terminal_print_hex32((uint32_t)g_aml_gabl);
         terminal_print("\n");
-
-        /*
-          Query-ish methods can stay for logging, but do not use _DSM(fn=1)
-          as the wake primitive. The trusted TCPD _DSM function you found is
-          capability/reporting style, not the actual power-on side effect.
-        */
+        
+        /* Query-ish methods for visibility only */
         tcpd_try_sta_from_acpi(&regs);
         tcpd_try_ini_from_acpi(&regs);
 
-        /*
-          Bring the device up cleanly:
-          1) ACPI power on
-          2) settle
-          3) hardware reset pulse
-          4) settle
-          5) I2C wake nudges
-        */
+        /* Real wake path */
         tcpd_try_ps0_from_acpi(&regs);
-        delay_ms_approx(30u);
+        delay_ms_approx(60u);
 
         tcpd_gpio_reset_pulse(&regs);
-        delay_ms_approx(80u);
+        delay_ms_approx(120u);
 
         hidi2c_touchpad_wake_probe(&g_tpd);
-        delay_ms_approx(80u);
+        delay_ms_approx(120u);
 
         /*
           Linux has a QTEC re-power-on quirk. We can't fully mirror it until
