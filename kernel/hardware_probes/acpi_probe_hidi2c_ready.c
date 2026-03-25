@@ -1084,63 +1084,74 @@ static uint8_t body_mentions_tcpd_clues(const uint8_t *aml, uint32_t body_start,
     return 0;
 }
 
-static uint8_t body_looks_like_tcpd_power_method(const uint8_t *aml, uint32_t body_start, uint32_t body_end)
+static uint8_t body_looks_like_tcpd_power_method(const uint8_t *aml,
+                                                 uint32_t body_start,
+                                                 uint32_t body_end)
 {
-    uint8_t has_tcpd_exact;
-    uint8_t has_addr_or_reg;
-    uint8_t has_gpio;
-    uint8_t has_store;
-    uint8_t has_lid;
-    uint32_t body_len;
+    uint8_t has_i2c = 0;
+    uint8_t has_hid = 0;
+    uint8_t has_gpio = 0;
+    uint8_t has_tcpdish = 0;
+    uint8_t has_lid = 0;
+    uint32_t i;
 
     if (!aml || body_end <= body_start)
         return 0;
 
-    body_len = body_end - body_start;
-
-    /* reject giant umbrella scopes outright */
-    if (body_len > 0x4000u)
-        return 0;
-
-    has_tcpd_exact =
-        body_contains_bytes(aml, body_start, body_end, "TCPD", 4);
-
-    has_addr_or_reg = 0;
-    for (uint32_t i = body_start; i + 4 <= body_end; ++i)
+    for (i = body_start; i + 3u < body_end; ++i)
     {
-        if (aml_u32_eq_le(aml + i, 0x0000002Cu)) /* TCPD address */
-            has_addr_or_reg = 1;
-        if (aml_u32_eq_le(aml + i, 0x00000020u)) /* trusted desc reg */
-            has_addr_or_reg = 1;
+        /* Positive signals */
+        if (!has_i2c &&
+            aml[i] == 'I' && aml[i + 1] == '2' && aml[i + 2] == 'C')
+            has_i2c = 1;
+
+        if (!has_hid &&
+            aml[i] == 'P' && aml[i + 1] == 'N' && aml[i + 2] == 'P' &&
+            aml[i + 3] == '0')
+            has_hid = 1;
+
+        if (!has_gpio &&
+            aml[i] == 'G' && aml[i + 1] == 'P' && aml[i + 2] == 'I' &&
+            aml[i + 3] == 'O')
+            has_gpio = 1;
+
+        if (!has_tcpdish)
+        {
+            if ((aml[i] == 'T' && aml[i + 1] == 'C' && aml[i + 2] == 'P' && aml[i + 3] == 'D') ||
+                (aml[i] == 'Q' && aml[i + 1] == 'T' && aml[i + 2] == 'E' && aml[i + 3] == 'C') ||
+                (aml[i] == 'P' && aml[i + 1] == 'N' && aml[i + 2] == 'P' && aml[i + 3] == '0') ||
+                (aml[i] == 'I' && aml[i + 1] == '2' && aml[i + 2] == 'C' && aml[i + 3] == '6'))
+                has_tcpdish = 1;
+        }
+
+        /* Strong negative signals: lid plumbing */
+        if (!has_lid)
+        {
+            if ((aml[i] == 'L' && aml[i + 1] == 'I' && aml[i + 2] == 'D' && aml[i + 3] == '0') ||
+                (aml[i] == 'L' && aml[i + 1] == 'I' && aml[i + 2] == 'D' && aml[i + 3] == 'B') ||
+                (aml[i] == 'L' && aml[i + 1] == 'I' && aml[i + 2] == 'D' && aml[i + 3] == 'R') ||
+                (aml[i] == 'L' && aml[i + 1] == 'I' && aml[i + 2] == 'D' && aml[i + 3] == 'S'))
+                has_lid = 1;
+        }
     }
 
-    has_gpio =
-        body_contains_bytes(aml, body_start, body_end, "GIO0", 4) ||
-        body_contains_bytes(aml, body_start, body_end, "GPIO", 4);
-
-    has_store =
-        body_contains_bytes_exact(aml, body_start, body_end, (const uint8_t *)"\x70", 1);
-
-    has_lid =
-        body_contains_bytes(aml, body_start, body_end, "LID0", 4) ||
-        body_contains_bytes(aml, body_start, body_end, "LIDS", 4) ||
-        body_contains_bytes(aml, body_start, body_end, "LIDR", 4);
-
-    /* reject pure lid plumbing unless TCPD itself is also referenced */
-    if (has_lid && !has_tcpd_exact && !has_addr_or_reg)
+    /* Reject obvious lid methods outright */
+    if (has_lid)
         return 0;
 
-    /* require something actually specific to the touchpad */
-    if (!(has_tcpd_exact || has_addr_or_reg))
-        return 0;
+    /* Require something genuinely device-ish, not just generic GPIO */
+    if (has_tcpdish)
+        return 1;
 
-    if (!has_gpio)
-        return 0;
+    /* Fallback: I2C + GPIO is plausible, but GPIO alone is not */
+    if (has_i2c && has_gpio)
+        return 1;
 
-    if (!has_store)
-        return 0;
+    /* HID + GPIO is also plausible */
+    if (has_hid && has_gpio)
+        return 1;
 
-    return 1;
+    return 0;
 }
 
 static void export_method_body(const uint8_t *aml,
