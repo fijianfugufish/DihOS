@@ -513,6 +513,52 @@ static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
     delay_ms_approx(80u);
 }
 
+static void tcpd_gpio_drive_pair(const hidi2c_acpi_regs *regs,
+                                 uint32_t first,
+                                 uint32_t second,
+                                 uint32_t first_ms,
+                                 uint32_t second_ms,
+                                 const char *tag)
+{
+    if (!regs || !regs->tcpd_gpio_valid)
+        return;
+
+    terminal_print("TCPD GPIO seq: ");
+    terminal_print(tag);
+    terminal_print(" pin:");
+    terminal_print_hex32(regs->tcpd_gpio_pin);
+    terminal_print("\n");
+
+    (void)gpio_init();
+    (void)gpio_set_output(regs->tcpd_gpio_pin);
+
+    (void)gpio_write(regs->tcpd_gpio_pin, first);
+    delay_ms_approx(first_ms);
+
+    (void)gpio_write(regs->tcpd_gpio_pin, second);
+    delay_ms_approx(second_ms);
+}
+
+static void tcpd_gpio_pulse_active_low(const hidi2c_acpi_regs *regs)
+{
+    tcpd_gpio_drive_pair(regs,
+                         GPIO_VALUE_LOW,
+                         GPIO_VALUE_HIGH,
+                         20u,
+                         120u,
+                         "active-low");
+}
+
+static void tcpd_gpio_pulse_active_high(const hidi2c_acpi_regs *regs)
+{
+    tcpd_gpio_drive_pair(regs,
+                         GPIO_VALUE_HIGH,
+                         GPIO_VALUE_LOW,
+                         20u,
+                         120u,
+                         "active-high");
+}
+
 static int buf_any_nonzero(const uint8_t *buf, uint32_t len)
 {
     if (!buf)
@@ -1038,33 +1084,65 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_warn("ECKB not trusted HIDI2C path; skipping");
     }
 
-    if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
+        if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
-        terminal_print("TCPD minimal wake...\n");
+        int ok = 0;
 
-        /*
-          Keep this path simple:
-          1. optional GPIO reset
-          2. minimal wake probe
-          3. descriptor retries
-
-          Do NOT run the giant AML/ACPI exploratory path here.
-        */
-
-        if (regs.tcpd_gpio_valid)
-        {
-            tcpd_gpio_reset_pulse(&regs);
-            delay_ms_approx(120u);
-        }
-
+        terminal_print("TCPD wake strategy 1: no GPIO pulse\n");
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
         terminal_set_quiet();
-        if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 4u) == 0)
+        if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
         {
             terminal_set_loud();
+            ok = 1;
+        }
+        else
+        {
+            terminal_set_loud();
+        }
 
+        if (!ok && regs.tcpd_gpio_valid)
+        {
+            terminal_print("TCPD wake strategy 2: active-low GPIO pulse\n");
+            tcpd_gpio_pulse_active_low(&regs);
+            hidi2c_touchpad_wake_probe(&g_tpd);
+            delay_ms_approx(120u);
+
+            terminal_set_quiet();
+            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
+            {
+                terminal_set_loud();
+                ok = 1;
+            }
+            else
+            {
+                terminal_set_loud();
+            }
+        }
+
+        if (!ok && regs.tcpd_gpio_valid)
+        {
+            terminal_print("TCPD wake strategy 3: active-high GPIO pulse\n");
+            tcpd_gpio_pulse_active_high(&regs);
+            hidi2c_touchpad_wake_probe(&g_tpd);
+            delay_ms_approx(120u);
+
+            terminal_set_quiet();
+            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
+            {
+                terminal_set_loud();
+                ok = 1;
+            }
+            else
+            {
+                terminal_set_loud();
+            }
+        }
+
+        if (ok)
+        {
             if (hidi2c_post_desc_init(&g_tpd) == 0)
             {
                 g_tpd.online = 1;
@@ -1077,8 +1155,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_set_loud();
-            terminal_warn("TCPD no valid HID descriptor after minimal wake");
+            terminal_warn("TCPD no valid HID descriptor after all wake strategies");
         }
     }
     else
