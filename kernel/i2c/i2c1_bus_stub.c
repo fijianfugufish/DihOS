@@ -277,30 +277,25 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
     if (!buf || len == 0)
         return -1;
 
+    /*
+      This bus is configured for BYTE_GRAN = 1 and 8-bit RX packing.
+      In that mode, the RX FIFO status count behaves like a byte/entry count
+      for what we need here, so consume one byte per FIFO pop.
+    */
     while (got < len && spins++ < I2C1_SPIN_LIMIT)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t wc = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t avail = (rx_st & RX_FIFO_WC_MSK);
 
-        while (wc-- && got < len)
+        if (avail == 0u)
+            continue;
+
+        while (avail-- && got < len)
         {
             uint32_t word = rd32(SE_GENI_RX_FIFOn);
-
-            if (got < len)
-                buf[got++] = (uint8_t)((word >> 0) & 0xFFu);
-            if (got < len)
-                buf[got++] = (uint8_t)((word >> 8) & 0xFFu);
-            if (got < len)
-                buf[got++] = (uint8_t)((word >> 16) & 0xFFu);
-            if (got < len)
-                buf[got++] = (uint8_t)((word >> 24) & 0xFFu);
+            io_barrier();
+            buf[got++] = (uint8_t)(word & 0xFFu);
         }
-
-        if (got >= len)
-            break;
-
-        if (rx_st & RX_LAST)
-            break;
     }
 
     return (got == len) ? 0 : -1;
@@ -313,16 +308,18 @@ static void i2c1_drain_rx_junk(void)
     while (spins++ < 256u)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t wc = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t avail = (rx_st & RX_FIFO_WC_MSK);
 
-        while (wc--)
+        while (avail--)
+        {
             (void)rd32(SE_GENI_RX_FIFOn);
+            io_barrier();
+        }
 
         wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
         io_barrier();
 
-        rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        if ((rx_st & RX_FIFO_WC_MSK) == 0u)
+        if ((rd32(SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) == 0u)
             break;
     }
 }
