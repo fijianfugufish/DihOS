@@ -972,8 +972,11 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
     g_bus_ready = 1;
 
+    terminal_set_quiet();
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &regs) == 0)
     {
+        terminal_set_loud();
+
         have_regs = 1;
 
         if (regs.eckb_addr)
@@ -1007,6 +1010,10 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             terminal_print_hex32(regs.tcpd_gpio_flags);
             terminal_print("\n");
         }
+    }
+    else
+    {
+        terminal_set_loud();
     }
 
     /* Keyboard: only trust ACPI if probe says it is trusted */
@@ -1053,8 +1060,11 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
+        terminal_set_quiet();
         if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 4u) == 0)
         {
+            terminal_set_loud();
+
             if (hidi2c_post_desc_init(&g_tpd) == 0)
             {
                 g_tpd.online = 1;
@@ -1067,6 +1077,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
+            terminal_set_loud();
             terminal_warn("TCPD no valid HID descriptor after minimal wake");
         }
     }
