@@ -198,6 +198,113 @@ static int i2c1_wait_done(uint32_t *irq_out)
     }
 }
 
+static int i2c1_wait_done_or_idle(uint32_t *irq_out)
+{
+    uint32_t spins = 0;
+    uint32_t last_irq = 0;
+
+    for (;;)
+    {
+        uint32_t irq = rd32(SE_GENI_M_IRQ_STATUS);
+        uint32_t st  = rd32(SE_GENI_STATUS);
+
+        last_irq = irq;
+
+        if (irq & M_CMD_DONE_EN)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        if (irq & i2c1_error_bits())
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return -1;
+        }
+
+        /*
+          Important fallback:
+          some paths appear to complete without a visible DONE irq bit.
+          If the master sequencer is no longer active, treat that as completion.
+        */
+        if ((st & GENI_M_CMD_ACTIVE) == 0u)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        if (++spins >= I2C1_SPIN_LIMIT)
+        {
+            if (irq_out)
+                *irq_out = last_irq;
+            return -2;
+        }
+    }
+}
+
+static int i2c1_wait_read_ready(uint32_t *irq_out)
+{
+    uint32_t spins = 0;
+    uint32_t last_irq = 0;
+
+    for (;;)
+    {
+        uint32_t irq   = rd32(SE_GENI_M_IRQ_STATUS);
+        uint32_t st    = rd32(SE_GENI_STATUS);
+        uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
+
+        last_irq = irq;
+
+        if (irq & i2c1_error_bits())
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return -1;
+        }
+
+        /*
+          Any RX bytes or LAST marker means the read side actually produced data.
+        */
+        if ((rx_st & RX_FIFO_WC_MSK) != 0u || (rx_st & RX_LAST))
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        /*
+          Also accept explicit DONE.
+        */
+        if (irq & M_CMD_DONE_EN)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        /*
+          Fallback:
+          command became idle even though DONE was never observed.
+        */
+        if ((st & GENI_M_CMD_ACTIVE) == 0u)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        if (++spins >= I2C1_SPIN_LIMIT)
+        {
+            if (irq_out)
+                *irq_out = last_irq;
+            return -2;
+        }
+    }
+}
+
 /*
 static int fifo_write_bytes(const uint8_t *buf, uint32_t len)
 {
@@ -446,7 +553,7 @@ int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
     wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_done_or_idle(&irq);
 
     if (!g_i2c1_quiet)
     {
@@ -539,7 +646,7 @@ int i2c1_bus_write_read(uint8_t addr7,
     wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_done_or_idle(&irq);
     if (rc != 0)
     {
         wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
@@ -561,7 +668,7 @@ int i2c1_bus_write_read(uint8_t addr7,
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_read_ready(&irq);
 
     if (!g_i2c1_quiet)
     {
@@ -631,7 +738,7 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_read_ready(&irq);
 
     if (!g_i2c1_quiet)
     {

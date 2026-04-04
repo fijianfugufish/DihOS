@@ -18,6 +18,8 @@ static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
 static uint8_t g_bus_ready = 0;
 
+static uint8_t g_hidi2c_debug = 0;
+
 extern int i2c1_bus_init(void);
 extern int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len);
 extern int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len);
@@ -538,6 +540,9 @@ static int buf_any_nonzero(const uint8_t *buf, uint32_t len)
 
 static void print_probe8(const char *tag, uint16_t reg, const uint8_t *rx)
 {
+    if (!g_hidi2c_debug)
+        return;
+
     terminal_print(tag);
     terminal_print(" reg:");
     terminal_print_hex32(reg);
@@ -795,10 +800,13 @@ static int hidi2c_fetch_desc_touchpad_retry(hidi2c_device *dev, uint32_t tries)
     {
         if (hidi2c_fetch_desc_touchpad(dev) == 0)
             return 0;
-
-        terminal_print("TCPD retry:");
-        terminal_print_hex32(i);
-        terminal_print("\n");
+            
+        if (g_hidi2c_debug)
+        {
+            terminal_print("TCPD retry:");
+            terminal_print_hex32(i);
+            terminal_print("\n");
+        }
 
         short_delay(3000000u);
     }
