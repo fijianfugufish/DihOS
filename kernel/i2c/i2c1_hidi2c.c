@@ -476,13 +476,15 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
 
 static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
 {
+    uint32_t active;
+    uint32_t inactive;
+
     if (!regs)
     {
         terminal_print("TCPD: no GPIO info\n");
         return;
     }
 
-    /* Trust discovered pin data even if the probe forgot to set tcpd_gpio_valid. */
     if (!regs->tcpd_gpio_valid && regs->tcpd_gpio_pin == 0u)
     {
         terminal_print("TCPD: no GPIO info\n");
@@ -498,10 +500,25 @@ static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
     (void)gpio_init();
     (void)gpio_set_output(regs->tcpd_gpio_pin);
 
-    (void)gpio_write(regs->tcpd_gpio_pin, GPIO_VALUE_LOW);
-    delay_ms_approx(20u);
+    /*
+      Conservative guess:
+      bit0 often distinguishes active-high vs active-low in GPIO resource flags.
+      If your platform defines this differently, adjust here.
+    */
+    if (regs->tcpd_gpio_flags & 0x1u)
+    {
+        active = GPIO_VALUE_LOW;
+        inactive = GPIO_VALUE_HIGH;
+    }
+    else
+    {
+        active = GPIO_VALUE_HIGH;
+        inactive = GPIO_VALUE_LOW;
+    }
 
-    (void)gpio_write(regs->tcpd_gpio_pin, GPIO_VALUE_HIGH);
+    (void)gpio_write(regs->tcpd_gpio_pin, active);
+    delay_ms_approx(20u);
+    (void)gpio_write(regs->tcpd_gpio_pin, inactive);
     delay_ms_approx(80u);
 }
 
