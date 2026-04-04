@@ -449,29 +449,18 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
     if (!dev)
         return;
 
+    terminal_print("TCPD: minimal wake probe\n");
+
     i2c1_bus_set_quiet(1);
 
-    /* 1) raw address/byte wake like Linux probe_address */
-    (void)tcpd_probe_address_linuxish(dev);
-
-    /* 2) true address-only nudge */
+    /* 1) address-only nudge */
     (void)i2c1_bus_addr_only(dev->i2c_addr_7bit);
-    delay_us_approx(500u);
+    delay_us_approx(1000u);
 
-    /* 3) zero register pointer nudge */
-    wr16(reg0, 0x0000u);
-    (void)i2c1_bus_write(dev->i2c_addr_7bit, reg0, 2);
-    delay_us_approx(500u);
-
-    /* 4) ACPI descriptor register pointer nudge */
+    /* 2) write descriptor register pointer */
     wr16(reg0, TCPD_DESC_REG_ACPI);
     (void)i2c1_bus_write(dev->i2c_addr_7bit, reg0, 2);
-
-    /*
-      Linux waits after power-on because several devices don't behave if you
-      hammer them immediately. Give TCPD real settle time before descriptor read.
-    */
-    delay_ms_approx(60u);
+    delay_ms_approx(20u);
 
     i2c1_bus_set_quiet(0);
 }
@@ -1002,17 +991,6 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex8(regs.eckb_desc_trusted);
         terminal_print("\n");
 
-        if (regs.eckb_gpio_valid)
-        {
-            terminal_print("ACPI ECKB gpio pin:");
-            terminal_print_hex32(regs.eckb_gpio_pin);
-            terminal_print(" flags:");
-            terminal_print_hex32(regs.eckb_gpio_flags);
-            terminal_print(" src:");
-            terminal_print(regs.eckb_gpio_source);
-            terminal_print("\n");
-        }
-
         terminal_print("ACPI TCPD addr:");
         terminal_print_hex8(g_tpd.i2c_addr_7bit);
         terminal_print(" reg:");
@@ -1027,8 +1005,6 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             terminal_print_hex32(regs.tcpd_gpio_pin);
             terminal_print(" flags:");
             terminal_print_hex32(regs.tcpd_gpio_flags);
-            terminal_print(" src:");
-            terminal_print(regs.tcpd_gpio_source);
             terminal_print("\n");
         }
     }
@@ -1057,49 +1033,26 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
     if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
-        terminal_print("TCPD wake attempt...\n");
+        terminal_print("TCPD minimal wake...\n");
 
-        terminal_print("ACPI TCPD _DSM valid:");
-        terminal_print_hex32((uint32_t)regs.tcpd_dsm_valid);
-        terminal_print(" len:");
-        terminal_print_hex32((uint32_t)regs.tcpd_dsm_len);
-        terminal_print("\n");
+        /*
+          Keep this path simple:
+          1. optional GPIO reset
+          2. minimal wake probe
+          3. descriptor retries
 
-        terminal_print("ACPI GIO0 _DSM valid:");
-        terminal_print_hex32((uint32_t)regs.tcpd_gio0_dsm_valid);
-        terminal_print(" len:");
-        terminal_print_hex32((uint32_t)regs.tcpd_gio0_dsm_len);
-        terminal_print("\n");
+          Do NOT run the giant AML/ACPI exploratory path here.
+        */
 
-        g_aml_gabl = 0;
-        g_aml_lids = 0;
-        g_aml_lidb = 0;
-        g_aml_lidr = 0;
-
-        tcpd_try_gio0_reg_from_acpi(&regs);
-        terminal_print("AML GABL after _REG:");
-        terminal_print_hex32((uint32_t)g_aml_gabl);
-        terminal_print("\n");
-        
-        /* Query-ish methods for visibility only */
-        tcpd_try_sta_from_acpi(&regs);
-        tcpd_try_ini_from_acpi(&regs);
-
-        /* Real wake path */
-        tcpd_try_ps0_from_acpi(&regs);
-        delay_ms_approx(60u);
-
-        tcpd_gpio_reset_pulse(&regs);
-        delay_ms_approx(120u);
+        if (regs.tcpd_gpio_valid)
+        {
+            tcpd_gpio_reset_pulse(&regs);
+            delay_ms_approx(120u);
+        }
 
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
-        /*
-          Linux has a QTEC re-power-on quirk. We can't fully mirror it until
-          we have a valid descriptor, but we should retry descriptor fetch only
-          after the longer wake delays above.
-        */
         if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 4u) == 0)
         {
             if (hidi2c_post_desc_init(&g_tpd) == 0)
@@ -1114,7 +1067,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_warn("TCPD still asleep / needs ACPI power fixup");
+            terminal_warn("TCPD no valid HID descriptor after minimal wake");
         }
     }
     else
