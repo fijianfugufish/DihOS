@@ -39,6 +39,12 @@ static void wr16(uint8_t *p, uint16_t v)
     p[1] = (uint8_t)((v >> 8) & 0xFFu);
 }
 
+static void wr16be(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)((v >> 8) & 0xFFu);
+    p[1] = (uint8_t)(v & 0xFFu);
+}
+
 static void short_delay(uint32_t n)
 {
     volatile uint32_t i;
@@ -738,6 +744,90 @@ static int hidi2c_try_desc_reg_combined(hidi2c_device *dev, uint16_t reg)
     return 0;
 }
 
+static int hidi2c_try_desc_reg_split_endian(hidi2c_device *dev, uint16_t reg, int big_endian)
+{
+    uint8_t tx[2];
+    uint8_t rx[30];
+    int rc;
+
+    for (uint32_t i = 0; i < sizeof(rx); ++i)
+        rx[i] = 0;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    rc = i2c1_bus_write_read(dev->i2c_addr_7bit, tx, 2, rx, sizeof(rx));
+
+    terminal_print(dev->name);
+    terminal_print(big_endian ? " split-BE reg:" : " split-LE reg:");
+    terminal_print_hex32(reg);
+    terminal_print(" rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print(" b0:");
+    terminal_print_hex8(rx[0]);
+    terminal_print(" b1:");
+    terminal_print_hex8(rx[1]);
+    terminal_print(" b2:");
+    terminal_print_hex8(rx[2]);
+    terminal_print(" b3:");
+    terminal_print_hex8(rx[3]);
+    terminal_print("\n");
+
+    if (rc != 0)
+        return -1;
+
+    desc_parse(&dev->desc, rx, sizeof(rx));
+    if (!desc_looks_valid(&dev->desc))
+        return -1;
+
+    dev->hid_desc_reg = reg;
+    return 0;
+}
+
+static int hidi2c_try_desc_reg_combined_endian(hidi2c_device *dev, uint16_t reg, int big_endian)
+{
+    uint8_t tx[2];
+    uint8_t rx[30];
+    int rc;
+
+    for (uint32_t i = 0; i < sizeof(rx); ++i)
+        rx[i] = 0;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    rc = i2c1_bus_write_read_combined(dev->i2c_addr_7bit, tx, 2, rx, sizeof(rx));
+
+    terminal_print(dev->name);
+    terminal_print(big_endian ? " comb-BE reg:" : " comb-LE reg:");
+    terminal_print_hex32(reg);
+    terminal_print(" rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print(" b0:");
+    terminal_print_hex8(rx[0]);
+    terminal_print(" b1:");
+    terminal_print_hex8(rx[1]);
+    terminal_print(" b2:");
+    terminal_print_hex8(rx[2]);
+    terminal_print(" b3:");
+    terminal_print_hex8(rx[3]);
+    terminal_print("\n");
+
+    if (rc != 0)
+        return -1;
+
+    desc_parse(&dev->desc, rx, sizeof(rx));
+    if (!desc_looks_valid(&dev->desc))
+        return -1;
+
+    dev->hid_desc_reg = reg;
+    return 0;
+}
+
 static int hidi2c_scan_for_desc(hidi2c_device *dev)
 {
     uint8_t tx[2];
@@ -812,18 +902,29 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     if (!dev)
         return -1;
 
-    /* first the trusted ACPI result, using both transport styles */
+    /* first the trusted ACPI result */
     uint16_t reg = dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI;
 
-    if (hidi2c_try_desc_reg_split(dev, reg) == 0)
+    /* little-endian attempts first */
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
         return 0;
-    if (hidi2c_try_desc_reg_combined(dev, reg) == 0)
+    if (hidi2c_try_desc_reg_combined_endian(dev, reg, 0) == 0)
         return 0;
 
-    /* one fallback only */
-    if (hidi2c_try_desc_reg_split(dev, HIDI2C_DESC_REG_FALLBACK) == 0)
+    /* then big-endian attempts */
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
         return 0;
-    if (hidi2c_try_desc_reg_combined(dev, HIDI2C_DESC_REG_FALLBACK) == 0)
+    if (hidi2c_try_desc_reg_combined_endian(dev, reg, 1) == 0)
+        return 0;
+
+    /* one fallback register, both endian orders */
+    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_combined_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_combined_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
         return 0;
 
     return -1;
@@ -1084,62 +1185,20 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_warn("ECKB not trusted HIDI2C path; skipping");
     }
 
-        if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
+    if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
         int ok = 0;
 
-        terminal_print("TCPD wake strategy 1: no GPIO pulse\n");
+        terminal_print("TCPD wake strategy: no GPIO pulse\n");
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
-        terminal_set_quiet();
+        /*
+          Keep descriptor fetch loud for now so we can see
+          LE vs BE and split vs combined results.
+        */
         if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
-        {
-            terminal_set_loud();
             ok = 1;
-        }
-        else
-        {
-            terminal_set_loud();
-        }
-
-        if (!ok && regs.tcpd_gpio_valid)
-        {
-            terminal_print("TCPD wake strategy 2: active-low GPIO pulse\n");
-            tcpd_gpio_pulse_active_low(&regs);
-            hidi2c_touchpad_wake_probe(&g_tpd);
-            delay_ms_approx(120u);
-
-            terminal_set_quiet();
-            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
-            {
-                terminal_set_loud();
-                ok = 1;
-            }
-            else
-            {
-                terminal_set_loud();
-            }
-        }
-
-        if (!ok && regs.tcpd_gpio_valid)
-        {
-            terminal_print("TCPD wake strategy 3: active-high GPIO pulse\n");
-            tcpd_gpio_pulse_active_high(&regs);
-            hidi2c_touchpad_wake_probe(&g_tpd);
-            delay_ms_approx(120u);
-
-            terminal_set_quiet();
-            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
-            {
-                terminal_set_loud();
-                ok = 1;
-            }
-            else
-            {
-                terminal_set_loud();
-            }
-        }
 
         if (ok)
         {
@@ -1155,7 +1214,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_warn("TCPD no valid HID descriptor after all wake strategies");
+            terminal_warn("TCPD no valid HID descriptor after no-GPIO wake");
         }
     }
     else
