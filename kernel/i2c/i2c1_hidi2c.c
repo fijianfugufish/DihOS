@@ -1207,7 +1207,6 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
     g_bus_ready = 1;
 
-    terminal_set_quiet();
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &regs) == 0)
     {
         terminal_set_loud();
@@ -1273,11 +1272,32 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_warn("ECKB not trusted HIDI2C path; skipping");
     }
 
-    if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
+    if (have_regs && regs.have_tcpd)
     {
         int ok = 0;
 
         terminal_print("TCPD ACPI full quiet init + no-GPIO wake\n");
+
+        terminal_print("TCPD ACPI desc reg:");
+        terminal_print_hex32(regs.tcpd_desc_reg);
+        terminal_print(" trusted:");
+        terminal_print_hex8(regs.tcpd_desc_trusted);
+        terminal_print(" dsm_valid:");
+        terminal_print_hex8(regs.tcpd_dsm_valid);
+        terminal_print(" dsm_len:");
+        terminal_print_hex32(regs.tcpd_dsm_len);
+        terminal_print(" gio0_dsm_valid:");
+        terminal_print_hex8(regs.tcpd_gio0_dsm_valid);
+        terminal_print(" gio0_dsm_len:");
+        terminal_print_hex32(regs.tcpd_gio0_dsm_len);
+        terminal_print("\n");
+
+        /*
+          If _DSM is not really trusted, do not pretend 0x20 is reliable.
+          We can still probe, but we should know we are in heuristic mode.
+        */
+        if (!regs.tcpd_desc_trusted)
+            terminal_warn("TCPD _DSM not strongly trusted; desc reg is heuristic");
 
         /*
           We now know:

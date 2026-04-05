@@ -761,9 +761,31 @@ static int dsm_is_trusted(const hidi2c_acpi_summary_t *s)
     if (!s)
         return 0;
 
+    /*
+      Be stricter.
+
+      The old logic marked _DSM as "trusted" from pattern matches plus a
+      guessed small integer return value. That is not strong enough anymore,
+      because TCPD responds on the bus but still returns all-zero payloads for
+      every register we try.
+
+      Require:
+        - a decoded candidate address
+        - function-1 compare seen
+        - rev-1 compare seen
+        - Arg0/Arg1/Arg2 actually referenced
+        - some UUID evidence present
+
+      This still is not full semantic proof, but it is much less likely to
+      bless a misleading "0x20" result.
+    */
     return s->dsm_hid_desc_ok &&
            s->dsm_has_func1_compare &&
-           s->dsm_has_rev1_compare;
+           s->dsm_has_rev1_compare &&
+           s->dsm_has_arg0_ref &&
+           s->dsm_has_arg1_ref &&
+           s->dsm_has_arg2_ref &&
+           s->dsm_has_uuid_buffer;
 }
 
 static void print_flag(const char *name, uint8_t v)
@@ -2014,6 +2036,26 @@ static int classify_and_export_device(const uint8_t *aml,
 
     if (memeq_n(s->name, "TCPD", 4))
     {
+        terminal_print("TCPD _DSM decode addr:");
+        terminal_print_hex32(s->dsm_hid_desc_addr);
+        terminal_print(" ok:");
+        terminal_print_hex8(s->dsm_hid_desc_ok);
+        terminal_print(" trust:");
+        terminal_print_hex8(dsm_is_trusted(s) ? 1u : 0u);
+        terminal_print(" func1:");
+        terminal_print_hex8(s->dsm_has_func1_compare);
+        terminal_print(" rev1:");
+        terminal_print_hex8(s->dsm_has_rev1_compare);
+        terminal_print(" arg0:");
+        terminal_print_hex8(s->dsm_has_arg0_ref);
+        terminal_print(" arg1:");
+        terminal_print_hex8(s->dsm_has_arg1_ref);
+        terminal_print(" arg2:");
+        terminal_print_hex8(s->dsm_has_arg2_ref);
+        terminal_print(" uuid:");
+        terminal_print_hex8(s->dsm_has_uuid_buffer);
+        terminal_print("\n");
+
         if (s->dsm_hid_desc_ok)
         {
             g_hidi2c_regs.have_tcpd = 1u;
