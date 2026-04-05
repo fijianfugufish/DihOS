@@ -786,6 +786,69 @@ static int hidi2c_try_desc_reg_split_endian(hidi2c_device *dev, uint16_t reg, in
     return 0;
 }
 
+static int hidi2c_try_desc_reg_read_only_after_pointer(hidi2c_device *dev, uint16_t reg, int big_endian)
+{
+    uint8_t tx[2];
+    uint8_t rx[30];
+    int rc;
+
+    if (!dev)
+        return -1;
+
+    for (uint32_t i = 0; i < sizeof(rx); ++i)
+        rx[i] = 0;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    /*
+      First set the internal register pointer with a normal write.
+      Then do a plain read, instead of a repeated-start write_read.
+    */
+    rc = i2c1_bus_write(dev->i2c_addr_7bit, tx, 2u);
+    if (rc != 0)
+    {
+        terminal_print(dev->name);
+        terminal_print(big_endian ? " ptrwr-BE reg:" : " ptrwr-LE reg:");
+        terminal_print_hex32(reg);
+        terminal_print(" rc:");
+        terminal_print_hex32((uint32_t)rc);
+        terminal_print("\n");
+        return -1;
+    }
+
+    delay_ms_approx(2u);
+
+    rc = i2c1_bus_read(dev->i2c_addr_7bit, rx, sizeof(rx));
+
+    terminal_print(dev->name);
+    terminal_print(big_endian ? " rdonly-BE reg:" : " rdonly-LE reg:");
+    terminal_print_hex32(reg);
+    terminal_print(" rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print(" b0:");
+    terminal_print_hex8(rx[0]);
+    terminal_print(" b1:");
+    terminal_print_hex8(rx[1]);
+    terminal_print(" b2:");
+    terminal_print_hex8(rx[2]);
+    terminal_print(" b3:");
+    terminal_print_hex8(rx[3]);
+    terminal_print("\n");
+
+    if (rc != 0)
+        return -1;
+
+    desc_parse(&dev->desc, rx, sizeof(rx));
+    if (!desc_looks_valid(&dev->desc))
+        return -1;
+
+    dev->hid_desc_reg = reg;
+    return 0;
+}
+
 static int hidi2c_try_desc_reg_combined_endian(hidi2c_device *dev, uint16_t reg, int big_endian)
 {
     uint8_t tx[2];
@@ -904,7 +967,24 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
 
     uint16_t reg = dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI;
 
-    /* split only for now; combined path is still not trustworthy */
+    /*
+      Try plain pointer-write + plain read first.
+      The current repeated-start path appears to complete,
+      but may not actually leave the device reading from the intended register.
+    */
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1) == 0)
+        return 0;
+
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
+        return 0;
+
+    /*
+      Keep the older split write_read path as fallback only.
+    */
     if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
         return 0;
     if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
