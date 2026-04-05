@@ -1277,18 +1277,17 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
     {
         int ok = 0;
 
-        terminal_print("TCPD ACPI power + no-GPIO wake\n");
+        terminal_print("TCPD ACPI full quiet init + no-GPIO wake\n");
 
         /*
-          Raw RX FIFO words are all zero even though the controller reports a
-          full 30-byte read. That points away from FIFO unpacking and toward
-          TCPD not being fully powered/ready yet.
+          We now know:
+          - bus transport is fine
+          - pointer write + read is fine
+          - scan 0x0000..0x0040 finds no nonzero descriptor
+          So the next best guess is that TCPD needs more of its ACPI
+          bring-up sequence before it will expose HID registers.
 
-          Re-introduce only the two least-invasive ACPI power actions:
-            1) GIO0._REG(0x08, 1)
-            2) D0?._PS0
-
-          Keep them quiet so we do not bring back the giant AML wall.
+          Keep it quiet so we do not flood the terminal again.
         */
         g_aml_gabl = 0;
         g_aml_lids = 0;
@@ -1296,16 +1295,20 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         g_aml_lidr = 0;
 
         terminal_set_quiet();
+
+        tcpd_try_sta_from_acpi(&regs);
+        tcpd_try_ini_from_acpi(&regs);
         tcpd_try_gio0_reg_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
+
         terminal_set_loud();
 
-        delay_ms_approx(60u);
+        delay_ms_approx(80u);
 
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
-        if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
+        if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 1u) == 0)
             ok = 1;
 
         if (ok)
@@ -1322,12 +1325,8 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_warn("TCPD no valid HID descriptor after ACPI power + no-GPIO wake");
+            terminal_warn("TCPD no valid HID descriptor after ACPI full quiet init + no-GPIO wake");
         }
-    }
-    else
-    {
-        terminal_warn("TCPD missing ACPI HID descriptor register");
     }
 }
 
