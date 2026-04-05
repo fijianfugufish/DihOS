@@ -902,29 +902,17 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     if (!dev)
         return -1;
 
-    /* first the trusted ACPI result */
     uint16_t reg = dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI;
 
-    /* little-endian attempts first */
+    /* split only for now; combined path is still not trustworthy */
     if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
         return 0;
-    if (hidi2c_try_desc_reg_combined_endian(dev, reg, 0) == 0)
-        return 0;
-
-    /* then big-endian attempts */
     if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
         return 0;
-    if (hidi2c_try_desc_reg_combined_endian(dev, reg, 1) == 0)
-        return 0;
 
-    /* one fallback register, both endian orders */
     if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
         return 0;
-    if (hidi2c_try_desc_reg_combined_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
-        return 0;
     if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_combined_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
         return 0;
 
     return -1;

@@ -245,7 +245,7 @@ static int i2c1_wait_done_or_idle(uint32_t *irq_out)
     }
 }
 
-static int i2c1_wait_read_ready(uint32_t *irq_out)
+static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
 {
     uint32_t spins = 0;
     uint32_t last_irq = 0;
@@ -255,6 +255,7 @@ static int i2c1_wait_read_ready(uint32_t *irq_out)
         uint32_t irq   = rd32(SE_GENI_M_IRQ_STATUS);
         uint32_t st    = rd32(SE_GENI_STATUS);
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
+        uint32_t wc    = (rx_st & RX_FIFO_WC_MSK);
 
         last_irq = irq;
 
@@ -266,9 +267,27 @@ static int i2c1_wait_read_ready(uint32_t *irq_out)
         }
 
         /*
-          Any RX bytes or LAST marker means the read side actually produced data.
+          For descriptor/input reads, do NOT treat "any byte available"
+          as success. Wait until either:
+            - enough bytes are present, or
+            - RX_LAST says the controller marked the last beat, or
+            - explicit DONE arrived and some data is present.
         */
-        if ((rx_st & RX_FIFO_WC_MSK) != 0u || (rx_st & RX_LAST))
+        if (wc >= wanted_len)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        if (rx_st & RX_LAST)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        if ((irq & M_CMD_DONE_EN) && wc != 0u)
         {
             if (irq_out)
                 *irq_out = irq;
@@ -276,20 +295,10 @@ static int i2c1_wait_read_ready(uint32_t *irq_out)
         }
 
         /*
-          Also accept explicit DONE.
+          Only accept idle as completion if some RX data actually exists.
+          Idle with zero bytes is not good enough for a read.
         */
-        if (irq & M_CMD_DONE_EN)
-        {
-            if (irq_out)
-                *irq_out = irq;
-            return 0;
-        }
-
-        /*
-          Fallback:
-          command became idle even though DONE was never observed.
-        */
-        if ((st & GENI_M_CMD_ACTIVE) == 0u)
+        if (((st & GENI_M_CMD_ACTIVE) == 0u) && wc != 0u)
         {
             if (irq_out)
                 *irq_out = irq;
@@ -668,7 +677,7 @@ int i2c1_bus_write_read(uint8_t addr7,
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_read_ready(&irq);
+    rc = i2c1_wait_read_ready(rx_len, &irq);
 
     if (!g_i2c1_quiet)
     {
@@ -738,7 +747,7 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_read_ready(&irq);
+    rc = i2c1_wait_read_ready(rx_len, &irq);
 
     if (!g_i2c1_quiet)
     {
