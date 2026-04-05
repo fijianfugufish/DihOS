@@ -393,31 +393,61 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
     if (!buf || len == 0)
         return -1;
 
-    /*
-      Bus init sets:
-        SE_GENI_BYTE_GRAN = 1
-        SE_GENI_RX_PACKING_CFG0 = 0x1F
-      so consume RX one byte per FIFO pop here.
-    */
     while (got < len && spins++ < I2C1_SPIN_LIMIT)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t wc = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t is_last = (rx_st & RX_LAST) ? 1u : 0u;
+        uint32_t last_valid_field = (rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
 
-        if (wc == 0u)
+        if (bytes_avail == 0u)
             continue;
 
-        while (wc-- && got < len)
+        /*
+          RX_FIFO_WC_MSK is reporting bytes here, not FIFO words.
+          The FIFO itself is 32-bit wide, so consume ceil(bytes/4) words.
+        */
+        while (bytes_avail != 0u && got < len)
         {
             uint32_t word = rd32(SE_GENI_RX_FIFOn);
+            uint32_t take = 4u;
+
             io_barrier();
-            buf[got++] = (uint8_t)(word & 0xFFu);
+
+            if (bytes_avail < 4u)
+                take = bytes_avail;
+
+            /*
+              If this status says the final packed word is present, trust
+              RX_LAST_BYTE_VALID for the final word size.
+              Example:
+                rxst = 0x9000001E
+                -> 30 bytes total
+                -> LAST set
+                -> last_valid_field = 1
+                -> final word has 2 valid bytes
+            */
+            if (is_last && bytes_avail <= 4u)
+                take = last_valid_field + 1u;
+
+            if (take > bytes_avail)
+                take = bytes_avail;
+
+            if (take > (len - got))
+                take = (len - got);
+
+            for (uint32_t i = 0; i < take; ++i)
+            {
+                buf[got++] = (uint8_t)((word >> (i * 8u)) & 0xFFu);
+            }
+
+            bytes_avail -= take;
         }
 
         if (got >= len)
-            break;
+            return 0;
 
-        if (rx_st & RX_LAST)
+        if (is_last)
             break;
     }
 
@@ -431,12 +461,24 @@ static void i2c1_drain_rx_junk(void)
     while (spins++ < 256u)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t wc = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
 
-        while (wc--)
+        if (bytes_avail == 0u)
+        {
+            wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
+            io_barrier();
+            break;
+        }
+
+        while (bytes_avail != 0u)
         {
             (void)rd32(SE_GENI_RX_FIFOn);
             io_barrier();
+
+            if (bytes_avail >= 4u)
+                bytes_avail -= 4u;
+            else
+                bytes_avail = 0u;
         }
 
         wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
