@@ -962,39 +962,59 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
 
 static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
 {
+    uint16_t reg;
+    int rc;
+
     if (!dev)
         return -1;
 
-    uint16_t reg = dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI;
+    /*
+      First try the obvious ACPI/fallback locations.
+    */
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, TCPD_DESC_REG_ACPI, 0);
+    if (rc == 0)
+        return 0;
+
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, TCPD_DESC_REG_ACPI, 1);
+    if (rc == 0)
+        return 0;
+
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 0);
+    if (rc == 0)
+        return 0;
+
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 1);
+    if (rc == 0)
+        return 0;
 
     /*
-      Try plain pointer-write + plain read first.
-      The current repeated-start path appears to complete,
-      but may not actually leave the device reading from the intended register.
+      Then do a tight read-only scan.
+      Keep it small for now: 0x0000..0x0040, step 2.
     */
-    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1) == 0)
-        return 0;
+    terminal_print("TCPD scan rdonly start\n");
 
-    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
-        return 0;
+    for (reg = 0x0000u; reg <= 0x0040u; reg += 2u)
+    {
+        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0);
+        if (rc == 0)
+        {
+            terminal_print("TCPD found desc LE @ ");
+            terminal_print_hex32(reg);
+            terminal_print("\n");
+            return 0;
+        }
 
-    /*
-      Keep the older split write_read path as fallback only.
-    */
-    if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
-        return 0;
+        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1);
+        if (rc == 0)
+        {
+            terminal_print("TCPD found desc BE @ ");
+            terminal_print_hex32(reg);
+            terminal_print("\n");
+            return 0;
+        }
+    }
 
-    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
-        return 0;
-
+    terminal_print("TCPD scan rdonly no hit\n");
     return -1;
 }
 
