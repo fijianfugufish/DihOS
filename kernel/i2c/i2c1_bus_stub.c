@@ -385,10 +385,47 @@ static void fifo_write_bytes_now(const uint8_t *buf, uint32_t len)
     }
 }
 
+static void i2c1_dump_rx_words_once(uint32_t expected_len)
+{
+    uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
+    uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
+    uint32_t is_last = (rx_st & RX_LAST) ? 1u : 0u;
+    uint32_t last_valid = ((rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT) + 1u;
+    uint32_t words;
+    uint32_t i;
+
+    terminal_print("RXDBG st:");
+    terminal_print_hex32(rx_st);
+    terminal_print(" expected:");
+    terminal_print_hex32(expected_len);
+    terminal_print(" bytes:");
+    terminal_print_hex32(bytes_avail);
+    terminal_print(" last:");
+    terminal_print_hex32(is_last);
+    terminal_print(" last_valid:");
+    terminal_print_hex32(last_valid);
+    terminal_print("\n");
+
+    words = (bytes_avail + 3u) >> 2;
+
+    for (i = 0; i < words; ++i)
+    {
+        uint32_t w = rd32(SE_GENI_RX_FIFOn);
+        io_barrier();
+
+        terminal_print("RXDBG w");
+        terminal_print_hex32(i);
+        terminal_print(":");
+        terminal_print_hex32(w);
+        terminal_print("\n");
+    }
+}
+
 static int fifo_read_bytes(uint8_t *buf, uint32_t len)
 {
     uint32_t got = 0;
     uint32_t spins = 0;
+    uint32_t debug_done = 0;
 
     if (!buf || len == 0)
         return -1;
@@ -403,10 +440,19 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
         if (bytes_avail == 0u)
             continue;
 
-        /*
-          RX_FIFO_WC_MSK is reporting bytes here, not FIFO words.
-          The FIFO itself is 32-bit wide, so consume ceil(bytes/4) words.
-        */
+        if (!debug_done)
+        {
+            i2c1_dump_rx_words_once(len);
+            debug_done = 1u;
+
+            /*
+              Important:
+              the dump consumed the FIFO contents, so fail intentionally.
+              We only want the raw words from one run.
+            */
+            return -2;
+        }
+
         while (bytes_avail != 0u && got < len)
         {
             uint32_t word = rd32(SE_GENI_RX_FIFOn);
@@ -417,16 +463,6 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
             if (bytes_avail < 4u)
                 take = bytes_avail;
 
-            /*
-              If this status says the final packed word is present, trust
-              RX_LAST_BYTE_VALID for the final word size.
-              Example:
-                rxst = 0x9000001E
-                -> 30 bytes total
-                -> LAST set
-                -> last_valid_field = 1
-                -> final word has 2 valid bytes
-            */
             if (is_last && bytes_avail <= 4u)
                 take = last_valid_field + 1u;
 
@@ -437,9 +473,7 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
                 take = (len - got);
 
             for (uint32_t i = 0; i < take; ++i)
-            {
                 buf[got++] = (uint8_t)((word >> (i * 8u)) & 0xFFu);
-            }
 
             bytes_avail -= take;
         }
