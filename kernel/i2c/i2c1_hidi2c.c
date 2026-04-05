@@ -1177,14 +1177,34 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
     {
         int ok = 0;
 
-        terminal_print("TCPD wake strategy: no GPIO pulse\n");
+        terminal_print("TCPD ACPI power + no-GPIO wake\n");
+
+        /*
+          Raw RX FIFO words are all zero even though the controller reports a
+          full 30-byte read. That points away from FIFO unpacking and toward
+          TCPD not being fully powered/ready yet.
+
+          Re-introduce only the two least-invasive ACPI power actions:
+            1) GIO0._REG(0x08, 1)
+            2) D0?._PS0
+
+          Keep them quiet so we do not bring back the giant AML wall.
+        */
+        g_aml_gabl = 0;
+        g_aml_lids = 0;
+        g_aml_lidb = 0;
+        g_aml_lidr = 0;
+
+        terminal_set_quiet();
+        tcpd_try_gio0_reg_from_acpi(&regs);
+        tcpd_try_ps0_from_acpi(&regs);
+        terminal_set_loud();
+
+        delay_ms_approx(60u);
+
         hidi2c_touchpad_wake_probe(&g_tpd);
         delay_ms_approx(120u);
 
-        /*
-          Keep descriptor fetch loud for now so we can see
-          LE vs BE and split vs combined results.
-        */
         if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
             ok = 1;
 
@@ -1202,7 +1222,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_warn("TCPD no valid HID descriptor after no-GPIO wake");
+            terminal_warn("TCPD no valid HID descriptor after ACPI power + no-GPIO wake");
         }
     }
     else

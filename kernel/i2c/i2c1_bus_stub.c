@@ -425,7 +425,6 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
 {
     uint32_t got = 0;
     uint32_t spins = 0;
-    uint32_t debug_done = 0;
 
     if (!buf || len == 0)
         return -1;
@@ -439,19 +438,6 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
 
         if (bytes_avail == 0u)
             continue;
-
-        if (!debug_done)
-        {
-            i2c1_dump_rx_words_once(len);
-            debug_done = 1u;
-
-            /*
-              Important:
-              the dump consumed the FIFO contents, so fail intentionally.
-              We only want the raw words from one run.
-            */
-            return -2;
-        }
 
         while (bytes_avail != 0u && got < len)
         {
