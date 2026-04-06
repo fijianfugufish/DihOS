@@ -591,6 +591,33 @@ static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
                                  2u);
 }
 
+static void tcpd_dump_dsm_prefix(const uint8_t *body, uint16_t len, const char *tag)
+{
+    uint32_t n, i;
+
+    if (!body || len == 0u)
+    {
+        terminal_print(tag);
+        terminal_print_inline(" empty\n");
+        return;
+    }
+
+    n = (len < 24u) ? len : 24u;
+
+    terminal_print(tag);
+    terminal_print_inline(" len:");
+    terminal_print_inline_hex32(len);
+    terminal_print("bytes:");
+
+    for (i = 0; i < n; ++i)
+    {
+        terminal_print_inline(" ");
+        terminal_print_inline_hex8(body[i]);
+    }
+
+    terminal_print("\n");
+}
+
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
     static const uint8_t guid_acpi_raw[16] = {
@@ -611,6 +638,10 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 
     if (!regs)
         return;
+    
+    tcpd_dump_dsm_prefix(regs->tcpd_dsm_body,
+                    regs->tcpd_dsm_len,
+                    "TCPD _DSM prefix");
 
     terminal_print("TCPD _DSM try raw GUID\n");
     (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",

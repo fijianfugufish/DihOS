@@ -1950,6 +1950,7 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
             }
 
             aml_log(ctx, "term parse fail");
+            aml_log_hex32(ctx, "term off=", (uint32_t)(ctx->p - ctx->method.aml));
             aml_log_badop(ctx, *ctx->p);
             ctx->p++;
             return AML_TINY_OK;
@@ -2029,6 +2030,9 @@ int aml_tiny_exec(
     if (rc != AML_TINY_OK)
     {
         aml_log(&ctx, "exec fail");
+        aml_log_hex32(&ctx, "exec off=", (uint32_t)(ctx.p - ctx.method.aml));
+        if (ctx.p < ctx.end)
+            aml_log_badop(&ctx, *ctx.p);
         return rc;
     }
 
