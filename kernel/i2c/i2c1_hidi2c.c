@@ -542,20 +542,21 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
                                   guid_canonical,
                                   1u, 1u, &ret);
 
-    for (uint64_t fn = 0; fn < 8; ++fn)
-    {
-        terminal_print("TCPD DSM canon fn=");
-        terminal_print_hex32((uint32_t)fn);
-        terminal_print("\n");
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_canonical,
+                                  1u, 0u, &ret);
 
-        (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
-                                    "\\_SB.D0?_",
-                                    regs->tcpd_dsm_body,
-                                    regs->tcpd_dsm_len,
-                                    regs->tcpd_dsm_valid,
-                                    guid_canonical,
-                                    1u, fn, &ret);
-    }
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_canonical,
+                                  1u, 1u, &ret);
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)

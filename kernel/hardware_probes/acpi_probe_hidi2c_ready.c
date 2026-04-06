@@ -1370,18 +1370,56 @@ static void maybe_export_tcpd_dsm(const uint8_t *aml,
     if (!aml || !s)
         return;
 
-    if (s->ggparent_body_end <= s->ggparent_body_start)
+    /*
+      Prefer the nearest ancestor scope that actually contains a _DSM.
+      Do not blindly force ggparent.
+    */
+    if (s->parent_body_end > s->parent_body_start &&
+        find_method_object(aml, s->parent_body_start, s->parent_body_end, "_DSM") >= 0)
+    {
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_DSM",
+                           &g_hidi2c_regs.tcpd_dsm_valid,
+                           &g_hidi2c_regs.tcpd_dsm_len,
+                           g_hidi2c_regs.tcpd_dsm_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI TCPD _DSM bytes captured (parent)");
         return;
+    }
 
-    export_method_body(aml,
-                       s->ggparent_body_start,
-                       s->ggparent_body_end,
-                       "_DSM",
-                       &g_hidi2c_regs.tcpd_dsm_valid,
-                       &g_hidi2c_regs.tcpd_dsm_len,
-                       g_hidi2c_regs.tcpd_dsm_body,
-                       HIDI2C_ACPI_MAX_METHOD_BODY,
-                       "ACPI TCPD _DSM bytes captured");
+    if (s->grandparent_body_end > s->grandparent_body_start &&
+        find_method_object(aml, s->grandparent_body_start, s->grandparent_body_end, "_DSM") >= 0)
+    {
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_DSM",
+                           &g_hidi2c_regs.tcpd_dsm_valid,
+                           &g_hidi2c_regs.tcpd_dsm_len,
+                           g_hidi2c_regs.tcpd_dsm_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI TCPD _DSM bytes captured (grandparent)");
+        return;
+    }
+
+    if (s->ggparent_body_end > s->ggparent_body_start &&
+        find_method_object(aml, s->ggparent_body_start, s->ggparent_body_end, "_DSM") >= 0)
+    {
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_DSM",
+                           &g_hidi2c_regs.tcpd_dsm_valid,
+                           &g_hidi2c_regs.tcpd_dsm_len,
+                           g_hidi2c_regs.tcpd_dsm_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI TCPD _DSM bytes captured (ggparent)");
+        return;
+    }
+
+    terminal_print("ACPI TCPD _DSM not found in parent/grandparent/ggparent\n");
 }
 
 static void maybe_export_gio0_dsm(const uint8_t *aml, uint32_t aml_len)
