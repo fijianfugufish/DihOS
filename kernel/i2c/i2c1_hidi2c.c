@@ -1146,7 +1146,7 @@ static int hidi2c_try_desc_reg_combined_endian(hidi2c_device *dev, uint16_t reg,
     terminal_print_inline(" rc:");
     terminal_print_inline_hex32((uint32_t)rc);
     terminal_print_inline(" b0:");
-    terminal_prin_inlinet_hex8(rx[0]);
+    terminal_print_inline_hex8(rx[0]);
     terminal_print_inline(" b1:");
     terminal_print_inline_hex8(rx[1]);
     terminal_print_inline(" b2:");
