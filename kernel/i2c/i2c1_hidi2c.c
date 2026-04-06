@@ -318,6 +318,88 @@ static void tcpd_try_method_from_acpi_ex(const char *tag,
     terminal_print_hex32((uint32_t)ret);
 }
 
+static int aml_raw_pkglen(const uint8_t *p, const uint8_t *end,
+                          uint32_t *pkg_len_out, uint32_t *pkg_bytes_out)
+{
+    uint8_t lead;
+    uint32_t follow_count;
+    uint32_t len;
+    uint32_t i;
+
+    if (!p || !end || !pkg_len_out || !pkg_bytes_out || p >= end)
+        return -1;
+
+    lead = p[0];
+    follow_count = (uint32_t)((lead >> 6) & 0x03u);
+
+    if (p + 1u + follow_count > end)
+        return -1;
+
+    len = (uint32_t)(lead & 0x0Fu);
+
+    for (i = 0; i < follow_count; ++i)
+        len |= ((uint32_t)p[1u + i]) << (4u + 8u * i);
+
+    *pkg_len_out = len;
+    *pkg_bytes_out = 1u + follow_count;
+    return 0;
+}
+
+static int aml_find_method_body_in_blob(const uint8_t *aml,
+                                        uint32_t aml_len,
+                                        const char *name4,
+                                        const uint8_t **body_out,
+                                        uint16_t *body_len_out)
+{
+    uint32_t i;
+
+    if (!aml || !name4 || !body_out || !body_len_out)
+        return -1;
+
+    *body_out = 0;
+    *body_len_out = 0;
+
+    for (i = 0; i + 6u < aml_len; ++i)
+    {
+        uint32_t pkg_len = 0;
+        uint32_t pkg_bytes = 0;
+        uint32_t name_off;
+        uint32_t flags_off;
+        uint32_t body_start;
+        uint32_t meth_end;
+
+        if (aml[i] != 0x14u) /* MethodOp */
+            continue;
+
+        if (aml_raw_pkglen(aml + i + 1u, aml + aml_len, &pkg_len, &pkg_bytes) != 0)
+            continue;
+
+        name_off = i + 1u + pkg_bytes;
+        flags_off = name_off + 4u;
+        body_start = flags_off + 1u;
+        meth_end = i + 1u + pkg_bytes + pkg_len;
+
+        if (name_off + 4u > aml_len)
+            continue;
+        if (meth_end > aml_len)
+            meth_end = aml_len;
+        if (body_start > meth_end)
+            continue;
+
+        if (aml[name_off + 0] != (uint8_t)name4[0] ||
+            aml[name_off + 1] != (uint8_t)name4[1] ||
+            aml[name_off + 2] != (uint8_t)name4[2] ||
+            aml[name_off + 3] != (uint8_t)name4[3])
+            continue;
+
+        *body_out = aml + body_start;
+        *body_len_out = (uint16_t)(meth_end - body_start);
+        return 0;
+    }
+
+    return -1;
+}
+
 static int tcpd_run_dsm_typed_guid(const char *tag,
                                    const char *scope_prefix,
                                    const uint8_t *body,
@@ -333,12 +415,31 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     uint64_t ret = 0;
     int rc;
     uint32_t i;
+    const uint8_t *exec_body = body;
+    uint16_t exec_len = len;
 
     if (!valid || !body || len == 0u || !guid16)
         return -1;
 
-    m.aml = body;
-    m.aml_len = len;
+    /*
+      Some exported blobs are not pure method bodies; they may still contain
+      a parent Scope/Device wrapper and a nested _DSM MethodOp inside.
+      If so, unwrap the actual _DSM body before executing.
+    */
+    if (aml_find_method_body_in_blob(body, len, "_DSM", &exec_body, &exec_len) == 0)
+    {
+        terminal_print("TCPD _DSM unwrap len:");
+        terminal_print_hex32(exec_len);
+        terminal_print("\n");
+    }
+    else
+    {
+        exec_body = body;
+        exec_len = len;
+    }
+
+    m.aml = exec_body;
+    m.aml_len = exec_len;
     m.scope_prefix = scope_prefix ? scope_prefix : "\\_SB.D0?_";
     m.arg_count = 4u;
     m.use_typed_args = 1u;
@@ -367,7 +468,7 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     m.typed_args[2].type = 0u;
     m.typed_args[2].ivalue = func;
 
-    /* Arg3 = Package() { 1 } in aml_tiny's compact representation */
+    /* Arg3 = Package() { 1 } */
     m.typed_args[3].type = 5u;
     m.typed_args[3].pkg_count = 1u;
     m.typed_args[3].pkg_elems[0] = 1u;
@@ -389,6 +490,7 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     terminal_print_inline_hex32((uint32_t)rc);
     terminal_print_inline(" ret:");
     terminal_print_inline_hex32((uint32_t)ret);
+    terminal_print("\n");
 
     if (out_ret)
         *out_ret = ret;

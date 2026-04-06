@@ -1807,6 +1807,76 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
     return AML_TINY_OK;
 }
 
+static int aml_skip_pkg_object_from_current(aml_tiny_ctx *ctx)
+{
+    uint32_t pkg_len;
+    uint32_t pkg_bytes;
+
+    if (!ctx)
+        return AML_TINY_ERR_BAD_ARG;
+
+    if (aml_pkg_length(ctx, &pkg_len, &pkg_bytes) != AML_TINY_OK)
+        return AML_TINY_ERR_PARSE;
+
+    if (pkg_len < pkg_bytes)
+        return AML_TINY_ERR_PARSE;
+
+    if (ctx->p + (pkg_len - pkg_bytes) > ctx->end)
+        ctx->p = ctx->end;
+    else
+        ctx->p += (pkg_len - pkg_bytes);
+
+    return AML_TINY_OK;
+}
+
+static int aml_exec_extop_or_scope(aml_tiny_ctx *ctx)
+{
+    uint8_t extop;
+
+    if (!ctx)
+        return AML_TINY_ERR_BAD_ARG;
+
+    if (aml_eof(ctx, 1))
+        return AML_TINY_ERR_EOF;
+
+    if (*ctx->p == 0x10u) /* ScopeOp */
+    {
+        ctx->p++;
+        return aml_skip_pkg_object_from_current(ctx);
+    }
+
+    if (*ctx->p != 0x5Bu) /* ExtOpPrefix */
+        return AML_TINY_ERR_UNSUPPORTED;
+
+    ctx->p++; /* consume 0x5B */
+
+    if (aml_take_u8(ctx, &extop) != AML_TINY_OK)
+        return AML_TINY_ERR_EOF;
+
+    /*
+      Minimal namespace/object support:
+      skip container-style extended objects cleanly instead of choking on them.
+    */
+    switch (extop)
+    {
+    case 0x80: /* OpRegionOp */
+    case 0x81: /* FieldOp */
+    case 0x82: /* DeviceOp */
+    case 0x83: /* ProcessorOp */
+    case 0x84: /* PowerResOp */
+    case 0x85: /* ThermalZoneOp */
+    case 0x87: /* BankFieldOp */
+    case 0x88: /* IndexFieldOp */
+    case 0x89: /* DataRegionOp */
+        return aml_skip_pkg_object_from_current(ctx);
+
+    default:
+        aml_log(ctx, "unsupported extop");
+        aml_log_badop(ctx, extop);
+        return AML_TINY_OK;
+    }
+}
+
 static int aml_exec_one_term(aml_tiny_ctx *ctx)
 {
     uint8_t op;
@@ -1841,6 +1911,13 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
 
         return AML_TINY_OK;
     }
+
+    /*
+      New: tolerate namespace wrappers that may appear in captured blobs.
+      This stops 0x10 / 0x5B 0x82 from poisoning execution.
+    */
+    if (op == 0x10u || op == 0x5Bu)
+        return aml_exec_extop_or_scope(ctx);
 
     switch (op)
     {
