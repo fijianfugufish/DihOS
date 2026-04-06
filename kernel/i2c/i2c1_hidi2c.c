@@ -408,6 +408,7 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
                                    const uint8_t *guid16,
                                    uint64_t rev,
                                    uint64_t func,
+                                   uint32_t arg3_mode,
                                    uint64_t *out_ret)
 {
     aml_tiny_method m;
@@ -421,16 +422,10 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     if (!valid || !body || len == 0u || !guid16)
         return -1;
 
-    /*
-      Some exported blobs are not pure method bodies; they may still contain
-      a parent Scope/Device wrapper and a nested _DSM MethodOp inside.
-      If so, unwrap the actual _DSM body before executing.
-    */
     if (aml_find_method_body_in_blob(body, len, "_DSM", &exec_body, &exec_len) == 0)
     {
         terminal_print("TCPD _DSM unwrap len:");
-        terminal_print_hex32(exec_len);
-        
+        terminal_print_inline_hex32(exec_len);
     }
     else
     {
@@ -468,10 +463,44 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     m.typed_args[2].type = 0u;
     m.typed_args[2].ivalue = func;
 
-    /* Arg3 = Package() { 1 } */
-    m.typed_args[3].type = 5u;
-    m.typed_args[3].pkg_count = 1u;
-    m.typed_args[3].pkg_elems[0] = 1u;
+    /*
+      Arg3 variants:
+        0 = Package() {}
+        1 = Package() { 0 }
+        2 = Package() { 1 }
+        3 = Integer(0)
+        4 = Integer(1)
+    */
+    switch (arg3_mode)
+    {
+    default:
+    case 0:
+        m.typed_args[3].type = 5u;
+        m.typed_args[3].pkg_count = 0u;
+        break;
+
+    case 1:
+        m.typed_args[3].type = 5u;
+        m.typed_args[3].pkg_count = 1u;
+        m.typed_args[3].pkg_elems[0] = 0u;
+        break;
+
+    case 2:
+        m.typed_args[3].type = 5u;
+        m.typed_args[3].pkg_count = 1u;
+        m.typed_args[3].pkg_elems[0] = 1u;
+        break;
+
+    case 3:
+        m.typed_args[3].type = 0u;
+        m.typed_args[3].ivalue = 0u;
+        break;
+
+    case 4:
+        m.typed_args[3].type = 0u;
+        m.typed_args[3].ivalue = 1u;
+        break;
+    }
 
     h.read_named_int = tcpd_aml_read_named_int;
     h.write_named_int = tcpd_aml_write_named_int;
@@ -480,17 +509,18 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
 
     rc = aml_tiny_exec(&m, &h, &ret);
 
-    terminal_print("DSM ");
+    terminal_print_inline("DSM ");
     terminal_print_inline(tag);
     terminal_print_inline(" rev:");
     terminal_print_inline_hex32((uint32_t)rev);
     terminal_print_inline(" fn:");
     terminal_print_inline_hex32((uint32_t)func);
+    terminal_print_inline(" a3:");
+    terminal_print_inline_hex32(arg3_mode);
     terminal_print_inline(" rc:");
     terminal_print_inline_hex32((uint32_t)rc);
     terminal_print_inline(" ret:");
     terminal_print_inline_hex32((uint32_t)ret);
-    
 
     if (out_ret)
         *out_ret = ret;
@@ -627,69 +657,38 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
         0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
     };
 
-    static const uint8_t guid_canonical[16] = {
-        0x3C, 0xDF, 0xF6, 0xF7,
-        0x42, 0x67,
-        0x45, 0x55,
-        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
-    };
-
     uint64_t ret = 0;
+    uint32_t a3;
+    uint32_t fn;
 
     if (!regs)
         return;
-    
+
     tcpd_dump_dsm_prefix(regs->tcpd_dsm_body,
-                    regs->tcpd_dsm_len,
-                    "TCPD _DSM prefix");
+                         regs->tcpd_dsm_len,
+                         "TCPD _DSM prefix");
 
-    terminal_print("TCPD _DSM try raw GUID\n");
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_acpi_raw,
-                                  1u, 0u, &ret);
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_acpi_raw,
-                                  1u, 1u, &ret);
-
-    terminal_print("TCPD _DSM try canonical GUID\n");
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_canonical,
-                                  1u, 0u, &ret);
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_canonical,
-                                  1u, 1u, &ret);
-
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_canonical,
-                                  1u, 0u, &ret);
-
-    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
-                                  "\\_SB.D0?_",
-                                  regs->tcpd_dsm_body,
-                                  regs->tcpd_dsm_len,
-                                  regs->tcpd_dsm_valid,
-                                  guid_canonical,
-                                  1u, 1u, &ret);
+    /*
+      Parser is now fine.
+      The next likely failure is _DSM call shape, especially Arg3.
+      Try the ACPI raw GUID only, small fn range, and several Arg3 forms.
+    */
+    for (a3 = 0; a3 <= 4; ++a3)
+    {
+        for (fn = 0; fn <= 3; ++fn)
+        {
+            (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
+                                          "\\_SB.D0?_",
+                                          regs->tcpd_dsm_body,
+                                          regs->tcpd_dsm_len,
+                                          regs->tcpd_dsm_valid,
+                                          guid_acpi_raw,
+                                          1u,
+                                          (uint64_t)fn,
+                                          a3,
+                                          &ret);
+        }
+    }
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
@@ -712,7 +711,7 @@ static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
                                   regs->tcpd_gio0_dsm_len,
                                   regs->tcpd_gio0_dsm_valid,
                                   guid_acpi_raw,
-                                  1u, 0u, &ret);
+                                  1u, 0u, 2u, &ret);
 
     (void)tcpd_run_dsm_typed_guid("GIO0._DSM",
                                   "\\_SB.GIO0",
@@ -720,7 +719,7 @@ static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
                                   regs->tcpd_gio0_dsm_len,
                                   regs->tcpd_gio0_dsm_valid,
                                   guid_acpi_raw,
-                                  1u, 1u, &ret);
+                                  1u, 1u, 2u, &ret);
 }
 
 static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
