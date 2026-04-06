@@ -2027,17 +2027,30 @@ int aml_tiny_exec(
     }
 
     rc = aml_exec_term_list(&ctx, ctx.end);
+
+    /*
+      Reaching the exact end of the method body is a normal way for AML to
+      finish when there is no explicit Return in the path we took.
+      Do not treat end-of-body as a parse failure.
+    */
+    if (rc == AML_TINY_ERR_EOF && ctx.p >= ctx.end)
+        rc = AML_TINY_OK;
+
     if (rc != AML_TINY_OK)
     {
         aml_log(&ctx, "exec fail");
         aml_log_hex32(&ctx, "exec off=", (uint32_t)(ctx.p - ctx.method.aml));
         if (ctx.p < ctx.end)
             aml_log_badop(&ctx, *ctx.p);
+
+        ctx.last_error = rc;
+        if (out_return_value)
+            *out_return_value = 0;
         return rc;
     }
 
     if (out_return_value)
-        *out_return_value = ctx.return_value;
+        *out_return_value = ctx.returned ? ctx.return_value : 0;
 
     return AML_TINY_OK;
 }
