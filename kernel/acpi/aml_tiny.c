@@ -718,14 +718,8 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
 
     if (av.type == 4 && bv.type == 4)
     {
-        aml_log_hex32(ctx, "EQ bufA len=", av.buf_len);
-        aml_log_hex32(ctx, "EQ bufB len=", bv.buf_len);
-
         if (av.buf_len != bv.buf_len)
-        {
-            aml_log(ctx, "EQ buf len mismatch");
             return 0;
-        }
 
         for (i = 0; i < av.buf_len; ++i)
         {
@@ -733,7 +727,6 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
                 return 0;
         }
 
-        aml_log(ctx, "EQ buf match");
         return 1;
     }
 
@@ -1763,7 +1756,7 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
         body_start = ctx->p;
         body_entry = body_start;
 
-        if ((iter & 0xFFu) == 0u)
+        if (iter == 0u)
         {
             aml_log_hex32(ctx, "WHILE iter=", iter);
             aml_log_hex32(ctx, "WHILE pred=", (uint32_t)pv);

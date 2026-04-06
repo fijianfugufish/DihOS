@@ -318,60 +318,46 @@ static void tcpd_try_method_from_acpi_ex(const char *tag,
     terminal_print_hex32((uint32_t)ret);
 }
 
-static int tcpd_run_dsm_typed(const char *tag,
-                              const char *scope_prefix,
-                              const uint8_t *body,
-                              uint16_t len,
-                              uint8_t valid,
-                              uint64_t rev,
-                              uint64_t func,
-                              uint64_t *out_ret)
+static int tcpd_run_dsm_typed_guid(const char *tag,
+                                   const char *scope_prefix,
+                                   const uint8_t *body,
+                                   uint16_t len,
+                                   uint8_t valid,
+                                   const uint8_t *guid16,
+                                   uint64_t rev,
+                                   uint64_t func,
+                                   uint64_t *out_ret)
 {
-    static const uint8_t hid_i2c_guid_raw[16] = {
-        0xF7, 0xF6, 0xDF, 0x3C,
-        0x67, 0x42,
-        0x55, 0x45,
-        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
-    };
-
     aml_tiny_method m;
     aml_tiny_host h;
     uint64_t ret = 0;
     int rc;
     uint32_t i;
 
-    if (!valid || !body || len == 0u)
-    {
-        terminal_print("AML: no ");
-        terminal_print(tag);
-        terminal_print(" body available\n");
+    if (!valid || !body || len == 0u || !guid16)
         return -1;
-    }
 
     m.aml = body;
     m.aml_len = len;
     m.scope_prefix = scope_prefix ? scope_prefix : "\\_SB.D0?_";
     m.arg_count = 4u;
-
-    for (i = 0; i < 7u; ++i)
-        m.args[i] = 0;
-
     m.use_typed_args = 1u;
 
     for (i = 0; i < 7u; ++i)
     {
-        m.typed_args[i].type = 0;
-        m.typed_args[i].ivalue = 0;
+        m.args[i] = 0;
+        m.typed_args[i].type = 0u;
+        m.typed_args[i].ivalue = 0u;
         m.typed_args[i].name[0] = 0;
-        m.typed_args[i].buf_len = 0;
-        m.typed_args[i].pkg_count = 0;
+        m.typed_args[i].buf_len = 0u;
+        m.typed_args[i].pkg_count = 0u;
     }
 
-    /* Arg0 = HID-I2C GUID buffer */
+    /* Arg0 = GUID buffer */
     m.typed_args[0].type = 4u;
     m.typed_args[0].buf_len = 16u;
     for (i = 0; i < 16u; ++i)
-        m.typed_args[0].buf[i] = hid_i2c_guid_raw[i];
+        m.typed_args[0].buf[i] = guid16[i];
 
     /* Arg1 = revision */
     m.typed_args[1].type = 0u;
@@ -390,23 +376,17 @@ static int tcpd_run_dsm_typed(const char *tag,
     h.log = tcpd_aml_log;
     h.user = 0;
 
-    terminal_print("AML exec ");
-    terminal_print_inline(tag);
-    terminal_print_inline(", rev:");
-    terminal_print_inline_hex32((uint32_t)rev);
-    terminal_print_inline(", fn:");
-    terminal_print_inline_hex32((uint32_t)func);
-    terminal_print_inline(", len:");
-    terminal_print_inline_hex32(len);
-
-    rc = aml_tiny_trace_names(&m, &h);
-    terminal_print("AML trace rc:");
-    terminal_print_inline_hex32((uint32_t)rc);
-
     rc = aml_tiny_exec(&m, &h, &ret);
-    terminal_print("AML exec rc:");
+
+    terminal_print("DSM ");
+    terminal_print_inline(tag);
+    terminal_print_inline(" rev:");
+    terminal_print_inline_hex32((uint32_t)rev);
+    terminal_print_inline(" fn:");
+    terminal_print_inline_hex32((uint32_t)func);
+    terminal_print_inline(" rc:");
     terminal_print_inline_hex32((uint32_t)rc);
-    terminal_print_inline(", ret:");
+    terminal_print_inline(" ret:");
     terminal_print_inline_hex32((uint32_t)ret);
 
     if (out_ret)
@@ -510,33 +490,56 @@ static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
 
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
+    static const uint8_t guid_acpi_raw[16] = {
+        0xF7, 0xF6, 0xDF, 0x3C,
+        0x67, 0x42,
+        0x55, 0x45,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+
+    static const uint8_t guid_canonical[16] = {
+        0x3C, 0xDF, 0xF6, 0xF7,
+        0x42, 0x67,
+        0x45, 0x55,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+
     uint64_t ret = 0;
 
     if (!regs)
         return;
 
-    /*
-      Real typed HID-I2C _DSM calls:
-        Arg0 = HID-I2C GUID buffer
-        Arg1 = revision
-        Arg2 = function
-        Arg3 = empty package
+    terminal_print("TCPD _DSM try raw GUID\n");
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_acpi_raw,
+                                  1u, 0u, &ret);
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_acpi_raw,
+                                  1u, 1u, &ret);
 
-      Start with the common discovery calls:
-        rev=1 fn=0  (query support)
-        rev=1 fn=1  (feature / descriptor-related path)
-    */
-    (void)tcpd_run_dsm_typed("TCPD._DSM", "\\_SB.D0?_",
-                             regs->tcpd_dsm_body,
-                             regs->tcpd_dsm_len,
-                             regs->tcpd_dsm_valid,
-                             1u, 0u, &ret);
-
-    (void)tcpd_run_dsm_typed("TCPD._DSM", "\\_SB.D0?_",
-                             regs->tcpd_dsm_body,
-                             regs->tcpd_dsm_len,
-                             regs->tcpd_dsm_valid,
-                             1u, 1u, &ret);
+    terminal_print("TCPD _DSM try canonical GUID\n");
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_canonical,
+                                  1u, 0u, &ret);
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_canonical,
+                                  1u, 1u, &ret);
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
