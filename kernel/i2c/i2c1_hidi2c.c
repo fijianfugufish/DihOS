@@ -1454,10 +1454,11 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
           The loud AML dump strongly suggests TCPD is behind an
           argument-driven ACPI enable path, not just a static desc-reg read.
         */
-        tcpd_try_tcpd_dsm_from_acpi(&regs);
-        tcpd_try_gio0_dsm_from_acpi(&regs);
 
         terminal_set_loud();
+
+        tcpd_try_tcpd_dsm_from_acpi(&regs);
+        tcpd_try_gio0_dsm_from_acpi(&regs);
 
         delay_ms_approx(80u);
 
