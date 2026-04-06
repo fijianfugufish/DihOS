@@ -87,7 +87,7 @@ static int tcpd_probe_address_linuxish(hidi2c_device *dev)
     terminal_print_hex32((uint32_t)rc);
     terminal_print(" b:");
     terminal_print_hex8(b);
-    terminal_print("\n");
+    
 
     return rc;
 }
@@ -205,7 +205,7 @@ static int tcpd_aml_read_named_int(void *user, const char *name, uint64_t *out)
     terminal_print("AML namespace auto-zero: ");
     if (name)
         terminal_print(name);
-    terminal_print("\n");
+    
 
     return 0;
 }
@@ -223,7 +223,7 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write GABL=");
         terminal_print_hex32((uint32_t)value);
-        terminal_print("\n");
+        
 
         return 0;
     }
@@ -234,7 +234,7 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write LIDB=");
         terminal_print_hex32((uint32_t)value);
-        terminal_print("\n");
+        
 
         return 0;
     }
@@ -245,14 +245,14 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write LIDR=");
         terminal_print_hex32((uint32_t)value);
-        terminal_print("\n");
+        
 
         return 0;
     }
 
     terminal_print("AML ignored write: ");
     terminal_print(name);
-    terminal_print("\n");
+    
 
     return 0;
 }
@@ -262,7 +262,7 @@ static void tcpd_aml_log(void *user, const char *msg)
     (void)user;
     terminal_print("AML: ");
     terminal_print(msg);
-    terminal_print("\n");
+    
 }
 
 static void tcpd_try_method_from_acpi_ex(const char *tag,
@@ -430,7 +430,7 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     {
         terminal_print("TCPD _DSM unwrap len:");
         terminal_print_hex32(exec_len);
-        terminal_print("\n");
+        
     }
     else
     {
@@ -490,7 +490,7 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     terminal_print_inline_hex32((uint32_t)rc);
     terminal_print_inline(" ret:");
     terminal_print_inline_hex32((uint32_t)ret);
-    terminal_print("\n");
+    
 
     if (out_ret)
         *out_ret = ret;
@@ -615,7 +615,7 @@ static void tcpd_dump_dsm_prefix(const uint8_t *body, uint16_t len, const char *
         terminal_print_inline_hex8(body[i]);
     }
 
-    terminal_print("\n");
+    
 }
 
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
@@ -767,7 +767,7 @@ static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
     terminal_print_hex32(regs->tcpd_gpio_pin);
     terminal_print(" flags:");
     terminal_print_hex32(regs->tcpd_gpio_flags);
-    terminal_print("\n");
+    
 
     (void)gpio_init();
     (void)gpio_set_output(regs->tcpd_gpio_pin);
@@ -808,7 +808,7 @@ static void tcpd_gpio_drive_pair(const hidi2c_acpi_regs *regs,
     terminal_print(tag);
     terminal_print(" pin:");
     terminal_print_hex32(regs->tcpd_gpio_pin);
-    terminal_print("\n");
+    
 
     (void)gpio_init();
     (void)gpio_set_output(regs->tcpd_gpio_pin);
@@ -878,7 +878,7 @@ static void print_probe8(const char *tag, uint16_t reg, const uint8_t *rx)
     terminal_print_hex8(rx[6]);
     terminal_print(" ");
     terminal_print_hex8(rx[7]);
-    terminal_print("\n");
+    
 }
 
 static void desc_parse(hidi2c_desc *d, const uint8_t *buf, uint32_t len)
@@ -968,7 +968,7 @@ static int hidi2c_try_desc_reg_split(hidi2c_device *dev, uint16_t reg)
     terminal_print_hex8(rx[2]);
     terminal_print(" b3:");
     terminal_print_hex8(rx[3]);
-    terminal_print("\n");
+    
 
     if (rc != 0)
         return -1;
@@ -1006,7 +1006,7 @@ static int hidi2c_try_desc_reg_combined(hidi2c_device *dev, uint16_t reg)
     terminal_print_hex8(rx[2]);
     terminal_print(" b3:");
     terminal_print_hex8(rx[3]);
-    terminal_print("\n");
+    
 
     if (rc != 0)
         return -1;
@@ -1048,7 +1048,7 @@ static int hidi2c_try_desc_reg_split_endian(hidi2c_device *dev, uint16_t reg, in
     terminal_print_hex8(rx[2]);
     terminal_print(" b3:");
     terminal_print_hex8(rx[3]);
-    terminal_print("\n");
+    
 
     if (rc != 0)
         return -1;
@@ -1086,11 +1086,11 @@ static int hidi2c_try_desc_reg_read_only_after_pointer(hidi2c_device *dev, uint1
     if (rc != 0)
     {
         terminal_print(dev->name);
-        terminal_print(big_endian ? " ptrwr-BE reg:" : " ptrwr-LE reg:");
-        terminal_print_hex32(reg);
-        terminal_print(" rc:");
-        terminal_print_hex32((uint32_t)rc);
-        terminal_print("\n");
+        terminal_print_inline(big_endian ? " ptrwr-BE reg:" : " ptrwr-LE reg:");
+        terminal_print_inline_hex32(reg);
+        terminal_print_inline(" rc:");
+        terminal_print_inline_hex32((uint32_t)rc);
+        
         return -1;
     }
 
@@ -1099,19 +1099,19 @@ static int hidi2c_try_desc_reg_read_only_after_pointer(hidi2c_device *dev, uint1
     rc = i2c1_bus_read(dev->i2c_addr_7bit, rx, sizeof(rx));
 
     terminal_print(dev->name);
-    terminal_print(big_endian ? " rdonly-BE reg:" : " rdonly-LE reg:");
-    terminal_print_hex32(reg);
-    terminal_print(" rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print(" b0:");
-    terminal_print_hex8(rx[0]);
-    terminal_print(" b1:");
-    terminal_print_hex8(rx[1]);
-    terminal_print(" b2:");
-    terminal_print_hex8(rx[2]);
-    terminal_print(" b3:");
-    terminal_print_hex8(rx[3]);
-    terminal_print("\n");
+    terminal_print_inline(big_endian ? " rdonly-BE reg:" : " rdonly-LE reg:");
+    terminal_print_inline_hex32(reg);
+    terminal_print_inline(" rc:");
+    terminal_print_inline_hex32((uint32_t)rc);
+    terminal_print_inline(" b0:");
+    terminal_print_inline_hex8(rx[0]);
+    terminal_print_inline(" b1:");
+    terminal_print_inline_hex8(rx[1]);
+    terminal_print_inline(" b2:");
+    terminal_print_inline_hex8(rx[2]);
+    terminal_print_inline(" b3:");
+    terminal_print_inline_hex8(rx[3]);
+    
 
     if (rc != 0)
         return -1;
@@ -1141,19 +1141,19 @@ static int hidi2c_try_desc_reg_combined_endian(hidi2c_device *dev, uint16_t reg,
     rc = i2c1_bus_write_read_combined(dev->i2c_addr_7bit, tx, 2, rx, sizeof(rx));
 
     terminal_print(dev->name);
-    terminal_print(big_endian ? " comb-BE reg:" : " comb-LE reg:");
-    terminal_print_hex32(reg);
-    terminal_print(" rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print(" b0:");
-    terminal_print_hex8(rx[0]);
-    terminal_print(" b1:");
-    terminal_print_hex8(rx[1]);
-    terminal_print(" b2:");
-    terminal_print_hex8(rx[2]);
-    terminal_print(" b3:");
-    terminal_print_hex8(rx[3]);
-    terminal_print("\n");
+    terminal_print_inline(big_endian ? " comb-BE reg:" : " comb-LE reg:");
+    terminal_print_inline_hex32(reg);
+    terminal_print_inline(" rc:");
+    terminal_print_inline_hex32((uint32_t)rc);
+    terminal_print_inline(" b0:");
+    terminal_prin_inlinet_hex8(rx[0]);
+    terminal_print_inline(" b1:");
+    terminal_print_inline_hex8(rx[1]);
+    terminal_print_inline(" b2:");
+    terminal_print_inline_hex8(rx[2]);
+    terminal_print_inline(" b3:");
+    terminal_print_inline_hex8(rx[3]);
+    
 
     if (rc != 0)
         return -1;
@@ -1202,7 +1202,7 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
                 i2c1_bus_set_quiet(0);
                 terminal_print("FOUND HID DESC split @ ");
                 terminal_print_hex32(reg);
-                terminal_print("\n");
+                
                 return 0;
             }
         }
@@ -1225,7 +1225,7 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
                 i2c1_bus_set_quiet(0);
                 terminal_print("FOUND HID DESC comb @ ");
                 terminal_print_hex32(reg);
-                terminal_print("\n");
+                
                 return 0;
             }
         }
@@ -1275,7 +1275,7 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
         {
             terminal_print("TCPD found desc LE @ ");
             terminal_print_hex32(reg);
-            terminal_print("\n");
+            
             return 0;
         }
 
@@ -1284,7 +1284,7 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
         {
             terminal_print("TCPD found desc BE @ ");
             terminal_print_hex32(reg);
-            terminal_print("\n");
+            
             return 0;
         }
     }
@@ -1304,7 +1304,7 @@ static int hidi2c_fetch_desc_touchpad_retry(hidi2c_device *dev, uint32_t tries)
         {
             terminal_print("TCPD retry:");
             terminal_print_hex32(i);
-            terminal_print("\n");
+            
         }
 
         short_delay(3000000u);
@@ -1358,7 +1358,7 @@ static int hidi2c_set_power(hidi2c_device *dev, uint8_t power_state)
     terminal_print(dev->name);
     terminal_print(" pwr:");
     terminal_print_hex8(power_state);
-    terminal_print("\n");
+    
 
     return i2c1_bus_write(dev->i2c_addr_7bit, cmd, len);
 }
@@ -1444,7 +1444,7 @@ static int hidi2c_read_input(hidi2c_device *dev)
         terminal_print_hex32(dev->last_report.len);
         terminal_print(" b0:");
         terminal_print_hex8(dev->last_report.data[0]);
-        terminal_print("\n");
+        
     }
 
     return 0;
@@ -1503,7 +1503,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32(regs.eckb_desc_reg);
         terminal_print(" trust:");
         terminal_print_hex8(regs.eckb_desc_trusted);
-        terminal_print("\n");
+        
 
         terminal_print("ACPI TCPD addr:");
         terminal_print_hex8(g_tpd.i2c_addr_7bit);
@@ -1511,7 +1511,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32(regs.tcpd_desc_reg);
         terminal_print(" trust:");
         terminal_print_hex8(regs.tcpd_desc_trusted);
-        terminal_print("\n");
+        
 
         if (regs.tcpd_gpio_valid)
         {
@@ -1519,7 +1519,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             terminal_print_hex32(regs.tcpd_gpio_pin);
             terminal_print(" flags:");
             terminal_print_hex32(regs.tcpd_gpio_flags);
-            terminal_print("\n");
+            
         }
     }
     else
@@ -1567,7 +1567,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex8(regs.tcpd_gio0_dsm_valid);
         terminal_print(" gio0_dsm_len:");
         terminal_print_hex32(regs.tcpd_gio0_dsm_len);
-        terminal_print("\n");
+        
 
         /*
           If _DSM is not really trusted, do not pretend 0x20 is reliable.
@@ -1580,7 +1580,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         {
             terminal_print("TCPD _DSM captured len:");
             terminal_print_hex32(regs.tcpd_dsm_len);
-            terminal_print("\n");
+            
         }
 
         terminal_warn("TCPD likely needs real ACPI _DSM execution; current path only infers desc reg and then probes I2C");
