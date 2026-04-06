@@ -1677,7 +1677,7 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
         return rc;
     body_start = ctx->p;
 
-    for (iter = 0; iter < 256u; ++iter)
+    for (iter = 0; iter < AML_TINY_MAX_WHILE_ITERS; ++iter)
     {
         /* If a nested Return already happened, unwind now */
         if (ctx->returned)
@@ -1720,7 +1720,6 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
         if (rc != AML_TINY_OK)
             return rc;
 
-        /* This is the missing part: Return inside the loop body must end the loop */
         if (ctx->returned)
         {
             ctx->p = pkg_end;
