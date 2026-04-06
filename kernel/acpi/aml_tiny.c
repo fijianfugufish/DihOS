@@ -1354,6 +1354,48 @@ static int aml_eval_termarg(aml_tiny_ctx *ctx, aml_tiny_value *out)
     return aml_eval_namestring_as_ref(ctx, out);
 }
 
+static const uint8_t *aml_skip_pkg_object_raw(const uint8_t *p, const uint8_t *end)
+{
+    aml_tiny_ctx tmp;
+    uint32_t pkg_len, pkg_bytes;
+
+    if (!p || !end || p >= end)
+        return p;
+
+    tmp.p = p;
+    tmp.end = end;
+
+    if (aml_pkg_length(&tmp, &pkg_len, &pkg_bytes) != AML_TINY_OK)
+        return p + 1;
+
+    if (pkg_len < pkg_bytes)
+        return p + 1;
+
+    p = tmp.p + (pkg_len - pkg_bytes);
+    if (p > end)
+        p = end;
+
+    return p;
+}
+
+static const uint8_t *aml_skip_namestring_raw(const uint8_t *p, const uint8_t *end)
+{
+    aml_tiny_ctx tmp;
+    char namebuf[AML_TINY_MAX_NAMESTRING];
+
+    if (!p || !end || p >= end)
+        return p;
+
+    tmp.method.scope_prefix = 0;
+    tmp.p = p;
+    tmp.end = end;
+
+    if (aml_parse_namestring(&tmp, namebuf, sizeof(namebuf)) != AML_TINY_OK)
+        return p + 1;
+
+    return tmp.p;
+}
+
 static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 {
     aml_tiny_ctx tmp;
@@ -1391,11 +1433,37 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
 
     switch (*tmp.p)
     {
+    case 0x10: /* ScopeOp */
+        tmp.p++;
+        return aml_skip_pkg_object_raw(tmp.p, end);
+
+    case 0x5B: /* ExtOpPrefix */
+        if (tmp.p + 1 >= end)
+            return p + 1;
+
+        switch (tmp.p[1])
+        {
+        case 0x80: /* OpRegionOp */
+        case 0x81: /* FieldOp */
+        case 0x82: /* DeviceOp */
+        case 0x83: /* ProcessorOp */
+        case 0x84: /* PowerResOp */
+        case 0x85: /* ThermalZoneOp */
+        case 0x87: /* BankFieldOp */
+        case 0x88: /* IndexFieldOp */
+        case 0x89: /* DataRegionOp */
+            tmp.p += 2;
+            return aml_skip_pkg_object_raw(tmp.p, end);
+
+        default:
+            return p + 2;
+        }
+
     case 0xA0: /* IfOp */
     {
         const uint8_t *q;
 
-        tmp.p++; /* consume IfOp */
+        tmp.p++;
         rc = aml_pkg_length(&tmp, &pkg_len, &pkg_bytes);
         if (rc != AML_TINY_OK || pkg_len < pkg_bytes)
             return p + 1;
@@ -1404,13 +1472,12 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
         if (q > end)
             q = end;
 
-        /* IMPORTANT: carry a directly attached Else with this If */
         if (q < end && *q == 0xA1)
         {
             aml_tiny_ctx e = tmp;
             uint32_t else_len, else_pkg_bytes;
 
-            e.p = q + 1; /* skip ElseOp */
+            e.p = q + 1;
             rc = aml_pkg_length(&e, &else_len, &else_pkg_bytes);
             if (rc == AML_TINY_OK && else_len >= else_pkg_bytes)
             {
@@ -1430,7 +1497,7 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
     case 0x12: /* PackageOp */
     case 0x13: /* VarPackageOp */
     {
-        tmp.p++; /* consume opcode */
+        tmp.p++;
         rc = aml_pkg_length(&tmp, &pkg_len, &pkg_bytes);
         if (rc == AML_TINY_OK && pkg_len >= pkg_bytes)
         {
@@ -1442,59 +1509,37 @@ static const uint8_t *aml_skip_one_object(const uint8_t *p, const uint8_t *end)
         return p + 1;
     }
 
-    case 0x70: /* StoreOp */
-    {
+    case 0x08: /* NameOp */
         tmp.p++;
-        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
+        tmp.p = aml_skip_namestring_raw(tmp.p, end);
+        if (tmp.p <= p)
             return p + 1;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
-            return p + 1;
+            return tmp.p > p ? tmp.p : p + 1;
         return tmp.p;
-    }
 
+    case 0x70: /* StoreOp */
     case 0x86: /* NotifyOp */
-    {
         tmp.p++;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
-            return p + 1;
+            return tmp.p > p ? tmp.p : p + 1;
         return tmp.p;
-    }
 
     case 0xA4: /* ReturnOp */
-    {
         tmp.p++;
         if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
             return p + 1;
         return tmp.p;
-    }
 
     case 0xA5: /* BreakOp */
         return p + 1;
 
-    case 0x08: /* NameOp */
-    {
-        tmp.p++;
-        if (aml_parse_namestring(&tmp, v.name, sizeof(v.name)) != AML_TINY_OK)
-            return p + 1;
-        if (aml_eval_termarg(&tmp, &v) != AML_TINY_OK)
-            return p + 1;
-        return tmp.p;
-    }
-
     default:
-    {
-        uint8_t op = *tmp.p;
-
-        if (op == 0xA0 || op == 0xA1 || op == 0xA2 || op == 0xA4 || op == 0xA5)
-            return p + 1;
-
         if (aml_eval_termarg(&tmp, &v) == AML_TINY_OK && tmp.p > p)
             return tmp.p;
-
         return p + 1;
-    }
     }
 }
 
@@ -1896,7 +1941,7 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
     {
         uint32_t else_len, else_pkg_bytes;
 
-        ctx->p++; /* consume ElseOp */
+        ctx->p++;
 
         if (aml_pkg_length(ctx, &else_len, &else_pkg_bytes) != AML_TINY_OK)
             return AML_TINY_ERR_PARSE;
@@ -1912,12 +1957,43 @@ static int aml_exec_one_term(aml_tiny_ctx *ctx)
         return AML_TINY_OK;
     }
 
-    /*
-      New: tolerate namespace wrappers that may appear in captured blobs.
-      This stops 0x10 / 0x5B 0x82 from poisoning execution.
-    */
-    if (op == 0x10u || op == 0x5Bu)
-        return aml_exec_extop_or_scope(ctx);
+    if (op == 0x10) /* ScopeOp */
+    {
+        ctx->p++;
+        if (aml_skip_pkg_body(ctx, 0) != AML_TINY_OK)
+            return AML_TINY_ERR_PARSE;
+        return AML_TINY_OK;
+    }
+
+    if (op == 0x5B) /* ExtOpPrefix */
+    {
+        uint8_t extop;
+        ctx->p++;
+
+        if (aml_take_u8(ctx, &extop) != AML_TINY_OK)
+            return AML_TINY_ERR_EOF;
+
+        switch (extop)
+        {
+        case 0x80: /* OpRegionOp */
+        case 0x81: /* FieldOp */
+        case 0x82: /* DeviceOp */
+        case 0x83: /* ProcessorOp */
+        case 0x84: /* PowerResOp */
+        case 0x85: /* ThermalZoneOp */
+        case 0x87: /* BankFieldOp */
+        case 0x88: /* IndexFieldOp */
+        case 0x89: /* DataRegionOp */
+            if (aml_skip_pkg_body(ctx, 0) != AML_TINY_OK)
+                return AML_TINY_ERR_PARSE;
+            return AML_TINY_OK;
+
+        default:
+            aml_log(ctx, "unsupported extop");
+            aml_log_badop(ctx, extop);
+            return AML_TINY_OK;
+        }
+    }
 
     switch (op)
     {
