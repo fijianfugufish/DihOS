@@ -669,6 +669,8 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
     if (!ctx || !a || !b)
         return 0;
 
+    aml_log(ctx, "EQ enter");
+
     if (aml_materialize_value(ctx, a, &av) != AML_TINY_OK)
         aml_value_copy(&av, a);
 
@@ -677,8 +679,14 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
 
     if (av.type == 4 && bv.type == 4)
     {
+        aml_log_hex32(ctx, "EQ bufA len=", av.buf_len);
+        aml_log_hex32(ctx, "EQ bufB len=", bv.buf_len);
+
         if (av.buf_len != bv.buf_len)
+        {
+            aml_log(ctx, "EQ buf len mismatch");
             return 0;
+        }
 
         for (i = 0; i < av.buf_len; ++i)
         {
@@ -686,6 +694,7 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
                 return 0;
         }
 
+        aml_log(ctx, "EQ buf match");
         return 1;
     }
 
@@ -708,7 +717,17 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
     if (aml_value_as_int(ctx, &bv, &bi) != AML_TINY_OK)
         return 0;
 
-    return ai == bi;
+    aml_log_hex32(ctx, "EQ intA=", (uint32_t)ai);
+    aml_log_hex32(ctx, "EQ intB=", (uint32_t)bi);
+
+    if (ai == bi)
+    {
+        aml_log(ctx, "EQ int match");
+        return 1;
+    }
+
+    aml_log(ctx, "EQ int mismatch");
+    return 0;
 }
 
 static int aml_parse_target_or_null(aml_tiny_ctx *ctx, aml_tiny_value *out, int *is_null)
@@ -1488,6 +1507,8 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     if (rc != AML_TINY_OK)
         return rc;
 
+    aml_log_if_pred(ctx, pv, (uint32_t)(ctx->p - ctx->method.aml));
+
     then_start = ctx->p;
 
     /* Walk AML objects, not raw bytes, so we only stop at a top-level ElseOp. */
@@ -1675,6 +1696,12 @@ static void aml_log_hex32(aml_tiny_ctx *ctx, const char *prefix, uint32_t v)
     msg[i] = 0;
 
     aml_log(ctx, msg);
+}
+
+static void aml_log_if_pred(aml_tiny_ctx *ctx, uint64_t pv, uint32_t off)
+{
+    aml_log_hex32(ctx, "IF off=", off);
+    aml_log_hex32(ctx, "IF pred=", (uint32_t)pv);
 }
 
 static int aml_exec_while(aml_tiny_ctx *ctx)
