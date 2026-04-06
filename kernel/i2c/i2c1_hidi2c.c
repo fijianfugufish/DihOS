@@ -1324,6 +1324,8 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
     g_bus_ready = 1;
 
+    terminal_set_quiet();
+
     if (acpi_hidi2c_get_regs_from_rsdp(rsdp_phys, &regs) == 0)
     {
         terminal_set_loud();
