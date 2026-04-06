@@ -1644,6 +1644,39 @@ static int aml_exec_notify(aml_tiny_ctx *ctx)
     return AML_TINY_OK;
 }
 
+static void aml_log_hex32(aml_tiny_ctx *ctx, const char *prefix, uint32_t v)
+{
+    char msg[64];
+    const char hex[] = "0123456789ABCDEF";
+    uint32_t i = 0;
+
+    if (!ctx || !prefix)
+        return;
+
+    while (prefix[i] && i + 1u < sizeof(msg))
+    {
+        msg[i] = prefix[i];
+        ++i;
+    }
+
+    if (i + 10u >= sizeof(msg))
+        return;
+
+    msg[i++] = '0';
+    msg[i++] = 'x';
+    msg[i++] = hex[(v >> 28) & 0xF];
+    msg[i++] = hex[(v >> 24) & 0xF];
+    msg[i++] = hex[(v >> 20) & 0xF];
+    msg[i++] = hex[(v >> 16) & 0xF];
+    msg[i++] = hex[(v >> 12) & 0xF];
+    msg[i++] = hex[(v >> 8) & 0xF];
+    msg[i++] = hex[(v >> 4) & 0xF];
+    msg[i++] = hex[v & 0xF];
+    msg[i] = 0;
+
+    aml_log(ctx, msg);
+}
+
 static int aml_exec_while(aml_tiny_ctx *ctx)
 {
     uint32_t pkg_len, pkg_bytes;
@@ -1670,16 +1703,20 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
     if (pkg_end > ctx->end)
         pkg_end = ctx->end;
 
-    /* parse once to discover where predicate ends and body begins */
     pred_start = ctx->p;
     rc = aml_eval_termarg(ctx, &pred);
     if (rc != AML_TINY_OK)
         return rc;
     body_start = ctx->p;
 
+    aml_log_hex32(ctx, "WHILE pred_off=", (uint32_t)(pred_start - ctx->method.aml));
+    aml_log_hex32(ctx, "WHILE body_off=", (uint32_t)(body_start - ctx->method.aml));
+    aml_log_hex32(ctx, "WHILE end_off=",  (uint32_t)(pkg_end - ctx->method.aml));
+
     for (iter = 0; iter < AML_TINY_MAX_WHILE_ITERS; ++iter)
     {
-        /* If a nested Return already happened, unwind now */
+        const uint8_t *body_entry;
+
         if (ctx->returned)
         {
             ctx->p = pkg_end;
@@ -1697,9 +1734,18 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
             return rc;
 
         body_start = ctx->p;
+        body_entry = body_start;
+
+        if ((iter & 0xFFu) == 0u)
+        {
+            aml_log_hex32(ctx, "WHILE iter=", iter);
+            aml_log_hex32(ctx, "WHILE pred=", (uint32_t)pv);
+            aml_log_hex32(ctx, "WHILE p=", (uint32_t)(ctx->p - ctx->method.aml));
+        }
 
         if (!pv)
         {
+            aml_log(ctx, "WHILE exit pred=0");
             ctx->p = pkg_end;
             return AML_TINY_OK;
         }
@@ -1710,6 +1756,7 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
 
         if (rc == AML_TINY_RC_BREAK)
         {
+            aml_log(ctx, "WHILE break");
             ctx->p = pkg_end;
             return AML_TINY_OK;
         }
@@ -1722,8 +1769,18 @@ static int aml_exec_while(aml_tiny_ctx *ctx)
 
         if (ctx->returned)
         {
+            aml_log(ctx, "WHILE return");
             ctx->p = pkg_end;
             return AML_TINY_OK;
+        }
+
+        /*
+          If the body made literally no forward progress and predicate stays true,
+          this is almost certainly a stubbed-environment loop.
+        */
+        if (ctx->p == body_entry)
+        {
+            aml_log(ctx, "WHILE no body progress");
         }
     }
 
