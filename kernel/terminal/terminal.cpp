@@ -326,7 +326,7 @@ void Terminal::Warn(const char *text)
     if (terminal_quiet)
         return;
 
-    terminal_log_start_line("[WARN]     ", text);
+    terminal_log_start_line("[WARN] ", text);
     AddLine(text, orange);
 }
 
@@ -335,7 +335,7 @@ void Terminal::Error(const char *text)
     if (terminal_quiet)
         return;
 
-    terminal_log_start_line("[ERROR]    ", text);
+    terminal_log_start_line("[ERROR] ", text);
     AddLine(text, red);
 }
 
@@ -344,7 +344,7 @@ void Terminal::Success(const char *text)
     if (terminal_quiet)
         return;
 
-    terminal_log_start_line("[SUCCESS]  ", text);
+    terminal_log_start_line("[SUCCESS] ", text);
     AddLine(text, green);
 }
 
