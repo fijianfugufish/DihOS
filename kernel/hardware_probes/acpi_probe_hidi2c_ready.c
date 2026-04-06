@@ -1370,6 +1370,8 @@ static void maybe_export_tcpd_dsm(const uint8_t *aml,
     if (!aml || !s)
         return;
 
+    terminal_set_loud();
+
     /*
       Prefer the nearest ancestor scope that actually contains a _DSM.
       Do not blindly force ggparent.
@@ -1386,6 +1388,8 @@ static void maybe_export_tcpd_dsm(const uint8_t *aml,
                            g_hidi2c_regs.tcpd_dsm_body,
                            HIDI2C_ACPI_MAX_METHOD_BODY,
                            "ACPI TCPD _DSM bytes captured (parent)");
+        
+        terminal_set_quiet();
         return;
     }
 
@@ -1401,6 +1405,8 @@ static void maybe_export_tcpd_dsm(const uint8_t *aml,
                            g_hidi2c_regs.tcpd_dsm_body,
                            HIDI2C_ACPI_MAX_METHOD_BODY,
                            "ACPI TCPD _DSM bytes captured (grandparent)");
+
+        terminal_set_quiet();
         return;
     }
 
@@ -1416,10 +1422,13 @@ static void maybe_export_tcpd_dsm(const uint8_t *aml,
                            g_hidi2c_regs.tcpd_dsm_body,
                            HIDI2C_ACPI_MAX_METHOD_BODY,
                            "ACPI TCPD _DSM bytes captured (ggparent)");
+
+        terminal_set_quiet();
         return;
     }
 
     terminal_print("ACPI TCPD _DSM not found in parent/grandparent/ggparent\n");
+    terminal_set_quiet();
 }
 
 static void maybe_export_gio0_dsm(const uint8_t *aml, uint32_t aml_len)
