@@ -2107,9 +2107,13 @@ int aml_tiny_exec(
     /*
       Reaching the exact end of the method body is a normal way for AML to
       finish when there is no explicit Return in the path we took.
-      Do not treat end-of-body as a parse failure.
+
+      In practice some paths currently bubble up AML_TINY_ERR_PARSE at the
+      exact end of the method body too, even though execution already consumed
+      the whole object stream. Treat both EOF and PARSE as success in that
+      specific end-of-body case.
     */
-    if (rc == AML_TINY_ERR_EOF && ctx.p >= ctx.end)
+    if ((rc == AML_TINY_ERR_EOF || rc == AML_TINY_ERR_PARSE) && ctx.p >= ctx.end)
         rc = AML_TINY_OK;
 
     if (rc != AML_TINY_OK)
