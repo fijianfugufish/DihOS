@@ -367,9 +367,10 @@ static int tcpd_run_dsm_typed_guid(const char *tag,
     m.typed_args[2].type = 0u;
     m.typed_args[2].ivalue = func;
 
-    /* Arg3 = empty package */
+    /* Arg3 = Package() { 1 } in aml_tiny's compact representation */
     m.typed_args[3].type = 5u;
-    m.typed_args[3].pkg_count = 0u;
+    m.typed_args[3].pkg_count = 1u;
+    m.typed_args[3].pkg_elems[0] = 1u;
 
     h.read_named_int = tcpd_aml_read_named_int;
     h.write_named_int = tcpd_aml_write_named_int;
@@ -540,6 +541,21 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
                                   regs->tcpd_dsm_valid,
                                   guid_canonical,
                                   1u, 1u, &ret);
+
+    for (uint64_t fn = 0; fn < 8; ++fn)
+    {
+        terminal_print("TCPD DSM canon fn=");
+        terminal_print_hex32((uint32_t)fn);
+        terminal_print("\n");
+
+        (void)tcpd_run_dsm_typed_guid("TCPD._DSM/canon",
+                                    "\\_SB.D0?_",
+                                    regs->tcpd_dsm_body,
+                                    regs->tcpd_dsm_len,
+                                    regs->tcpd_dsm_valid,
+                                    guid_canonical,
+                                    1u, fn, &ret);
+    }
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
