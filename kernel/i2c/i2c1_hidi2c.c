@@ -321,6 +321,106 @@ static void tcpd_try_method_from_acpi_ex(const char *tag,
     terminal_print("\n");
 }
 
+static int tcpd_run_dsm_typed(const char *tag,
+                              const char *scope_prefix,
+                              const uint8_t *body,
+                              uint16_t len,
+                              uint8_t valid,
+                              uint64_t rev,
+                              uint64_t func,
+                              uint64_t *out_ret)
+{
+    static const uint8_t hid_i2c_guid_raw[16] = {
+        0xF7, 0xF6, 0xDF, 0x3C,
+        0x67, 0x42,
+        0x55, 0x45,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+
+    aml_tiny_method m;
+    aml_tiny_host h;
+    uint64_t ret = 0;
+    int rc;
+    uint32_t i;
+
+    if (!valid || !body || len == 0u)
+    {
+        terminal_print("AML: no ");
+        terminal_print(tag);
+        terminal_print(" body available\n");
+        return -1;
+    }
+
+    m.aml = body;
+    m.aml_len = len;
+    m.scope_prefix = scope_prefix ? scope_prefix : "\\_SB.D0?_";
+    m.arg_count = 4u;
+
+    for (i = 0; i < 7u; ++i)
+        m.args[i] = 0;
+
+    m.use_typed_args = 1u;
+
+    for (i = 0; i < 7u; ++i)
+    {
+        m.typed_args[i].type = 0;
+        m.typed_args[i].ivalue = 0;
+        m.typed_args[i].name[0] = 0;
+        m.typed_args[i].buf_len = 0;
+        m.typed_args[i].pkg_count = 0;
+    }
+
+    /* Arg0 = HID-I2C GUID buffer */
+    m.typed_args[0].type = 4u;
+    m.typed_args[0].buf_len = 16u;
+    for (i = 0; i < 16u; ++i)
+        m.typed_args[0].buf[i] = hid_i2c_guid_raw[i];
+
+    /* Arg1 = revision */
+    m.typed_args[1].type = 0u;
+    m.typed_args[1].ivalue = rev;
+
+    /* Arg2 = function */
+    m.typed_args[2].type = 0u;
+    m.typed_args[2].ivalue = func;
+
+    /* Arg3 = empty package */
+    m.typed_args[3].type = 5u;
+    m.typed_args[3].pkg_count = 0u;
+
+    h.read_named_int = tcpd_aml_read_named_int;
+    h.write_named_int = tcpd_aml_write_named_int;
+    h.log = tcpd_aml_log;
+    h.user = 0;
+
+    terminal_print("AML: exec ");
+    terminal_print(tag);
+    terminal_print(" rev:");
+    terminal_print_hex32((uint32_t)rev);
+    terminal_print(" fn:");
+    terminal_print_hex32((uint32_t)func);
+    terminal_print(" len:");
+    terminal_print_hex32(len);
+    terminal_print("\n");
+
+    rc = aml_tiny_trace_names(&m, &h);
+    terminal_print("AML trace rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+
+    rc = aml_tiny_exec(&m, &h, &ret);
+    terminal_print("AML exec rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print(" ret:");
+    terminal_print_hex32((uint32_t)ret);
+    terminal_print("\n");
+
+    if (out_ret)
+        *out_ret = ret;
+
+    return rc;
+}
+
 static void tcpd_try_method_from_acpi(const char *tag,
                                       const char *scope_prefix,
                                       const uint8_t *body,
@@ -416,36 +516,53 @@ static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
 
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
+    uint64_t ret = 0;
+
     if (!regs)
         return;
 
     /*
-      Placeholder runner only.
-      Do not call this until the probe also exports the correct _DSM UUID/rev/fn
-      inputs, because _DSM is argument-driven.
+      Real typed HID-I2C _DSM calls:
+        Arg0 = HID-I2C GUID buffer
+        Arg1 = revision
+        Arg2 = function
+        Arg3 = empty package
+
+      Start with the common discovery calls:
+        rev=1 fn=0  (query support)
+        rev=1 fn=1  (feature / descriptor-related path)
     */
-    tcpd_try_method_from_acpi("_DSM",
-                              "\\_SB.D0?_",
-                              regs->tcpd_dsm_body,
-                              regs->tcpd_dsm_len,
-                              regs->tcpd_dsm_valid);
+    (void)tcpd_run_dsm_typed("TCPD._DSM", "\\_SB.D0?_",
+                             regs->tcpd_dsm_body,
+                             regs->tcpd_dsm_len,
+                             regs->tcpd_dsm_valid,
+                             1u, 0u, &ret);
+
+    (void)tcpd_run_dsm_typed("TCPD._DSM", "\\_SB.D0?_",
+                             regs->tcpd_dsm_body,
+                             regs->tcpd_dsm_len,
+                             regs->tcpd_dsm_valid,
+                             1u, 1u, &ret);
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
+    uint64_t ret = 0;
+
     if (!regs)
         return;
 
-    /*
-      Placeholder runner only.
-      Do not call this until the probe also exports the correct _DSM UUID/rev/fn
-      inputs, because _DSM is argument-driven.
-    */
-    tcpd_try_method_from_acpi("_DSM",
-                              "\\_SB.GIO0",
-                              regs->tcpd_gio0_dsm_body,
-                              regs->tcpd_gio0_dsm_len,
-                              regs->tcpd_gio0_dsm_valid);
+    (void)tcpd_run_dsm_typed("GIO0._DSM", "\\_SB.GIO0",
+                             regs->tcpd_gio0_dsm_body,
+                             regs->tcpd_gio0_dsm_len,
+                             regs->tcpd_gio0_dsm_valid,
+                             1u, 0u, &ret);
+
+    (void)tcpd_run_dsm_typed("GIO0._DSM", "\\_SB.GIO0",
+                             regs->tcpd_gio0_dsm_body,
+                             regs->tcpd_gio0_dsm_len,
+                             regs->tcpd_gio0_dsm_valid,
+                             1u, 1u, &ret);
 }
 
 static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
@@ -1299,6 +1416,15 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         if (!regs.tcpd_desc_trusted)
             terminal_warn("TCPD _DSM not strongly trusted; desc reg is heuristic");
 
+        if (regs.tcpd_dsm_valid)
+        {
+            terminal_print("TCPD _DSM captured len:");
+            terminal_print_hex32(regs.tcpd_dsm_len);
+            terminal_print("\n");
+        }
+
+        terminal_warn("TCPD likely needs real ACPI _DSM execution; current path only infers desc reg and then probes I2C");
+
         /*
           We now know:
           - bus transport is fine
@@ -1320,6 +1446,14 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_ini_from_acpi(&regs);
         tcpd_try_gio0_reg_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
+
+        /*
+          New: execute real typed _DSM calls before the I2C probe.
+          The loud AML dump strongly suggests TCPD is behind an
+          argument-driven ACPI enable path, not just a static desc-reg read.
+        */
+        tcpd_try_tcpd_dsm_from_acpi(&regs);
+        tcpd_try_gio0_dsm_from_acpi(&regs);
 
         terminal_set_loud();
 

@@ -762,22 +762,9 @@ static int dsm_is_trusted(const hidi2c_acpi_summary_t *s)
         return 0;
 
     /*
-      Be stricter.
-
-      The old logic marked _DSM as "trusted" from pattern matches plus a
-      guessed small integer return value. That is not strong enough anymore,
-      because TCPD responds on the bus but still returns all-zero payloads for
-      every register we try.
-
-      Require:
-        - a decoded candidate address
-        - function-1 compare seen
-        - rev-1 compare seen
-        - Arg0/Arg1/Arg2 actually referenced
-        - some UUID evidence present
-
-      This still is not full semantic proof, but it is much less likely to
-      bless a misleading "0x20" result.
+      Require actual UUID evidence, not just func/rev shape and a guessed
+      small integer. TCPD currently ACKs on I2C but returns all-zero payloads,
+      so we need to be stricter about blessing a descriptor register.
     */
     return s->dsm_hid_desc_ok &&
            s->dsm_has_func1_compare &&
@@ -1931,16 +1918,41 @@ static void dsm_mark_raw_arg_usage(hidi2c_acpi_summary_t *s,
 static void dsm_mark_hidi2c_guid_raw(hidi2c_acpi_summary_t *s,
                                      const uint8_t *aml, uint32_t meth_body, uint32_t meth_end)
 {
-    static const uint8_t guid_ascii[] = "3CDFF6F7-4267-4555-AD05-B30A3D8938DE";
+    static const uint8_t hid_i2c_guid_raw[16] = {
+        0xF7, 0xF6, 0xDF, 0x3C,
+        0x67, 0x42,
+        0x55, 0x45,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+
+    static const uint8_t hid_i2c_guid_ascii[36] = {
+        '3','C','D','F','F','6','F','7','-',
+        '4','2','6','7','-',
+        '4','5','5','5','-',
+        'A','D','0','5','-',
+        'B','3','0','A','3','D','8','9','3','8','D','E'
+    };
 
     if (!s || !aml)
         return;
 
-    if (body_contains_ascii_nocase(aml, meth_body, meth_end,
-                                   (const char *)guid_ascii, 36))
+    /*
+      AML often stores ToUUID(...) as raw 16-byte buffer data, not ASCII.
+      Treat either representation as UUID evidence.
+    */
+    if (body_contains_bytes_exact(aml, meth_body, meth_end,
+                                  hid_i2c_guid_raw, sizeof(hid_i2c_guid_raw)))
     {
-        s->dsm_guid_ascii_seen = 1;
         s->dsm_has_uuid_buffer = 1;
+        s->dsm_guid_ascii_seen = 1; /* "seen" in a broad sense for logging */
+        return;
+    }
+
+    if (body_contains_ascii_nocase(aml, meth_body, meth_end,
+                                   (const char *)hid_i2c_guid_ascii, 36))
+    {
+        s->dsm_has_uuid_buffer = 1;
+        s->dsm_guid_ascii_seen = 1;
     }
 }
 
@@ -2056,12 +2068,21 @@ static int classify_and_export_device(const uint8_t *aml,
         terminal_print_hex8(s->dsm_has_uuid_buffer);
         terminal_print("\n");
 
+        g_hidi2c_regs.have_tcpd = 1u;
+
+        /*
+          Do not trust the statically inferred TCPD _DSM desc register anymore.
+          The loud AML dump shows this _DSM is an argument-driven method with
+          GUID / revision / function branching, and runtime probing still gets
+          all-zero payloads everywhere. Keep the guessed address for reference,
+          but mark it untrusted until real _DSM execution proves otherwise.
+        */
         if (s->dsm_hid_desc_ok)
-        {
-            g_hidi2c_regs.have_tcpd = 1u;
             g_hidi2c_regs.tcpd_desc_reg = (uint16_t)(s->dsm_hid_desc_addr & 0xFFFFu);
-            g_hidi2c_regs.tcpd_desc_trusted = dsm_is_trusted(s) ? 1u : 0u;
-        }
+        else
+            g_hidi2c_regs.tcpd_desc_reg = 0u;
+
+        g_hidi2c_regs.tcpd_desc_trusted = 0u;
 
         if (s->sb_found)
             g_hidi2c_regs.tcpd_addr = (uint8_t)(s->sb_slave_addr & 0x7Fu);
