@@ -544,22 +544,33 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
+    static const uint8_t guid_acpi_raw[16] = {
+        0xF7, 0xF6, 0xDF, 0x3C,
+        0x67, 0x42,
+        0x55, 0x45,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+
     uint64_t ret = 0;
 
     if (!regs)
         return;
 
-    (void)tcpd_run_dsm_typed("GIO0._DSM", "\\_SB.GIO0",
-                             regs->tcpd_gio0_dsm_body,
-                             regs->tcpd_gio0_dsm_len,
-                             regs->tcpd_gio0_dsm_valid,
-                             1u, 0u, &ret);
+    (void)tcpd_run_dsm_typed_guid("GIO0._DSM",
+                                  "\\_SB.GIO0",
+                                  regs->tcpd_gio0_dsm_body,
+                                  regs->tcpd_gio0_dsm_len,
+                                  regs->tcpd_gio0_dsm_valid,
+                                  guid_acpi_raw,
+                                  1u, 0u, &ret);
 
-    (void)tcpd_run_dsm_typed("GIO0._DSM", "\\_SB.GIO0",
-                             regs->tcpd_gio0_dsm_body,
-                             regs->tcpd_gio0_dsm_len,
-                             regs->tcpd_gio0_dsm_valid,
-                             1u, 1u, &ret);
+    (void)tcpd_run_dsm_typed_guid("GIO0._DSM",
+                                  "\\_SB.GIO0",
+                                  regs->tcpd_gio0_dsm_body,
+                                  regs->tcpd_gio0_dsm_len,
+                                  regs->tcpd_gio0_dsm_valid,
+                                  guid_acpi_raw,
+                                  1u, 1u, &ret);
 }
 
 static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
