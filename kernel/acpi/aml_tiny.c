@@ -16,6 +16,45 @@ static void aml_log(aml_tiny_ctx *ctx, const char *msg)
         ctx->host.log(ctx->host.user, msg);
 }
 
+static void aml_log_hex32(aml_tiny_ctx *ctx, const char *prefix, uint32_t v)
+{
+    char msg[64];
+    const char hex[] = "0123456789ABCDEF";
+    uint32_t i = 0;
+
+    if (!ctx || !prefix)
+        return;
+
+    while (prefix[i] && i + 1u < sizeof(msg))
+    {
+        msg[i] = prefix[i];
+        ++i;
+    }
+
+    if (i + 10u >= sizeof(msg))
+        return;
+
+    msg[i++] = '0';
+    msg[i++] = 'x';
+    msg[i++] = hex[(v >> 28) & 0xF];
+    msg[i++] = hex[(v >> 24) & 0xF];
+    msg[i++] = hex[(v >> 20) & 0xF];
+    msg[i++] = hex[(v >> 16) & 0xF];
+    msg[i++] = hex[(v >> 12) & 0xF];
+    msg[i++] = hex[(v >> 8) & 0xF];
+    msg[i++] = hex[(v >> 4) & 0xF];
+    msg[i++] = hex[v & 0xF];
+    msg[i] = 0;
+
+    aml_log(ctx, msg);
+}
+
+static void aml_log_if_pred(aml_tiny_ctx *ctx, uint64_t pv, uint32_t off)
+{
+    aml_log_hex32(ctx, "IF off=", off);
+    aml_log_hex32(ctx, "IF pred=", (uint32_t)pv);
+}
+
 static void aml_log_badop(aml_tiny_ctx *ctx, uint8_t op)
 {
     char msg[32];
@@ -1663,45 +1702,6 @@ static int aml_exec_notify(aml_tiny_ctx *ctx)
     aml_log(ctx, "notify");
     aml_log(ctx, target.name[0] ? target.name : "(non-name target)");
     return AML_TINY_OK;
-}
-
-static void aml_log_hex32(aml_tiny_ctx *ctx, const char *prefix, uint32_t v)
-{
-    char msg[64];
-    const char hex[] = "0123456789ABCDEF";
-    uint32_t i = 0;
-
-    if (!ctx || !prefix)
-        return;
-
-    while (prefix[i] && i + 1u < sizeof(msg))
-    {
-        msg[i] = prefix[i];
-        ++i;
-    }
-
-    if (i + 10u >= sizeof(msg))
-        return;
-
-    msg[i++] = '0';
-    msg[i++] = 'x';
-    msg[i++] = hex[(v >> 28) & 0xF];
-    msg[i++] = hex[(v >> 24) & 0xF];
-    msg[i++] = hex[(v >> 20) & 0xF];
-    msg[i++] = hex[(v >> 16) & 0xF];
-    msg[i++] = hex[(v >> 12) & 0xF];
-    msg[i++] = hex[(v >> 8) & 0xF];
-    msg[i++] = hex[(v >> 4) & 0xF];
-    msg[i++] = hex[v & 0xF];
-    msg[i] = 0;
-
-    aml_log(ctx, msg);
-}
-
-static void aml_log_if_pred(aml_tiny_ctx *ctx, uint64_t pv, uint32_t off)
-{
-    aml_log_hex32(ctx, "IF off=", off);
-    aml_log_hex32(ctx, "IF pred=", (uint32_t)pv);
 }
 
 static int aml_exec_while(aml_tiny_ctx *ctx)
