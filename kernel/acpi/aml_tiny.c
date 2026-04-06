@@ -708,8 +708,6 @@ static int aml_value_equal(aml_tiny_ctx *ctx, const aml_tiny_value *a, const aml
     if (!ctx || !a || !b)
         return 0;
 
-    aml_log(ctx, "EQ enter");
-
     if (aml_materialize_value(ctx, a, &av) != AML_TINY_OK)
         aml_value_copy(&av, a);
 
@@ -1539,7 +1537,7 @@ static int aml_exec_if_else(aml_tiny_ctx *ctx)
     if (rc != AML_TINY_OK)
         return rc;
 
-    aml_log_if_pred(ctx, pv, (uint32_t)(ctx->p - ctx->method.aml));
+    // aml_log_if_pred(ctx, pv, (uint32_t)(ctx->p - ctx->method.aml));
 
     then_start = ctx->p;
 
