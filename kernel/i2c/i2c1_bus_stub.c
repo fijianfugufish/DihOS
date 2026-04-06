@@ -395,15 +395,15 @@ static void i2c1_dump_rx_words_once(uint32_t expected_len)
     uint32_t i;
 
     terminal_print("RXDBG st:");
-    terminal_print_hex32(rx_st);
-    terminal_print(" expected:");
-    terminal_print_hex32(expected_len);
-    terminal_print(" bytes:");
-    terminal_print_hex32(bytes_avail);
-    terminal_print(" last:");
-    terminal_print_hex32(is_last);
-    terminal_print(" last_valid:");
-    terminal_print_hex32(last_valid);
+    terminal_print_inline_hex32(rx_st);
+    terminal_print_inline(" expected:");
+    terminal_print_inline_hex32(expected_len);
+    terminal_print_inline(" bytes:");
+    terminal_print_inline_hex32(bytes_avail);
+    terminal_print_inline(" last:");
+    terminal_print_inline_hex32(is_last);
+    terminal_print_inline(" last_valid:");
+    terminal_print_inline_hex32(last_valid);
     terminal_print("\n");
 
     words = (bytes_avail + 3u) >> 2;
@@ -596,13 +596,13 @@ int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
     if (!g_i2c1_quiet)
     {
         terminal_print("i2c wr wm a:");
-        terminal_print_hex8(addr7);
-        terminal_print(" rc:");
-        terminal_print_hex32((uint32_t)rc);
-        terminal_print(" irq:");
-        terminal_print_hex32(irq);
-        terminal_print(" txst:");
-        terminal_print_hex32(rd32(SE_GENI_TX_FIFO_STATUS));
+        terminal_print_inline_hex8(addr7);
+        terminal_print_inline(" rc:");
+        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline(" irq:");
+        terminal_print_inline_hex32(irq);
+        terminal_print_inline(" txst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_TX_FIFO_STATUS));
         terminal_print("\n");
     }
     if (rc != 0)
@@ -629,21 +629,21 @@ int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
     if (!g_i2c1_quiet)
     {
         terminal_print("i2c wr phase a:");
-        terminal_print_hex8(addr7);
-        terminal_print(" rc:");
-        terminal_print_hex32((uint32_t)rc);
-        terminal_print(" irq:");
-        terminal_print_hex32(irq);
-        terminal_print(" st:");
-        terminal_print_hex32(rd32(SE_GENI_STATUS));
-        terminal_print(" rxst:");
-        terminal_print_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
+        terminal_print_inline_hex8(addr7);
+        terminal_print_inline(" rc:");
+        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline(" irq:");
+        terminal_print_inline_hex32(irq);
+        terminal_print_inline(" st:");
+        terminal_print_inline_hex32(rd32(SE_GENI_STATUS));
+        terminal_print_inline(" rxst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
 
         if (rd32(SE_GENI_RX_FIFO_STATUS) != 0u)
             i2c1_drain_rx_junk();
 
-        terminal_print(" txst:");
-        terminal_print_hex32(rd32(SE_GENI_TX_FIFO_STATUS));
+        terminal_print_inline(" txst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_TX_FIFO_STATUS));
         terminal_print("\n");
     }
 
@@ -744,13 +744,13 @@ int i2c1_bus_write_read(uint8_t addr7,
     if (!g_i2c1_quiet)
     {
         terminal_print("i2c reg-rd a:");
-        terminal_print_hex8(addr7);
-        terminal_print(" rc:");
-        terminal_print_hex32((uint32_t)rc);
-        terminal_print(" irq:");
-        terminal_print_hex32(irq);
-        terminal_print(" rxst:");
-        terminal_print_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
+        terminal_print_inline_hex8(addr7);
+        terminal_print_inline(" rc:");
+        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline(" irq:");
+        terminal_print_inline_hex32(irq);
+        terminal_print_inline(" rxst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
         terminal_print("\n");
     }
 
@@ -814,13 +814,13 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     if (!g_i2c1_quiet)
     {
         terminal_print("i2c rd a:");
-        terminal_print_hex8(addr7);
-        terminal_print(" rc:");
-        terminal_print_hex32((uint32_t)rc);
-        terminal_print(" irq:");
-        terminal_print_hex32(irq);
-        terminal_print(" rxst:");
-        terminal_print_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
+        terminal_print_inline_hex8(addr7);
+        terminal_print_inline(" rc:");
+        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline(" irq:");
+        terminal_print_inline_hex32(irq);
+        terminal_print_inline(" rxst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
         terminal_print("\n");
     }
 
@@ -835,11 +835,11 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     if (fifo_read_bytes(dst, rx_len) != 0)
     {
         terminal_print("i2c rd drain fail a:");
-        terminal_print_hex8(addr7);
-        terminal_print(" rxst:");
-        terminal_print_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
-        terminal_print(" irq:");
-        terminal_print_hex32(rd32(SE_GENI_M_IRQ_STATUS));
+        terminal_print_inline_hex8(addr7);
+        terminal_print_inline(" rxst:");
+        terminal_print_inline_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
+        terminal_print_inline(" irq:");
+        terminal_print_inline_hex32(rd32(SE_GENI_M_IRQ_STATUS));
         terminal_print("\n");
 
         wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
@@ -878,11 +878,11 @@ int i2c1_bus_addr_only(uint8_t addr7)
     rc = i2c1_wait_done(&irq);
 
     terminal_print("i2c addr a:");
-    terminal_print_hex8(addr7);
-    terminal_print(" rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print(" irq:");
-    terminal_print_hex32(irq);
+    terminal_print_inline_hex8(addr7);
+    terminal_print_inline(" rc:");
+    terminal_print_inline_hex32((uint32_t)rc);
+    terminal_print_inline(" irq:");
+    terminal_print_inline_hex32(irq);
     terminal_print("\n");
 
     wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
