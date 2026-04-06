@@ -393,26 +393,26 @@ static int tcpd_run_dsm_typed(const char *tag,
     h.log = tcpd_aml_log;
     h.user = 0;
 
-    terminal_print("AML: exec ");
-    terminal_print(tag);
-    terminal_print(" rev:");
-    terminal_print_hex32((uint32_t)rev);
-    terminal_print(" fn:");
-    terminal_print_hex32((uint32_t)func);
-    terminal_print(" len:");
-    terminal_print_hex32(len);
+    terminal_print("AML exec ");
+    terminal_print_inline(tag);
+    terminal_print_inline(", rev:");
+    terminal_print_inline_hex32((uint32_t)rev);
+    terminal_print_inline(", fn:");
+    terminal_print_inline_hex32((uint32_t)func);
+    terminal_print_inline(", len:");
+    terminal_print_inline_hex32(len);
     terminal_print("\n");
 
     rc = aml_tiny_trace_names(&m, &h);
     terminal_print("AML trace rc:");
-    terminal_print_hex32((uint32_t)rc);
+    terminal_print_inline_hex32((uint32_t)rc);
     terminal_print("\n");
 
     rc = aml_tiny_exec(&m, &h, &ret);
     terminal_print("AML exec rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print(" ret:");
-    terminal_print_hex32((uint32_t)ret);
+    terminal_print_inline_hex32((uint32_t)rc);
+    terminal_print_inline(", ret:");
+    terminal_print_inline_hex32((uint32_t)ret);
     terminal_print("\n");
 
     if (out_ret)

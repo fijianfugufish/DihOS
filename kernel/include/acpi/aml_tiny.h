@@ -22,7 +22,7 @@ extern "C"
 #define AML_TINY_MAX_IF_DEPTH 8
 #define AML_TINY_MAX_BUFFER_BYTES 64
 #define AML_TINY_MAX_PACKAGE_ELEMS 8
-#define AML_TINY_MAX_WHILE_ITERS 16
+#define AML_TINY_MAX_WHILE_ITERS 4096
 
     typedef struct aml_tiny_ctx aml_tiny_ctx;
 
