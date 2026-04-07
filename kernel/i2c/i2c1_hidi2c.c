@@ -1274,6 +1274,26 @@ static int hidi2c_fetch_desc_touchpad_retry(hidi2c_device *dev, uint32_t tries)
     return -1;
 }
 
+static int tcpd_probe_after_gpio_only(hidi2c_device *dev, const char *tag)
+{
+    int rc;
+
+    if (!dev)
+        return -1;
+
+    terminal_print("TCPD gpio probe: ");
+    terminal_print_inline(tag);
+
+    delay_ms_approx(20u);
+
+    rc = tcpd_probe_address_linuxish(dev);
+
+    terminal_print("TCPD gpio probe rc: ");
+    terminal_print_inline_hex32((uint32_t)rc);
+
+    return rc;
+}
+
 static int tcpd_try_desc_after_wake(hidi2c_device *dev, const char *tag)
 {
     terminal_print("TCPD wake attempt: ");
@@ -1599,17 +1619,32 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_tcpd_dsm_from_acpi(&regs);
         tcpd_try_gio0_dsm_from_acpi(&regs);
 
-                delay_ms_approx(40u);
+        delay_ms_approx(40u);
 
         /*
-          One quick wake path only, so we can get a log without hanging around
-          in repeated delays and scans.
+          GPIO clearly changes device state, but the flag-derived polarity may
+          be wrong and may be leaving TCPD held in reset.
+          Try both explicit polarities, and first check whether the device
+          reappears on the bus before doing descriptor reads.
         */
         if (regs.tcpd_gpio_valid)
         {
-            tcpd_gpio_reset_pulse(&regs);
-            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-flag-derived") == 0)
-                ok = 1;
+            tcpd_gpio_pulse_active_low(&regs);
+            if (tcpd_probe_after_gpio_only(&g_tpd, "active-low") == 0)
+            {
+                if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-low") == 0)
+                    ok = 1;
+            }
+
+            if (!ok)
+            {
+                tcpd_gpio_pulse_active_high(&regs);
+                if (tcpd_probe_after_gpio_only(&g_tpd, "active-high") == 0)
+                {
+                    if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-high") == 0)
+                        ok = 1;
+                }
+            }
         }
         else
         {
