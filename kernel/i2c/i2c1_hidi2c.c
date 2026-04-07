@@ -1230,20 +1230,23 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
 
 static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
 {
+    uint16_t reg;
     int rc;
 
     if (!dev)
         return -1;
 
+    reg = dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI;
+
     /*
-      Fast path only.
-      Do not do the big 0x0000..0x0040 scan for now.
+      First try the lightest path:
+      write pointer, then plain read.
     */
-    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, TCPD_DESC_REG_ACPI, 0);
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0);
     if (rc == 0)
         return 0;
 
-    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, TCPD_DESC_REG_ACPI, 1);
+    rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1);
     if (rc == 0)
         return 0;
 
@@ -1255,7 +1258,48 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     if (rc == 0)
         return 0;
 
-    terminal_print("TCPD fast desc probe miss\n");
+    /*
+      Compatibility fallback:
+      some devices/controllers behave better with the older split path.
+    */
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
+        return 0;
+
+    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_split_endian(dev, HIDI2C_DESC_REG_FALLBACK, 1) == 0)
+        return 0;
+
+    /*
+      Final bounded scan.
+      Still runtime-driven, still small, but no longer "0x20 or nothing".
+    */
+    terminal_print("TCPD scan rdonly start\n");
+
+    for (reg = 0x0000u; reg <= 0x0040u; reg += 2u)
+    {
+        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0);
+        if (rc == 0)
+        {
+            terminal_print("TCPD found desc LE @ ");
+            terminal_print_hex32(reg);
+            terminal_print("\n");
+            return 0;
+        }
+
+        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1);
+        if (rc == 0)
+        {
+            terminal_print("TCPD found desc BE @ ");
+            terminal_print_hex32(reg);
+            terminal_print("\n");
+            return 0;
+        }
+    }
+
+    terminal_print("TCPD scan rdonly no hit\n");
     return -1;
 }
 
@@ -1586,83 +1630,64 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_warn("ECKB not trusted HIDI2C path; skipping");
     }
 
-    if (have_regs && regs.have_tcpd)
+    if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
         int ok = 0;
 
-        terminal_print("TCPD ACPI full quiet init + no-GPIO wake\n");
+        terminal_print("TCPD ACPI quiet init + compat desc probe\n");
 
-        terminal_print("TCPD ACPI desc reg:");
+        terminal_print("TCPD ACPI desc reg:\n");
         terminal_print_hex32(regs.tcpd_desc_reg);
-        terminal_print(" trusted:");
+        terminal_print(" trusted:\n");
         terminal_print_hex8(regs.tcpd_desc_trusted);
-        terminal_print(" dsm_valid:");
+        terminal_print(" dsm_valid:\n");
         terminal_print_hex8(regs.tcpd_dsm_valid);
-        terminal_print(" dsm_len:");
+        terminal_print(" dsm_len:\n");
         terminal_print_hex32(regs.tcpd_dsm_len);
-        terminal_print(" gio0_dsm_valid:");
+        terminal_print(" gio0_dsm_valid:\n");
         terminal_print_hex8(regs.tcpd_gio0_dsm_valid);
-        terminal_print(" gio0_dsm_len:");
+        terminal_print(" gio0_dsm_len:\n");
         terminal_print_hex32(regs.tcpd_gio0_dsm_len);
-        
 
         /*
-          If _DSM is not really trusted, do not pretend 0x20 is reliable.
-          We can still probe, but we should know we are in heuristic mode.
-        */
-        if (!regs.tcpd_desc_trusted)
-            terminal_warn("TCPD _DSM not strongly trusted; desc reg is heuristic");
-
-        if (regs.tcpd_dsm_valid)
-        {
-            terminal_print("TCPD _DSM captured len:");
-            terminal_print_hex32(regs.tcpd_dsm_len);
-            
-        }
-
-        terminal_warn("TCPD likely needs real ACPI _DSM execution; current path only infers desc reg and then probes I2C");
-
-        /*
-          We now know:
-          - bus transport is fine
-          - pointer write + read is fine
-          - scan 0x0000..0x0040 finds no nonzero descriptor
-          So the next best guess is that TCPD needs more of its ACPI
-          bring-up sequence before it will expose HID registers.
-
-          Keep it quiet so we do not flood the terminal again.
+          Reset tiny AML shadow state before replaying ACPI-side init.
         */
         g_aml_gabl = 0;
         g_aml_lids = 0;
         g_aml_lidb = 0;
         g_aml_lidr = 0;
 
+        /*
+          Keep the platform bring-up quiet.
+        */
         terminal_set_quiet();
-
         tcpd_try_sta_from_acpi(&regs);
         tcpd_try_ini_from_acpi(&regs);
         tcpd_try_gio0_reg_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
-
         terminal_set_loud();
 
         /*
-          Keep GIO0._DSM because it returns sensible values in your logs.
-          Do NOT execute TCPD ancestor _DSM at runtime anymore.
+          GIO0._DSM still returns meaningful values in your logs, so keep it.
+          TCPD ancestor _DSM stays disabled.
         */
         tcpd_try_gio0_dsm_from_acpi(&regs);
 
-        delay_ms_approx(20u);
+        delay_ms_approx(80u);
 
-        /*
-          Do NOT drive the ACPI GPIO as output here.
-          Real OS HID-over-I2C paths treat the ACPI GpioInt as an interrupt
-          resource, not a generic reset/output line. In your logs, forcing it
-          low or high makes TCPD NACK entirely, which is worse than the
-          pre-GPIO state.
-        */
         if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
             ok = 1;
+
+        if (!ok)
+        {
+            /*
+              One more pass after a longer settle, now that the fetch path
+              includes split-endian + bounded scan fallback again.
+            */
+            delay_ms_approx(120u);
+            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
+                ok = 1;
+        }
 
         if (ok)
         {
@@ -1678,7 +1703,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         }
         else
         {
-            terminal_warn("TCPD no valid HID descriptor after ACPI full quiet init + no-GPIO wake");
+            terminal_warn("TCPD no valid HID descriptor after ACPI quiet init + compat desc probe");
         }
     }
 }
