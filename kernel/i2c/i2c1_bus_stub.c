@@ -307,7 +307,6 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
     }
 }
 
-/*
 static int fifo_write_bytes(const uint8_t *buf, uint32_t len)
 {
     uint32_t i;
@@ -336,7 +335,7 @@ static int fifo_write_bytes(const uint8_t *buf, uint32_t len)
 
     return 0;
 }
-*/
+
 
 static int i2c1_wait_tx_watermark(uint32_t *irq_out)
 {
@@ -371,10 +370,27 @@ static int i2c1_wait_tx_watermark(uint32_t *irq_out)
 
 static void fifo_write_bytes_now(const uint8_t *buf, uint32_t len)
 {
-    for (uint32_t i = 0; i < len; ++i)
+    uint32_t i = 0;
+
+    while (i < len)
     {
-        wr32(SE_GENI_TX_FIFOn, (uint32_t)buf[i]);
+        uint32_t word = 0;
+        uint32_t take = len - i;
+
+        if (take > 4u)
+            take = 4u;
+
+        /*
+          Pack up to 4 bytes into one FIFO word, little-endian by byte lane.
+          This matches how Qualcomm GENI FIFO-mode drivers pack TX data.
+        */
+        for (uint32_t j = 0; j < take; ++j)
+            word |= ((uint32_t)buf[i + j]) << (j * 8u);
+
+        wr32(SE_GENI_TX_FIFOn, word);
         io_barrier();
+
+        i += take;
     }
 }
 
