@@ -96,6 +96,8 @@ static uint64_t g_aml_lids = 0;
 static uint64_t g_aml_lidr = 0;
 static uint64_t g_aml_gabl = 0;
 static uint64_t g_aml_lidb = 0;
+static uint64_t g_aml_t0 = 0;
+static uint64_t g_aml_t1 = 0;
 
 static void norm_acpi_name(const char *src, char *dst, uint32_t cap)
 {
@@ -194,6 +196,18 @@ static int tcpd_aml_read_named_int(void *user, const char *name, uint64_t *out)
         return 0;
     }
 
+    if (name && acpi_name_has(name, "GIO0._T_0"))
+    {
+        *out = g_aml_t0;
+        return 0;
+    }
+
+    if (name && acpi_name_has(name, "GIO0._T_1"))
+    {
+        *out = g_aml_t1;
+        return 0;
+    }
+
     /*
      IMPORTANT:
      Do NOT fail namespace lookup.
@@ -223,7 +237,6 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write GABL=");
         terminal_print_hex32((uint32_t)value);
-        
 
         return 0;
     }
@@ -235,7 +248,6 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
         terminal_print("AML write LIDB=");
         terminal_print_hex32((uint32_t)value);
         
-
         return 0;
     }
 
@@ -246,13 +258,31 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
         terminal_print("AML write LIDR=");
         terminal_print_hex32((uint32_t)value);
         
+        return 0;
+    }
+
+    if (acpi_name_has(name, "GIO0._T_0"))
+    {
+        g_aml_t0 = value;
+
+        terminal_print("AML write _T_0=");
+        terminal_print_hex32((uint32_t)value);
+
+        return 0;
+    }
+
+    if (acpi_name_has(name, "GIO0._T_1"))
+    {
+        g_aml_t1 = value;
+
+        terminal_print("AML write _T_1=");
+        terminal_print_hex32((uint32_t)value);
 
         return 0;
     }
 
     terminal_print("AML ignored write: ");
     terminal_print(name);
-    
 
     return 0;
 }
@@ -1194,7 +1224,7 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
                 dev->hid_desc_reg = reg;
                 i2c1_bus_set_quiet(0);
                 terminal_print("FOUND HID DESC split @ ");
-                terminal_print_hex32(reg);
+                terminal_print_inline_hex32(reg);
                 
                 return 0;
             }
@@ -1217,7 +1247,7 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
                 dev->hid_desc_reg = reg;
                 i2c1_bus_set_quiet(0);
                 terminal_print("FOUND HID DESC comb @ ");
-                terminal_print_hex32(reg);
+                terminal_print_inline_hex32(reg);
                 
                 return 0;
             }
@@ -1656,6 +1686,8 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         g_aml_lids = 0;
         g_aml_lidb = 0;
         g_aml_lidr = 0;
+        g_aml_t0 = 0;
+        g_aml_t1 = 0;
 
         /*
           Keep the platform bring-up quiet.
