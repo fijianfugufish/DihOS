@@ -1312,6 +1312,26 @@ static int hidi2c_fetch_desc_touchpad_retry(hidi2c_device *dev, uint32_t tries)
     return -1;
 }
 
+static int tcpd_try_desc_after_wake(hidi2c_device *dev, const char *tag)
+{
+    terminal_print("TCPD wake attempt: ");
+    terminal_print_inline(tag);
+
+    hidi2c_touchpad_wake_probe(dev);
+    delay_ms_approx(120u);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD wake success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD wake miss: ");
+    terminal_print_inline(tag);
+    return -1;
+}
+
 static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
 {
     if (!dev)
@@ -1619,11 +1639,38 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
         delay_ms_approx(80u);
 
-        hidi2c_touchpad_wake_probe(&g_tpd);
-        delay_ms_approx(120u);
-
-        if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 1u) == 0)
+        /* Attempt 1: existing no-GPIO wake path */
+        if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
             ok = 1;
+
+        /*
+          Attempt 2/3: real GPIO wake/reset using the ACPI GPIO resource.
+          The log shows _DSM still does nothing useful, and all reads stay zero,
+          so the device likely still needs a physical wake/reset line toggle.
+        */
+        if (!ok && regs.tcpd_gpio_valid)
+        {
+            tcpd_gpio_pulse_active_low(&regs);
+            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-low") == 0)
+                ok = 1;
+        }
+
+        if (!ok && regs.tcpd_gpio_valid)
+        {
+            tcpd_gpio_pulse_active_high(&regs);
+            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-high") == 0)
+                ok = 1;
+        }
+
+        /*
+          Final fallback: polarity derived from ACPI flags.
+        */
+        if (!ok && regs.tcpd_gpio_valid)
+        {
+            tcpd_gpio_reset_pulse(&regs);
+            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-flag-derived") == 0)
+                ok = 1;
+        }
 
         if (ok)
         {
