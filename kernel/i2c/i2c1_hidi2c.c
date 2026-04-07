@@ -1274,6 +1274,37 @@ static int hidi2c_fetch_desc_touchpad_retry(hidi2c_device *dev, uint32_t tries)
     return -1;
 }
 
+static int tcpd_gpio_hold_and_probe(const hidi2c_acpi_regs *regs,
+                                    hidi2c_device *dev,
+                                    uint32_t level,
+                                    const char *tag)
+{
+    int rc;
+
+    if (!regs || !dev || !regs->tcpd_gpio_valid)
+        return -1;
+
+    terminal_print("TCPD GPIO hold: ");
+    terminal_print_inline(tag);
+    terminal_print_inline(" pin:");
+    terminal_print_inline_hex32(regs->tcpd_gpio_pin);
+    terminal_print_inline(" level:");
+    terminal_print_inline_hex32(level);
+
+    (void)gpio_init();
+    (void)gpio_set_output(regs->tcpd_gpio_pin);
+    (void)gpio_write(regs->tcpd_gpio_pin, level);
+
+    delay_ms_approx(20u);
+
+    rc = tcpd_probe_address_linuxish(dev);
+
+    terminal_print("TCPD GPIO hold probe rc:");
+    terminal_print_inline_hex32((uint32_t)rc);
+
+    return rc;
+}
+
 static int tcpd_probe_after_gpio_only(hidi2c_device *dev, const char *tag)
 {
     int rc;
@@ -1629,19 +1660,17 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         */
         if (regs.tcpd_gpio_valid)
         {
-            tcpd_gpio_pulse_active_low(&regs);
-            if (tcpd_probe_after_gpio_only(&g_tpd, "active-low") == 0)
+            if (tcpd_gpio_hold_and_probe(&regs, &g_tpd, GPIO_VALUE_LOW, "hold-low") == 0)
             {
-                if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-low") == 0)
+                if (tcpd_try_desc_after_wake(&g_tpd, "hold-low") == 0)
                     ok = 1;
             }
 
             if (!ok)
             {
-                tcpd_gpio_pulse_active_high(&regs);
-                if (tcpd_probe_after_gpio_only(&g_tpd, "active-high") == 0)
+                if (tcpd_gpio_hold_and_probe(&regs, &g_tpd, GPIO_VALUE_HIGH, "hold-high") == 0)
                 {
-                    if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-high") == 0)
+                    if (tcpd_try_desc_after_wake(&g_tpd, "hold-high") == 0)
                         ok = 1;
                 }
             }
