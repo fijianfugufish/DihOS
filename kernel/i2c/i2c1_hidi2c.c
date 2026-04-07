@@ -650,6 +650,11 @@ static void tcpd_dump_dsm_prefix(const uint8_t *body, uint16_t len, const char *
 
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 {
+    (void)regs;
+    terminal_print("TCPD _DSM runtime exec disabled; using child ACPI decode only\n");
+
+    return;
+
     static const uint8_t guid_acpi_raw[16] = {
         0xF7, 0xF6, 0xDF, 0x3C,
         0x67, 0x42,
@@ -1639,47 +1644,25 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_gio0_reg_from_acpi(&regs);
         tcpd_try_ps0_from_acpi(&regs);
 
-        /*
-          New: execute real typed _DSM calls before the I2C probe.
-          The loud AML dump strongly suggests TCPD is behind an
-          argument-driven ACPI enable path, not just a static desc-reg read.
-        */
-
         terminal_set_loud();
 
-        tcpd_try_tcpd_dsm_from_acpi(&regs);
+        /*
+          Keep GIO0._DSM because it returns sensible values in your logs.
+          Do NOT execute TCPD ancestor _DSM at runtime anymore.
+        */
         tcpd_try_gio0_dsm_from_acpi(&regs);
 
-        delay_ms_approx(40u);
+        delay_ms_approx(20u);
 
         /*
-          GPIO clearly changes device state, but the flag-derived polarity may
-          be wrong and may be leaving TCPD held in reset.
-          Try both explicit polarities, and first check whether the device
-          reappears on the bus before doing descriptor reads.
+          Do NOT drive the ACPI GPIO as output here.
+          Real OS HID-over-I2C paths treat the ACPI GpioInt as an interrupt
+          resource, not a generic reset/output line. In your logs, forcing it
+          low or high makes TCPD NACK entirely, which is worse than the
+          pre-GPIO state.
         */
-        if (regs.tcpd_gpio_valid)
-        {
-            if (tcpd_gpio_hold_and_probe(&regs, &g_tpd, GPIO_VALUE_LOW, "hold-low") == 0)
-            {
-                if (tcpd_try_desc_after_wake(&g_tpd, "hold-low") == 0)
-                    ok = 1;
-            }
-
-            if (!ok)
-            {
-                if (tcpd_gpio_hold_and_probe(&regs, &g_tpd, GPIO_VALUE_HIGH, "hold-high") == 0)
-                {
-                    if (tcpd_try_desc_after_wake(&g_tpd, "hold-high") == 0)
-                        ok = 1;
-                }
-            }
-        }
-        else
-        {
-            if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
-                ok = 1;
-        }
+        if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
+            ok = 1;
 
         if (ok)
         {
