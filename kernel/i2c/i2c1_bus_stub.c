@@ -249,13 +249,14 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
 {
     uint32_t spins = 0;
     uint32_t last_irq = 0;
+    uint32_t wanted_words = (wanted_len + 3u) >> 2;
 
     for (;;)
     {
         uint32_t irq   = rd32(SE_GENI_M_IRQ_STATUS);
         uint32_t st    = rd32(SE_GENI_STATUS);
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t wc    = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
 
         last_irq = irq;
 
@@ -267,13 +268,9 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
         }
 
         /*
-          For descriptor/input reads, do NOT treat "any byte available"
-          as success. Wait until either:
-            - enough bytes are present, or
-            - RX_LAST says the controller marked the last beat, or
-            - explicit DONE arrived and some data is present.
+          RX_FIFO_STATUS occupancy is FIFO words, not bytes.
         */
-        if (wc >= wanted_len)
+        if (fifo_words >= wanted_words)
         {
             if (irq_out)
                 *irq_out = irq;
@@ -287,18 +284,14 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
             return 0;
         }
 
-        if ((irq & M_CMD_DONE_EN) && wc != 0u)
+        if ((irq & M_CMD_DONE_EN) && fifo_words != 0u)
         {
             if (irq_out)
                 *irq_out = irq;
             return 0;
         }
 
-        /*
-          Only accept idle as completion if some RX data actually exists.
-          Idle with zero bytes is not good enough for a read.
-        */
-        if (((st & GENI_M_CMD_ACTIVE) == 0u) && wc != 0u)
+        if (((st & GENI_M_CMD_ACTIVE) == 0u) && fifo_words != 0u)
         {
             if (irq_out)
                 *irq_out = irq;
@@ -426,34 +419,44 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
     uint32_t got = 0;
     uint32_t spins = 0;
 
-    if (!buf || len == 0)
+    if (!buf || len == 0u)
         return -1;
 
     while (got < len && spins++ < I2C1_SPIN_LIMIT)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
         uint32_t is_last = (rx_st & RX_LAST) ? 1u : 0u;
-        uint32_t last_valid_field = (rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
+        uint32_t last_valid_field =
+            (rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
 
-        if (bytes_avail == 0u)
+        if (fifo_words == 0u)
             continue;
 
-        while (bytes_avail != 0u && got < len)
+        /*
+          GENI reports FIFO occupancy in FIFO words, not raw bytes.
+          In your current packing setup we are using 8-bit packing with
+          4 bytes per FIFO word.
+        */
+        while (fifo_words != 0u && got < len)
         {
             uint32_t word = rd32(SE_GENI_RX_FIFOn);
             uint32_t take = 4u;
 
             io_barrier();
 
-            if (bytes_avail < 4u)
-                take = bytes_avail;
-
-            if (is_last && bytes_avail <= 4u)
-                take = last_valid_field + 1u;
-
-            if (take > bytes_avail)
-                take = bytes_avail;
+            /*
+              On the final FIFO word, RX_LAST_BYTE_VALID tells us how many
+              bytes in that last word are valid. Linux treats values 1..3
+              specially; otherwise a full 4 bytes are valid.
+            */
+            if (is_last && fifo_words == 1u)
+            {
+                if (last_valid_field != 0u && last_valid_field < 4u)
+                    take = last_valid_field;
+                else
+                    take = 4u;
+            }
 
             if (take > (len - got))
                 take = (len - got);
@@ -461,7 +464,7 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
             for (uint32_t i = 0; i < take; ++i)
                 buf[got++] = (uint8_t)((word >> (i * 8u)) & 0xFFu);
 
-            bytes_avail -= take;
+            fifo_words--;
         }
 
         if (got >= len)
@@ -481,24 +484,20 @@ static void i2c1_drain_rx_junk(void)
     while (spins++ < 256u)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
 
-        if (bytes_avail == 0u)
+        if (fifo_words == 0u)
         {
             wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
             io_barrier();
             break;
         }
 
-        while (bytes_avail != 0u)
+        while (fifo_words != 0u)
         {
             (void)rd32(SE_GENI_RX_FIFOn);
             io_barrier();
-
-            if (bytes_avail >= 4u)
-                bytes_avail -= 4u;
-            else
-                bytes_avail = 0u;
+            fifo_words--;
         }
 
         wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
