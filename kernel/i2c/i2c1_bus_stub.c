@@ -547,7 +547,16 @@ int i2c1_bus_init(void)
     wr32(SE_I2C_SCL_COUNTERS, (10u << 20) | (11u << 10) | 26u);
 
     /* FIFO mode */
-    wr32(SE_GENI_BYTE_GRAN, 1u);
+    /*
+      Qualcomm GENI BYTE_GRAN meanings:
+        0 = 4x8
+        1 = 2x16
+        2 = 1x32
+
+      We are doing 8-bit packed FIFO transfers here, so this must be 0,
+      not 1.
+    */
+    wr32(SE_GENI_BYTE_GRAN, 0u);
     wr32(SE_GENI_TX_WATERMARK_REG, 0u);
     wr32(SE_GENI_RX_WATERMARK_REG, 0u);
 
