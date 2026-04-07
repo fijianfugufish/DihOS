@@ -658,8 +658,6 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
     };
 
     uint64_t ret = 0;
-    uint32_t a3;
-    uint32_t fn;
 
     if (!regs)
         return;
@@ -669,26 +667,17 @@ static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
                          "TCPD _DSM prefix");
 
     /*
-      Parser is now fine.
-      The next likely failure is _DSM call shape, especially Arg3.
-      Try the ACPI raw GUID only, small fn range, and several Arg3 forms.
+      Keep this tiny for now.
+      The big brute-force matrix is too expensive and has not produced
+      a single useful nonzero return yet.
     */
-    for (a3 = 0; a3 <= 4; ++a3)
-    {
-        for (fn = 0; fn <= 3; ++fn)
-        {
-            (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
-                                          "\\_SB.D0?_",
-                                          regs->tcpd_dsm_body,
-                                          regs->tcpd_dsm_len,
-                                          regs->tcpd_dsm_valid,
-                                          guid_acpi_raw,
-                                          1u,
-                                          (uint64_t)fn,
-                                          a3,
-                                          &ret);
-        }
-    }
+    (void)tcpd_run_dsm_typed_guid("TCPD._DSM/raw",
+                                  "\\_SB.D0?_",
+                                  regs->tcpd_dsm_body,
+                                  regs->tcpd_dsm_len,
+                                  regs->tcpd_dsm_valid,
+                                  guid_acpi_raw,
+                                  1u, 1u, 2u, &ret);
 }
 
 static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
@@ -1236,14 +1225,14 @@ static int hidi2c_scan_for_desc(hidi2c_device *dev)
 
 static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
 {
-    uint16_t reg;
     int rc;
 
     if (!dev)
         return -1;
 
     /*
-      First try the obvious ACPI/fallback locations.
+      Fast path only.
+      Do not do the big 0x0000..0x0040 scan for now.
     */
     rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, TCPD_DESC_REG_ACPI, 0);
     if (rc == 0)
@@ -1261,34 +1250,7 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     if (rc == 0)
         return 0;
 
-    /*
-      Then do a tight read-only scan.
-      Keep it small for now: 0x0000..0x0040, step 2.
-    */
-    terminal_print("TCPD scan rdonly start\n");
-
-    for (reg = 0x0000u; reg <= 0x0040u; reg += 2u)
-    {
-        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0);
-        if (rc == 0)
-        {
-            terminal_print("TCPD found desc LE @ ");
-            terminal_print_hex32(reg);
-            
-            return 0;
-        }
-
-        rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1);
-        if (rc == 0)
-        {
-            terminal_print("TCPD found desc BE @ ");
-            terminal_print_hex32(reg);
-            
-            return 0;
-        }
-    }
-
-    terminal_print("TCPD scan rdonly no hit\n");
+    terminal_print("TCPD fast desc probe miss\n");
     return -1;
 }
 
@@ -1637,38 +1599,21 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         tcpd_try_tcpd_dsm_from_acpi(&regs);
         tcpd_try_gio0_dsm_from_acpi(&regs);
 
-        delay_ms_approx(80u);
-
-        /* Attempt 1: existing no-GPIO wake path */
-        if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
-            ok = 1;
+                delay_ms_approx(40u);
 
         /*
-          Attempt 2/3: real GPIO wake/reset using the ACPI GPIO resource.
-          The log shows _DSM still does nothing useful, and all reads stay zero,
-          so the device likely still needs a physical wake/reset line toggle.
+          One quick wake path only, so we can get a log without hanging around
+          in repeated delays and scans.
         */
-        if (!ok && regs.tcpd_gpio_valid)
-        {
-            tcpd_gpio_pulse_active_low(&regs);
-            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-low") == 0)
-                ok = 1;
-        }
-
-        if (!ok && regs.tcpd_gpio_valid)
-        {
-            tcpd_gpio_pulse_active_high(&regs);
-            if (tcpd_try_desc_after_wake(&g_tpd, "gpio-active-high") == 0)
-                ok = 1;
-        }
-
-        /*
-          Final fallback: polarity derived from ACPI flags.
-        */
-        if (!ok && regs.tcpd_gpio_valid)
+        if (regs.tcpd_gpio_valid)
         {
             tcpd_gpio_reset_pulse(&regs);
             if (tcpd_try_desc_after_wake(&g_tpd, "gpio-flag-derived") == 0)
+                ok = 1;
+        }
+        else
+        {
+            if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
                 ok = 1;
         }
 
