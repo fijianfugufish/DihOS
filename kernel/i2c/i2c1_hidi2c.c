@@ -817,50 +817,76 @@ static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
     delay_ms_approx(80u);
 }
 
-static void tcpd_gpio_drive_pair(const hidi2c_acpi_regs *regs,
-                                 uint32_t first,
-                                 uint32_t second,
-                                 uint32_t first_ms,
-                                 uint32_t second_ms,
-                                 const char *tag)
+static int tcpd_gpio_drive_pair(const hidi2c_acpi_regs *regs,
+                                uint32_t first,
+                                uint32_t second,
+                                uint32_t first_ms,
+                                uint32_t second_ms,
+                                const char *tag)
 {
+    int rc;
+
     if (!regs || !regs->tcpd_gpio_valid)
-        return;
+        return -1;
 
     terminal_print("TCPD GPIO seq: ");
-    terminal_print(tag);
-    terminal_print(" pin:");
-    terminal_print_hex32(regs->tcpd_gpio_pin);
+    terminal_print_inline(tag);
+    terminal_print("pin: ");
+    terminal_print_inline_hex32(regs->tcpd_gpio_pin);
     
 
-    (void)gpio_init();
-    (void)gpio_set_output(regs->tcpd_gpio_pin);
+    rc = gpio_init();
+    terminal_print("gpio_init rc: ");
+    terminal_print_inline_hex32((uint32_t)rc);
+    
+    if (rc != 0)
+        return rc;
 
-    (void)gpio_write(regs->tcpd_gpio_pin, first);
+    rc = gpio_set_output(regs->tcpd_gpio_pin);
+    terminal_print("gpio_set_output rc: ");
+    terminal_print_inline_hex32((uint32_t)rc);
+    
+    if (rc != 0)
+        return rc;
+
+    rc = gpio_write(regs->tcpd_gpio_pin, first);
+    terminal_print("gpio_write first rc: ");
+    terminal_print_inline_hex32((uint32_t)rc);
+    
+    if (rc != 0)
+        return rc;
+
     delay_ms_approx(first_ms);
 
-    (void)gpio_write(regs->tcpd_gpio_pin, second);
+    rc = gpio_write(regs->tcpd_gpio_pin, second);
+    terminal_print("gpio_write second rc: ");
+    terminal_print_inline_hex32((uint32_t)rc);
+    
+    if (rc != 0)
+        return rc;
+
     delay_ms_approx(second_ms);
+    return 0;
 }
 
-static void tcpd_gpio_pulse_active_low(const hidi2c_acpi_regs *regs)
+static int tcpd_gpio_pulse_active_low(const hidi2c_acpi_regs *regs)
 {
-    tcpd_gpio_drive_pair(regs,
-                         GPIO_VALUE_LOW,
-                         GPIO_VALUE_HIGH,
-                         20u,
-                         120u,
-                         "active-low");
+    return tcpd_gpio_drive_pair(regs,
+                                GPIO_VALUE_LOW,
+                                GPIO_VALUE_HIGH,
+                                20u,
+                                120u,
+                                "active-low");
 }
 
-static void tcpd_gpio_pulse_active_high(const hidi2c_acpi_regs *regs)
+static int tcpd_gpio_pulse_active_high(const hidi2c_acpi_regs *regs)
 {
-    tcpd_gpio_drive_pair(regs,
-                         GPIO_VALUE_HIGH,
-                         GPIO_VALUE_LOW,
-                         20u,
-                         120u,
-                         "active-high");
+    return tcpd_gpio_drive_pair(regs,
+                                GPIO_VALUE_HIGH,
+                                GPIO_VALUE_LOW,
+                                20u,
+                                120u,
+                                "active-high");
 }
 
 static int buf_any_nonzero(const uint8_t *buf, uint32_t len)
@@ -1561,6 +1587,64 @@ static int hidi2c_read_input(hidi2c_device *dev)
     return 0;
 }
 
+static int tcpd_try_desc_after_gpio_pulse(const hidi2c_acpi_regs *regs,
+                                          hidi2c_device *dev,
+                                          int active_low,
+                                          const char *tag)
+{
+    if (!regs || !dev || !regs->tcpd_gpio_valid)
+        return -1;
+
+    if (active_low)
+        tcpd_gpio_pulse_active_low(regs);
+    else
+        tcpd_gpio_pulse_active_high(regs);
+
+    delay_ms_approx(40u);
+
+    if (tcpd_probe_after_gpio_only(dev, tag) != 0)
+    {
+        terminal_print("TCPD gpio pulse probe miss: ");
+        terminal_print_inline(tag);
+    }
+
+    delay_ms_approx(40u);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD gpio pulse success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD gpio pulse miss: ");
+    terminal_print_inline(tag);
+    return -1;
+}
+
+static int tcpd_try_desc_after_gpio_hold(const hidi2c_acpi_regs *regs,
+                                         hidi2c_device *dev,
+                                         uint32_t level,
+                                         const char *tag)
+{
+    if (!regs || !dev || !regs->tcpd_gpio_valid)
+        return -1;
+
+    (void)tcpd_gpio_hold_and_probe(regs, dev, level, tag);
+    delay_ms_approx(40u);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD gpio hold success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD gpio hold miss: ");
+    terminal_print_inline(tag);
+    return -1;
+}
+
 void i2c1_hidi2c_init(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs regs;
@@ -1721,15 +1805,28 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
         delay_ms_approx(80u);
 
-        if (tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
+        if (regs.tcpd_gpio_valid)
+        {
+            terminal_print("TCPD trying GPIO-assisted wake ladder\n");
+
+            if (!ok && tcpd_try_desc_after_gpio_pulse(&regs, &g_tpd, 1, "gpio-active-low-pulse") == 0)
+                ok = 1;
+
+            if (!ok && tcpd_try_desc_after_gpio_pulse(&regs, &g_tpd, 0, "gpio-active-high-pulse") == 0)
+                ok = 1;
+
+            if (!ok && tcpd_try_desc_after_gpio_hold(&regs, &g_tpd, GPIO_VALUE_LOW, "gpio-hold-low") == 0)
+                ok = 1;
+
+            if (!ok && tcpd_try_desc_after_gpio_hold(&regs, &g_tpd, GPIO_VALUE_HIGH, "gpio-hold-high") == 0)
+                ok = 1;
+        }
+
+        if (!ok && tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
             ok = 1;
 
         if (!ok)
         {
-            /*
-              One more pass after a longer settle, now that the fetch path
-              includes split-endian + bounded scan fallback again.
-            */
             delay_ms_approx(120u);
             if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
                 ok = 1;
