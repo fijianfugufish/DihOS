@@ -769,6 +769,16 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
     i2c1_bus_set_quiet(0);
 }
 
+/*
+  NOTE:
+  These GPIO-assisted helpers are intentionally not used in the active TCPD
+  bring-up path right now.
+
+  The ACPI GPIO resource pin is not yet proven to be a directly usable TLMM
+  GPIO number on this platform, and earlier logs showed that driving it could
+  break otherwise-working I2C traffic.
+*/
+
 static void tcpd_gpio_reset_pulse(const hidi2c_acpi_regs *regs)
 {
     uint32_t active;
@@ -1645,6 +1655,132 @@ static int tcpd_try_desc_after_gpio_hold(const hidi2c_acpi_regs *regs,
     return -1;
 }
 
+static int tcpd_try_fetch_now(hidi2c_device *dev, const char *tag)
+{
+    terminal_print("TCPD fetch stage: ");
+    terminal_print_inline(tag);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD fetch success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD fetch miss: ");
+    terminal_print_inline(tag);
+    return -1;
+}
+
+static int tcpd_wake_and_fetch(hidi2c_device *dev, const char *tag, uint32_t settle_ms)
+{
+    terminal_print("TCPD wake+fetch stage: ");
+    terminal_print_inline(tag);
+
+    hidi2c_touchpad_wake_probe(dev);
+    delay_ms_approx(settle_ms);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD wake+fetch success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD wake+fetch miss: ");
+    terminal_print_inline(tag);
+    return -1;
+}
+
+static int tcpd_run_acpi_stage_and_probe(const hidi2c_acpi_regs *regs,
+                                         hidi2c_device *dev,
+                                         const char *tag,
+                                         void (*fn)(const hidi2c_acpi_regs *),
+                                         uint32_t settle_ms,
+                                         int use_wake_probe)
+{
+    terminal_print("TCPD ACPI stage begin: ");
+    terminal_print_inline(tag);
+
+    if (fn)
+        fn(regs);
+
+    delay_ms_approx(settle_ms);
+
+    if (use_wake_probe)
+        return tcpd_wake_and_fetch(dev, tag, 40u);
+
+    return tcpd_try_fetch_now(dev, tag);
+}
+
+static int tcpd_full_power_cycle_sequence(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
+{
+    int ok = 0;
+
+    /*
+      Harder sequence:
+      _PS3 -> settle -> fetch
+      GIO0._REG -> settle -> wake+fetch
+      _STA -> _INI -> settle -> wake+fetch
+      _PS0 -> long settle -> wake+fetch
+      GIO0._DSM -> settle -> wake+fetch
+      if still dead, do one more PS3 -> PS0 cycle
+    */
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS3-1", tcpd_try_ps3_from_acpi, 80u, 0) == 0)
+        ok = 1;
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "GIO0._REG-1", tcpd_try_gio0_reg_from_acpi, 30u, 1) == 0)
+        ok = 1;
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "STA-1", tcpd_try_sta_from_acpi, 20u, 0) == 0)
+        ok = 1;
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "INI-1", tcpd_try_ini_from_acpi, 40u, 1) == 0)
+        ok = 1;
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-1", tcpd_try_ps0_from_acpi, 120u, 1) == 0)
+        ok = 1;
+
+    if (!ok)
+    {
+        terminal_print("TCPD ACPI stage begin: GIO0._DSM-1\n");
+        tcpd_try_gio0_dsm_from_acpi(regs);
+        delay_ms_approx(80u);
+
+        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-1", 40u) == 0)
+            ok = 1;
+    }
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS3-2", tcpd_try_ps3_from_acpi, 120u, 0) == 0)
+        ok = 1;
+
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-2", tcpd_try_ps0_from_acpi, 160u, 1) == 0)
+        ok = 1;
+
+    if (!ok)
+    {
+        terminal_print("TCPD ACPI stage begin: GIO0._REG-2\n");
+        tcpd_try_gio0_reg_from_acpi(regs);
+        delay_ms_approx(40u);
+
+        if (tcpd_wake_and_fetch(dev, "GIO0._REG-2", 60u) == 0)
+            ok = 1;
+    }
+
+    if (!ok)
+    {
+        terminal_print("TCPD ACPI stage begin: GIO0._DSM-2\n");
+        tcpd_try_gio0_dsm_from_acpi(regs);
+        delay_ms_approx(120u);
+
+        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-2", 80u) == 0)
+            ok = 1;
+    }
+
+    return ok ? 0 : -1;
+}
+
 void i2c1_hidi2c_init(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs regs;
@@ -1764,7 +1900,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32(regs.tcpd_gio0_dsm_len);
 
         /*
-          Reset tiny AML shadow state before replaying ACPI-side init.
+          Reset AML shadow state before every serious TCPD bring-up attempt.
         */
         g_aml_gabl = 0;
         g_aml_lids = 0;
@@ -1774,61 +1910,37 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         g_aml_t1 = 0;
 
         /*
-          Keep the platform bring-up quiet.
+          Keep GPIO out of the picture for now.
+          The current ACPI GPIO extraction is still diagnostic-only.
         */
-        terminal_set_quiet();
+        terminal_print("TCPD GPIO-assisted path disabled for safety\n");
 
         /*
-          Try an explicit power-cycle first.
-          We now know the bus is really receiving zero words, so the next best
-          hypothesis is that TCPD never fully leaves its low-power state.
+          First try a staged ACPI power/init sequence with probe-after-each-step.
         */
-        tcpd_try_ps3_from_acpi(&regs);
-        delay_ms_approx(30u);
-
-        tcpd_try_sta_from_acpi(&regs);
-        tcpd_try_ini_from_acpi(&regs);
-        tcpd_try_gio0_reg_from_acpi(&regs);
-
-        delay_ms_approx(10u);
-
-        tcpd_try_ps0_from_acpi(&regs);
-        delay_ms_approx(80u);
-
-        terminal_set_loud();
-
-        /*
-          GIO0._DSM still returns meaningful values in your logs, so keep it.
-          TCPD ancestor _DSM stays disabled.
-        */
-        tcpd_try_gio0_dsm_from_acpi(&regs);
-
-        delay_ms_approx(80u);
-
-        if (regs.tcpd_gpio_valid)
-        {
-            terminal_print("TCPD trying GPIO-assisted wake ladder\n");
-
-            if (!ok && tcpd_try_desc_after_gpio_pulse(&regs, &g_tpd, 1, "gpio-active-low-pulse") == 0)
-                ok = 1;
-
-            if (!ok && tcpd_try_desc_after_gpio_pulse(&regs, &g_tpd, 0, "gpio-active-high-pulse") == 0)
-                ok = 1;
-
-            if (!ok && tcpd_try_desc_after_gpio_hold(&regs, &g_tpd, GPIO_VALUE_LOW, "gpio-hold-low") == 0)
-                ok = 1;
-
-            if (!ok && tcpd_try_desc_after_gpio_hold(&regs, &g_tpd, GPIO_VALUE_HIGH, "gpio-hold-high") == 0)
-                ok = 1;
-        }
-
-        if (!ok && tcpd_try_desc_after_wake(&g_tpd, "no-gpio") == 0)
+        if (!ok && tcpd_full_power_cycle_sequence(&regs, &g_tpd) == 0)
             ok = 1;
 
+        /*
+          If still dead, try repeated no-GPIO wake probes with larger settles.
+        */
+        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-1", 120u) == 0)
+            ok = 1;
+
+        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-2", 200u) == 0)
+            ok = 1;
+
+        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-3", 300u) == 0)
+            ok = 1;
+
+        /*
+          Final fallback:
+          let the descriptor fetch logic do a couple more passes after a long settle.
+        */
         if (!ok)
         {
-            delay_ms_approx(120u);
-            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 2u) == 0)
+            delay_ms_approx(250u);
+            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 3u) == 0)
                 ok = 1;
         }
 
