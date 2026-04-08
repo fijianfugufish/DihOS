@@ -2092,7 +2092,16 @@ static int classify_and_export_device(const uint8_t *aml,
         if (s->gpio_found)
         {
             uint32_t i;
-            g_hidi2c_regs.eckb_gpio_valid = 1u;
+
+            /*
+              IMPORTANT:
+              gpio_first_pin recovered from ACPI _CRS is NOT yet proven to be
+              a directly usable Qualcomm TLMM GPIO number.
+
+              Export the metadata for logging/diagnostics, but do NOT mark it
+              as safe-to-drive yet.
+            */
+            g_hidi2c_regs.eckb_gpio_valid = 0u;
             g_hidi2c_regs.eckb_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.eckb_gpio_flags = s->gpio_flags;
 
@@ -2105,6 +2114,16 @@ static int classify_and_export_device(const uint8_t *aml,
 
             if (i == sizeof(g_hidi2c_regs.eckb_gpio_source))
                 g_hidi2c_regs.eckb_gpio_source[sizeof(g_hidi2c_regs.eckb_gpio_source) - 1] = 0;
+        }
+
+        if (s->gpio_found)
+        {
+            terminal_print("ECKB ACPI GPIO recovered but NOT enabled for drive; raw pin:");
+            terminal_print_inline_hex32(s->gpio_first_pin);
+            terminal_print("flags: ");
+            terminal_print_inline_hex32(s->gpio_flags);
+            terminal_print("source: ");
+            terminal_print_inline(s->gpio_source[0] ? s->gpio_source : "(none)");
         }
     }
 
@@ -2151,7 +2170,17 @@ static int classify_and_export_device(const uint8_t *aml,
         if (s->gpio_found)
         {
             uint32_t i;
-            g_hidi2c_regs.tcpd_gpio_valid = 1u;
+
+            /*
+              IMPORTANT:
+              gpio_first_pin recovered from ACPI _CRS is NOT yet proven to be
+              a directly usable Qualcomm TLMM GPIO number.
+
+              Keep the recovered values for logs, but prevent the runtime HID
+              path from driving this line until a real ACPI->TLMM translation
+              layer exists.
+            */
+            g_hidi2c_regs.tcpd_gpio_valid = 0u;
             g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
 
@@ -2164,6 +2193,16 @@ static int classify_and_export_device(const uint8_t *aml,
 
             if (i == sizeof(g_hidi2c_regs.tcpd_gpio_source))
                 g_hidi2c_regs.tcpd_gpio_source[sizeof(g_hidi2c_regs.tcpd_gpio_source) - 1] = 0;
+        }
+
+        if (s->gpio_found)
+        {
+            terminal_print("TCPD ACPI GPIO recovered but NOT enabled for drive; raw pin: ");
+            terminal_print_inline_hex32(s->gpio_first_pin);
+            terminal_print("flags: ");
+            terminal_print_inline_hex32(s->gpio_flags);
+            terminal_print("source: ");
+            terminal_print_inline(s->gpio_source[0] ? s->gpio_source : "(none)");
         }
     }
 

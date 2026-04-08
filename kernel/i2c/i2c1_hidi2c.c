@@ -1710,7 +1710,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
         if (regs.tcpd_gpio_valid)
         {
-            terminal_print("ACPI TCPD gpio pin:");
+            terminal_print("ACPI TCPD gpio raw pin:");
             terminal_print_hex32(regs.tcpd_gpio_pin);
             terminal_print(" flags:");
             terminal_print_hex32(regs.tcpd_gpio_flags);
