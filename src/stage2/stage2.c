@@ -219,6 +219,191 @@ static uint64_t parse_hex64_w(const wchar_t *s)
     return v;
 }
 
+#ifndef TLMM_MMIO_OVERRIDE_BASE
+#define TLMM_MMIO_OVERRIDE_BASE 0x000000000F100000ULL
+#endif
+
+#ifndef TLMM_MMIO_OVERRIDE_SIZE
+#define TLMM_MMIO_OVERRIDE_SIZE 0x0000000000F00000ULL
+#endif
+
+static uint64_t try_tlmm_override_from_file(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, uint64_t *size_out)
+{
+    typedef struct EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
+    typedef EFI_STATUS (*T_OPEN)(EFI_FILE_PROTOCOL *, EFI_FILE_PROTOCOL **, const wchar_t *, UINTN, UINTN);
+    typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
+    typedef EFI_STATUS (*T_READ)(EFI_FILE_PROTOCOL *, UINTN *, void *);
+    typedef EFI_STATUS (*T_SET_POS)(EFI_FILE_PROTOCOL *, uint64_t);
+
+    uint64_t base = 0;
+    uint64_t size = 0;
+
+    if (size_out)
+        *size_out = 0;
+
+    EFI_FILE_PROTOCOL *root = 0;
+    if (fs_open_root(st, image, &root) != 0 || !root)
+    {
+        println(st, L"[S2:TLMM] override: root open failed");
+        return 0;
+    }
+
+    T_OPEN FileOpen = *(void **)((char *)root + 0x08);
+    T_CLOSE FileClose = *(void **)((char *)root + 0x10);
+
+    EFI_FILE_PROTOCOL *os = 0;
+    if (FileOpen && !FileOpen(root, &os, L"OS", 0, 0) && os)
+    {
+        T_OPEN DirOpen = *(void **)((char *)os + 0x08);
+        T_CLOSE DirClose = *(void **)((char *)os + 0x10);
+
+        EFI_FILE_PROTOCOL *f = 0;
+        if (DirOpen && !DirOpen(os, &f, L"tlmm.txt", 0, 0) && f)
+        {
+            T_READ FileRead = *(void **)((char *)f + 0x20);
+            T_SET_POS SetPos = *(void **)((char *)f + 0x18);
+
+            unsigned char buf[128];
+            UINTN sz = sizeof(buf) - 1;
+
+            if (SetPos)
+                SetPos(f, 0);
+
+            if (FileRead && !FileRead(f, &sz, buf))
+            {
+                buf[sz] = 0;
+
+                /*
+                  Format:
+                    <base>
+                  or
+                    <base> <size>
+                  e.g.
+                    0x0F100000 0x00F00000
+                */
+                const unsigned char *p = buf;
+                while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+                    ++p;
+
+                if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+                    p += 2;
+
+                int any = 0;
+                for (;; ++p)
+                {
+                    unsigned char c = *p;
+                    int n = -1;
+
+                    if (c >= '0' && c <= '9') n = (int)(c - '0');
+                    else if (c >= 'a' && c <= 'f') n = (int)(c - 'a') + 10;
+                    else if (c >= 'A' && c <= 'F') n = (int)(c - 'A') + 10;
+                    else break;
+
+                    base = (base << 4) | (uint64_t)n;
+                    any = 1;
+                }
+
+                while (*p == ' ' || *p == '\t')
+                    ++p;
+
+                if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+                    p += 2;
+
+                for (;; ++p)
+                {
+                    unsigned char c = *p;
+                    int n = -1;
+
+                    if (c >= '0' && c <= '9') n = (int)(c - '0');
+                    else if (c >= 'a' && c <= 'f') n = (int)(c - 'a') + 10;
+                    else if (c >= 'A' && c <= 'F') n = (int)(c - 'A') + 10;
+                    else break;
+
+                    size = (size << 4) | (uint64_t)n;
+                }
+
+                if (any && base)
+                {
+                    if (!size)
+                        size = TLMM_MMIO_OVERRIDE_SIZE;
+
+                    println(st, L"[S2:TLMM] override: loaded from \\OS\\tlmm.txt");
+                    print(st, L"[S2:TLMM] base = ");
+                    hex64(st, base);
+                    print(st, L"[S2:TLMM] size = ");
+                    hex64(st, size);
+                }
+                else
+                {
+                    base = 0;
+                    size = 0;
+                    println(st, L"[S2:TLMM] override file present but parse failed");
+                }
+            }
+
+            if (FileClose)
+                FileClose(f);
+        }
+
+        if (DirClose)
+            DirClose(os);
+    }
+
+    if (FileClose)
+        FileClose(root);
+
+    if (size_out)
+        *size_out = size;
+
+    return base;
+}
+
+static void find_tlmm_mmio(EFI_SYSTEM_TABLE *st,
+                           EFI_HANDLE image,
+                           uint64_t *base_out,
+                           uint64_t *size_out)
+{
+    uint64_t base = 0;
+    uint64_t size = 0;
+
+    if (base_out)
+        *base_out = 0;
+    if (size_out)
+        *size_out = 0;
+
+    /*
+      We do NOT have a real runtime TLMM discovery path here yet.
+      So for now:
+      1) try file override
+      2) fall back to compile-time override
+    */
+    base = try_tlmm_override_from_file(st, image, &size);
+    if (base)
+    {
+        if (base_out) *base_out = base;
+        if (size_out) *size_out = size;
+        return;
+    }
+
+    if (TLMM_MMIO_OVERRIDE_BASE)
+    {
+        base = TLMM_MMIO_OVERRIDE_BASE;
+        size = TLMM_MMIO_OVERRIDE_SIZE;
+
+        println(st, L"[S2:TLMM] override(macro):");
+        print(st, L"[S2:TLMM] base = ");
+        hex64(st, base);
+        print(st, L"[S2:TLMM] size = ");
+        hex64(st, size);
+
+        if (base_out) *base_out = base;
+        if (size_out) *size_out = size;
+        return;
+    }
+
+    println(st, L"[S2:TLMM] no TLMM MMIO provided");
+}
+
 /* Try to open \OS\xhci.txt and parse an MMIO address. Returns 0 if not found. */
 static uint64_t try_xhci_override_from_file(EFI_SYSTEM_TABLE *st, EFI_HANDLE image)
 {
@@ -841,6 +1026,12 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         print(st, L"  HCIVERSION=");
         hex64(st, hciver);
     }
+
+    find_tlmm_mmio(st, image, &bi.tlmm_mmio_base, &bi.tlmm_mmio_size);
+    print(st, L"[S2] TLMM MMIO base = ");
+    hex64(st, bi.tlmm_mmio_base);
+    print(st, L"[S2] TLMM MMIO size = ");
+    hex64(st, bi.tlmm_mmio_size);
 
     /* Load kernel */
     EFI_PHYSICAL_ADDRESS entry = 0;
