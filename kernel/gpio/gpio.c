@@ -22,15 +22,19 @@ static int gpio_backend_init_once(void)
     if (g_tlmm_ready)
         return 0;
 
-    if (k_bootinfo_ptr && k_bootinfo_ptr->tlmm_mmio_base)
+    if (k_bootinfo_ptr && k_bootinfo_ptr->tlmm_mmio_base && k_bootinfo_ptr->tlmm_mmio_size)
     {
         base = (uintptr_t)k_bootinfo_ptr->tlmm_mmio_base;
         size = (uint32_t)k_bootinfo_ptr->tlmm_mmio_size;
+
+        terminal_print("TLMM source: bootinfo\n");
     }
     else
     {
         base = (uintptr_t)TLMM_FALLBACK_BASE;
         size = TLMM_FALLBACK_SIZE;
+
+        terminal_print("TLMM source: fallback\n");
     }
 
     if (!base || !size)
@@ -40,8 +44,10 @@ static int gpio_backend_init_once(void)
     g_tlmm_ready = 1;
 
     terminal_print("TLMM base:");
-    terminal_print_hex64((uint64_t)base);
-    terminal_print("\n");
+    terminal_print_inline_hex64((uint64_t)base);
+
+    terminal_print("TLMM size:");
+    terminal_print_inline_hex32(size);
 
     return 0;
 }
