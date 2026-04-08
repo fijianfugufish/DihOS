@@ -1211,6 +1211,14 @@ static void export_method_body(const uint8_t *aml,
     terminal_print("\n");
 }
 
+static uint8_t scope_has_any_tcpd_power_methods(uint8_t has_ps0,
+                                                uint8_t has_ps3,
+                                                uint8_t has_sta,
+                                                uint8_t has_ini)
+{
+    return (uint8_t)((has_ps0 || has_ps3 || has_sta || has_ini) ? 1u : 0u);
+}
+
 static void maybe_export_tcpd_methods(const uint8_t *aml,
                                       const hidi2c_acpi_summary_t *s)
 {
@@ -1226,33 +1234,26 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
         return;
 
     /*
-      Pick the scope that actually looks like a TCPD power scope.
-      Prefer ggparent, then grandparent, then parent.
+      New selection policy:
+
+      1) First prefer the nearest ancestor scope that actually exposes one of
+         the methods we care about: _PS0 / _PS3 / _STA / _INI.
+         For now prefer parent first, then grandparent, then ggparent, because
+         the closest scope is the most likely to contain the device-specific
+         power glue for TCPD.
+
+      2) If no ancestor exposes any of those methods, fall back to the older
+         heuristic that looks for a TCPD-ish power scope.
+
+      3) If still nothing matches, export nothing and log clearly.
     */
-    if (s->ggparent_body_end > s->ggparent_body_start &&
-        body_looks_like_tcpd_power_method(aml, s->ggparent_body_start, s->ggparent_body_end))
-    {
-        chosen_start = s->ggparent_body_start;
-        chosen_end = s->ggparent_body_end;
-        chosen_has_ps0 = s->ggparent_has_ps0;
-        chosen_has_ps3 = s->ggparent_has_ps3;
-        chosen_has_sta = s->ggparent_has_sta;
-        chosen_has_ini = s->ggparent_has_ini;
-        chosen_tag = "ACPI TCPD scope: ggparent";
-    }
-    else if (s->grandparent_body_end > s->grandparent_body_start &&
-             body_looks_like_tcpd_power_method(aml, s->grandparent_body_start, s->grandparent_body_end))
-    {
-        chosen_start = s->grandparent_body_start;
-        chosen_end = s->grandparent_body_end;
-        chosen_has_ps0 = s->grandparent_has_ps0;
-        chosen_has_ps3 = s->grandparent_has_ps3;
-        chosen_has_sta = s->grandparent_has_sta;
-        chosen_has_ini = s->grandparent_has_ini;
-        chosen_tag = "ACPI TCPD scope: grandparent";
-    }
-    else if (s->parent_body_end > s->parent_body_start &&
-             body_looks_like_tcpd_power_method(aml, s->parent_body_start, s->parent_body_end))
+
+    /* ---- pass 1: explicit method presence beats heuristics ---- */
+    if (s->parent_body_end > s->parent_body_start &&
+        scope_has_any_tcpd_power_methods(s->parent_has_ps0,
+                                         s->parent_has_ps3,
+                                         s->parent_has_sta,
+                                         s->parent_has_ini))
     {
         chosen_start = s->parent_body_start;
         chosen_end = s->parent_body_end;
@@ -1260,15 +1261,92 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
         chosen_has_ps3 = s->parent_has_ps3;
         chosen_has_sta = s->parent_has_sta;
         chosen_has_ini = s->parent_has_ini;
-        chosen_tag = "ACPI TCPD scope: parent";
+        chosen_tag = "ACPI TCPD scope: parent (explicit methods)";
     }
-    else
+    else if (s->grandparent_body_end > s->grandparent_body_start &&
+             scope_has_any_tcpd_power_methods(s->grandparent_has_ps0,
+                                              s->grandparent_has_ps3,
+                                              s->grandparent_has_sta,
+                                              s->grandparent_has_ini))
     {
-        terminal_print("ACPI TCPD scope: no trusted power scope found\n");
+        chosen_start = s->grandparent_body_start;
+        chosen_end = s->grandparent_body_end;
+        chosen_has_ps0 = s->grandparent_has_ps0;
+        chosen_has_ps3 = s->grandparent_has_ps3;
+        chosen_has_sta = s->grandparent_has_sta;
+        chosen_has_ini = s->grandparent_has_ini;
+        chosen_tag = "ACPI TCPD scope: grandparent (explicit methods)";
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start &&
+             scope_has_any_tcpd_power_methods(s->ggparent_has_ps0,
+                                              s->ggparent_has_ps3,
+                                              s->ggparent_has_sta,
+                                              s->ggparent_has_ini))
+    {
+        chosen_start = s->ggparent_body_start;
+        chosen_end = s->ggparent_body_end;
+        chosen_has_ps0 = s->ggparent_has_ps0;
+        chosen_has_ps3 = s->ggparent_has_ps3;
+        chosen_has_sta = s->ggparent_has_sta;
+        chosen_has_ini = s->ggparent_has_ini;
+        chosen_tag = "ACPI TCPD scope: ggparent (explicit methods)";
+    }
+
+    /* ---- pass 2: old heuristic as fallback only ---- */
+    if (chosen_start == 0 && chosen_end == 0)
+    {
+        if (s->parent_body_end > s->parent_body_start &&
+            body_looks_like_tcpd_power_method(aml, s->parent_body_start, s->parent_body_end))
+        {
+            chosen_start = s->parent_body_start;
+            chosen_end = s->parent_body_end;
+            chosen_has_ps0 = s->parent_has_ps0;
+            chosen_has_ps3 = s->parent_has_ps3;
+            chosen_has_sta = s->parent_has_sta;
+            chosen_has_ini = s->parent_has_ini;
+            chosen_tag = "ACPI TCPD scope: parent (heuristic fallback)";
+        }
+        else if (s->grandparent_body_end > s->grandparent_body_start &&
+                 body_looks_like_tcpd_power_method(aml, s->grandparent_body_start, s->grandparent_body_end))
+        {
+            chosen_start = s->grandparent_body_start;
+            chosen_end = s->grandparent_body_end;
+            chosen_has_ps0 = s->grandparent_has_ps0;
+            chosen_has_ps3 = s->grandparent_has_ps3;
+            chosen_has_sta = s->grandparent_has_sta;
+            chosen_has_ini = s->grandparent_has_ini;
+            chosen_tag = "ACPI TCPD scope: grandparent (heuristic fallback)";
+        }
+        else if (s->ggparent_body_end > s->ggparent_body_start &&
+                 body_looks_like_tcpd_power_method(aml, s->ggparent_body_start, s->ggparent_body_end))
+        {
+            chosen_start = s->ggparent_body_start;
+            chosen_end = s->ggparent_body_end;
+            chosen_has_ps0 = s->ggparent_has_ps0;
+            chosen_has_ps3 = s->ggparent_has_ps3;
+            chosen_has_sta = s->ggparent_has_sta;
+            chosen_has_ini = s->ggparent_has_ini;
+            chosen_tag = "ACPI TCPD scope: ggparent (heuristic fallback)";
+        }
+    }
+
+    if (chosen_start == 0 || chosen_end == 0 || chosen_end <= chosen_start)
+    {
+        terminal_print("ACPI TCPD scope: no exportable power scope found\n");
         return;
     }
 
     terminal_print(chosen_tag);
+    terminal_print("\n");
+
+    terminal_print(" chosen flags ps0:");
+    terminal_print_hex8(chosen_has_ps0);
+    terminal_print(" ps3:");
+    terminal_print_hex8(chosen_has_ps3);
+    terminal_print(" sta:");
+    terminal_print_hex8(chosen_has_sta);
+    terminal_print(" ini:");
+    terminal_print_hex8(chosen_has_ini);
     terminal_print("\n");
 
     if (chosen_has_ps0)
@@ -2220,7 +2298,44 @@ static int classify_and_export_device(const uint8_t *aml,
           behaves like a looping power method and does not match the standard
           HID-I2C ACPI _DSM contract.
         */
+
+        g_hidi2c_regs.tcpd_ps0_valid = 0u;
+        g_hidi2c_regs.tcpd_ps0_len = 0u;
+
+        g_hidi2c_regs.tcpd_ps3_valid = 0u;
+        g_hidi2c_regs.tcpd_ps3_len = 0u;
+
+        g_hidi2c_regs.tcpd_sta_valid = 0u;
+        g_hidi2c_regs.tcpd_sta_len = 0u;
+
+        g_hidi2c_regs.tcpd_ini_valid = 0u;
+        g_hidi2c_regs.tcpd_ini_len = 0u;
+
         maybe_export_tcpd_methods(aml, s);
+
+        terminal_print("TCPD exported PS0:");
+        terminal_print_hex8(g_hidi2c_regs.tcpd_ps0_valid);
+        terminal_print(" len:");
+        terminal_print_hex32(g_hidi2c_regs.tcpd_ps0_len);
+        terminal_print("\n");
+
+        terminal_print("TCPD exported PS3:");
+        terminal_print_hex8(g_hidi2c_regs.tcpd_ps3_valid);
+        terminal_print(" len:");
+        terminal_print_hex32(g_hidi2c_regs.tcpd_ps3_len);
+        terminal_print("\n");
+
+        terminal_print("TCPD exported STA:");
+        terminal_print_hex8(g_hidi2c_regs.tcpd_sta_valid);
+        terminal_print(" len:");
+        terminal_print_hex32(g_hidi2c_regs.tcpd_sta_len);
+        terminal_print("\n");
+
+        terminal_print("TCPD exported INI:");
+        terminal_print_hex8(g_hidi2c_regs.tcpd_ini_valid);
+        terminal_print(" len:");
+        terminal_print_hex32(g_hidi2c_regs.tcpd_ini_len);
+        terminal_print("\n");
 
         g_hidi2c_regs.tcpd_dsm_valid = 0u;
         g_hidi2c_regs.tcpd_dsm_len = 0u;
