@@ -370,27 +370,18 @@ static int i2c1_wait_tx_watermark(uint32_t *irq_out)
 
 static void fifo_write_bytes_now(const uint8_t *buf, uint32_t len)
 {
-    uint32_t i = 0;
+    /*
+      Revert to the empirically working mode for this platform:
+      one byte value per FIFO write.
 
-    while (i < len)
+      Yes, this looks less elegant than packed FIFO words, but the log proves
+      the packed-word version makes every TCPD pointer write time out on the
+      current controller configuration.
+    */
+    for (uint32_t i = 0; i < len; ++i)
     {
-        uint32_t word = 0;
-        uint32_t take = len - i;
-
-        if (take > 4u)
-            take = 4u;
-
-        /*
-          Pack up to 4 bytes into one FIFO word, little-endian by byte lane.
-          This matches how Qualcomm GENI FIFO-mode drivers pack TX data.
-        */
-        for (uint32_t j = 0; j < take; ++j)
-            word |= ((uint32_t)buf[i + j]) << (j * 8u);
-
-        wr32(SE_GENI_TX_FIFOn, word);
+        wr32(SE_GENI_TX_FIFOn, (uint32_t)buf[i]);
         io_barrier();
-
-        i += take;
     }
 }
 

@@ -1308,7 +1308,7 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     */
     terminal_print("TCPD scan rdonly start\n");
 
-    for (reg = 0x0000u; reg <= 0x0040u; reg += 2u)
+    for (reg = 0x0018u; reg <= 0x0024u; reg += 2u)
     {
         rc = hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0);
         if (rc == 0)
