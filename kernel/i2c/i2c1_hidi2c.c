@@ -1713,33 +1713,22 @@ static int tcpd_run_acpi_stage_and_probe(const hidi2c_acpi_regs *regs,
     return tcpd_try_fetch_now(dev, tag);
 }
 
-static int tcpd_full_power_cycle_sequence(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
+static int tcpd_simple_acpi_sequence(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
 {
     int ok = 0;
 
     /*
-      Harder sequence:
-      _PS3 -> settle -> fetch
-      GIO0._REG -> settle -> wake+fetch
-      _STA -> _INI -> settle -> wake+fetch
-      _PS0 -> long settle -> wake+fetch
-      GIO0._DSM -> settle -> wake+fetch
-      if still dead, do one more PS3 -> PS0 cycle
+      Simplified sequence:
+      - keep GPIO out
+      - skip _PS3 and _REG
+      - focus on the methods that are actually behaving sensibly in logs:
+        _STA, _INI, GIO0._DSM
     */
-
-    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS3-1", tcpd_try_ps3_from_acpi, 80u, 0) == 0)
-        ok = 1;
-
-    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "GIO0._REG-1", tcpd_try_gio0_reg_from_acpi, 30u, 1) == 0)
-        ok = 1;
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "STA-1", tcpd_try_sta_from_acpi, 20u, 0) == 0)
         ok = 1;
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "INI-1", tcpd_try_ini_from_acpi, 40u, 1) == 0)
-        ok = 1;
-
-    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-1", tcpd_try_ps0_from_acpi, 120u, 1) == 0)
         ok = 1;
 
     if (!ok)
@@ -1748,25 +1737,15 @@ static int tcpd_full_power_cycle_sequence(const hidi2c_acpi_regs *regs, hidi2c_d
         tcpd_try_gio0_dsm_from_acpi(regs);
         delay_ms_approx(80u);
 
-        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-1", 40u) == 0)
+        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-1", 60u) == 0)
             ok = 1;
     }
 
-    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS3-2", tcpd_try_ps3_from_acpi, 120u, 0) == 0)
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "STA-2", tcpd_try_sta_from_acpi, 20u, 0) == 0)
         ok = 1;
 
-    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-2", tcpd_try_ps0_from_acpi, 160u, 1) == 0)
+    if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "INI-2", tcpd_try_ini_from_acpi, 60u, 1) == 0)
         ok = 1;
-
-    if (!ok)
-    {
-        terminal_print("TCPD ACPI stage begin: GIO0._REG-2\n");
-        tcpd_try_gio0_reg_from_acpi(regs);
-        delay_ms_approx(40u);
-
-        if (tcpd_wake_and_fetch(dev, "GIO0._REG-2", 60u) == 0)
-            ok = 1;
-    }
 
     if (!ok)
     {
@@ -1774,7 +1753,7 @@ static int tcpd_full_power_cycle_sequence(const hidi2c_acpi_regs *regs, hidi2c_d
         tcpd_try_gio0_dsm_from_acpi(regs);
         delay_ms_approx(120u);
 
-        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-2", 80u) == 0)
+        if (tcpd_wake_and_fetch(dev, "GIO0._DSM-2", 100u) == 0)
             ok = 1;
     }
 
@@ -1916,9 +1895,10 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print("TCPD GPIO-assisted path disabled for safety\n");
 
         /*
-          First try a staged ACPI power/init sequence with probe-after-each-step.
+          First try the simplified ACPI path that only uses the methods that
+          are currently behaving usefully in logs.
         */
-        if (!ok && tcpd_full_power_cycle_sequence(&regs, &g_tpd) == 0)
+        if (!ok && tcpd_simple_acpi_sequence(&regs, &g_tpd) == 0)
             ok = 1;
 
         /*
