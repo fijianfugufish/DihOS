@@ -847,24 +847,16 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
         return -1;
     }
 
-    if (fifo_read_bytes(dst, rx_len) != 0)
-    {
-        terminal_print("i2c rd drain fail a:");
-        terminal_print_inline_hex8(addr7);
-        terminal_print_inline(" rxst:");
-        terminal_print_inline_hex32(rd32(SE_GENI_RX_FIFO_STATUS));
-        terminal_print_inline(" irq:");
-        terminal_print_inline_hex32(rd32(SE_GENI_M_IRQ_STATUS));
-        terminal_print("\n");
-
-        wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-        io_barrier();
-        i2c1_abort_if_needed();
-        return -1;
-    }
+    rc = fifo_read_bytes(dst, rx_len);
 
     wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
     io_barrier();
+
+    if (rc != 0)
+    {
+        i2c1_abort_if_needed();
+        return -1;
+    }
 
     return 0;
 }

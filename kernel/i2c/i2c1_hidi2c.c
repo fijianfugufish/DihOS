@@ -1693,10 +1693,24 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
           Keep the platform bring-up quiet.
         */
         terminal_set_quiet();
+
+        /*
+          Try an explicit power-cycle first.
+          We now know the bus is really receiving zero words, so the next best
+          hypothesis is that TCPD never fully leaves its low-power state.
+        */
+        tcpd_try_ps3_from_acpi(&regs);
+        delay_ms_approx(30u);
+
         tcpd_try_sta_from_acpi(&regs);
         tcpd_try_ini_from_acpi(&regs);
         tcpd_try_gio0_reg_from_acpi(&regs);
+
+        delay_ms_approx(10u);
+
         tcpd_try_ps0_from_acpi(&regs);
+        delay_ms_approx(80u);
+
         terminal_set_loud();
 
         /*
