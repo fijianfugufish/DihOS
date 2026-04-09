@@ -15,7 +15,6 @@
 #define I2C_HID_PWR_ON 0x00u
 
 #define TCPD_GPIO_TEST_ENABLE 1u
-#define TCPD_GPIO_TEST_ACTIVE_HIGH 1u
 
 static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
@@ -1787,11 +1786,106 @@ static int tcpd_simple_acpi_sequence(const hidi2c_acpi_regs *regs, hidi2c_device
     return ok ? 0 : -1;
 }
 
+static int tcpd_controlled_gpio_test_one_polarity(const hidi2c_acpi_regs *regs,
+                                                  hidi2c_device *dev,
+                                                  uint32_t active,
+                                                  uint32_t inactive,
+                                                  const char *tag)
+{
+    int rc;
+    uint32_t level = 0;
+
+    if (!regs || !dev)
+        return -1;
+
+    terminal_print("TCPD controlled GPIO test polarity: ");
+    terminal_print(tag);
+    terminal_print("\n");
+
+    rc = gpio_init();
+    terminal_print("TCPD controlled GPIO test gpio_init rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    rc = gpio_set_output(regs->tcpd_gpio_pin);
+    terminal_print("TCPD controlled GPIO test gpio_set_output rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    /* start inactive */
+    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
+    terminal_print("TCPD controlled GPIO write inactive rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    if (gpio_read(regs->tcpd_gpio_pin, &level) == 0)
+    {
+        terminal_print("TCPD controlled GPIO readback inactive:");
+        terminal_print_hex32(level);
+        terminal_print("\n");
+    }
+
+    delay_ms_approx(10u);
+
+    /* pulse active */
+    rc = gpio_write(regs->tcpd_gpio_pin, active);
+    terminal_print("TCPD controlled GPIO write active rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    if (gpio_read(regs->tcpd_gpio_pin, &level) == 0)
+    {
+        terminal_print("TCPD controlled GPIO readback active:");
+        terminal_print_hex32(level);
+        terminal_print("\n");
+    }
+
+    delay_ms_approx(15u);
+
+    /* return inactive */
+    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
+    terminal_print("TCPD controlled GPIO write inactive2 rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    if (gpio_read(regs->tcpd_gpio_pin, &level) == 0)
+    {
+        terminal_print("TCPD controlled GPIO readback inactive2:");
+        terminal_print_hex32(level);
+        terminal_print("\n");
+    }
+
+    delay_ms_approx(80u);
+
+    rc = i2c1_bus_addr_only(dev->i2c_addr_7bit);
+    terminal_print("TCPD controlled GPIO post-pulse addr rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+
+    if (rc != 0)
+    {
+        terminal_print("TCPD controlled GPIO test: device stopped ACKing after ");
+        terminal_print(tag);
+        terminal_print("\n");
+        return -1;
+    }
+
+    return tcpd_wake_and_fetch(dev, tag, 120u);
+}
+
 static int tcpd_controlled_gpio_test(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
 {
     int rc;
-    uint32_t active;
-    uint32_t inactive;
 
     if (!regs || !dev)
         return -1;
@@ -1818,81 +1912,27 @@ static int tcpd_controlled_gpio_test(const hidi2c_acpi_regs *regs, hidi2c_device
     terminal_print_hex8(regs->tcpd_gpio_pin_cfg);
     terminal_print("\n");
 
-    rc = gpio_init();
-    terminal_print("TCPD controlled GPIO test gpio_init rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-    if (rc != 0)
-        return -1;
-
-    rc = gpio_set_output(regs->tcpd_gpio_pin);
-    terminal_print("TCPD controlled GPIO test gpio_set_output rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-    if (rc != 0)
-        return -1;
-
-#if TCPD_GPIO_TEST_ACTIVE_HIGH
-    active = GPIO_VALUE_HIGH;
-    inactive = GPIO_VALUE_LOW;
-    terminal_print("TCPD controlled GPIO polarity: active-high\n");
-#else
-    active = GPIO_VALUE_LOW;
-    inactive = GPIO_VALUE_HIGH;
-    terminal_print("TCPD controlled GPIO polarity: active-low\n");
-#endif
+    /*
+      Try active-high first because that is what you already tested and it did
+      not break ACK. If it still does nothing, try active-low once.
+    */
+    rc = tcpd_controlled_gpio_test_one_polarity(regs,
+                                                dev,
+                                                GPIO_VALUE_HIGH,
+                                                GPIO_VALUE_LOW,
+                                                "gpio-controlled-high");
+    if (rc == 0)
+        return 0;
 
     /*
-      Start inactive, then pulse active briefly, then back inactive.
-      Keep it much smaller than the old ladder.
+      Only try the second polarity after the first one has failed *without*
+      obviously killing the bus. The inner helper already bails if ACK dies.
     */
-    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
-    terminal_print("TCPD controlled GPIO write inactive rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-    if (rc != 0)
-        return -1;
-
-    delay_ms_approx(10u);
-
-    rc = gpio_write(regs->tcpd_gpio_pin, active);
-    terminal_print("TCPD controlled GPIO write active rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-    if (rc != 0)
-        return -1;
-
-    delay_ms_approx(15u);
-
-    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
-    terminal_print("TCPD controlled GPIO write inactive2 rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-    if (rc != 0)
-        return -1;
-
-    delay_ms_approx(80u);
-
-    /*
-      Important:
-      Check whether the device still ACKs immediately after the pulse.
-      Earlier bad GPIO attempts caused NACK behaviour.
-    */
-    rc = i2c1_bus_addr_only(dev->i2c_addr_7bit);
-    terminal_print("TCPD controlled GPIO post-pulse addr rc:");
-    terminal_print_hex32((uint32_t)rc);
-    terminal_print("\n");
-
-    if (rc != 0)
-    {
-        terminal_print("TCPD controlled GPIO test: device stopped ACKing after pulse\n");
-        return -1;
-    }
-
-    /*
-      If it still ACKs, do the normal wake+fetch once.
-    */
-    return tcpd_wake_and_fetch(dev, "gpio-controlled-test", 120u);
+    return tcpd_controlled_gpio_test_one_polarity(regs,
+                                                  dev,
+                                                  GPIO_VALUE_LOW,
+                                                  GPIO_VALUE_HIGH,
+                                                  "gpio-controlled-low");
 }
 
 void i2c1_hidi2c_init(uint64_t rsdp_phys)
