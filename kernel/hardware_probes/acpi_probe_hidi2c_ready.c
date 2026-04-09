@@ -162,6 +162,8 @@ typedef struct
     uint32_t parent_obj_off;
     uint32_t grandparent_obj_off;
     uint32_t ggparent_obj_off;
+
+    uint8_t gpio_pin_guessed;
 } hidi2c_acpi_summary_t;
 
 typedef struct
@@ -2182,6 +2184,9 @@ static int classify_and_export_device(const uint8_t *aml,
             g_hidi2c_regs.eckb_gpio_valid = 0u;
             g_hidi2c_regs.eckb_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.eckb_gpio_flags = s->gpio_flags;
+            g_hidi2c_regs.eckb_gpio_conn_type = s->gpio_conn_type;
+            g_hidi2c_regs.eckb_gpio_pin_cfg = s->gpio_pin_cfg;
+            g_hidi2c_regs.eckb_gpio_pin_guessed = s->gpio_pin_guessed;
 
             for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_source); ++i)
             {
@@ -2261,6 +2266,8 @@ static int classify_and_export_device(const uint8_t *aml,
             g_hidi2c_regs.tcpd_gpio_valid = 0u;
             g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
+            g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
+            g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
 
             for (i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source); ++i)
             {
@@ -2279,6 +2286,12 @@ static int classify_and_export_device(const uint8_t *aml,
             terminal_print_inline_hex32(s->gpio_first_pin);
             terminal_print("flags: ");
             terminal_print_inline_hex32(s->gpio_flags);
+            terminal_print("conn_type: ");
+            terminal_print_inline_hex8(s->gpio_conn_type);
+            terminal_print("pin_cfg: ");
+            terminal_print_inline_hex8(s->gpio_pin_cfg);
+            terminal_print("guessed: ");
+            terminal_print_inline_hex8(s->gpio_pin_guessed);
             terminal_print("source: ");
             terminal_print_inline(s->gpio_source[0] ? s->gpio_source : "(none)");
         }
@@ -2778,6 +2791,7 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                 s->gpio_source_off = source_name_off;
                 s->gpio_first_pin = 0;
                 s->gpio_source[0] = 0;
+                s->gpio_pin_guessed = 0;
 
                 if (pin_table_off != 0 &&
                     pin_table_off + 1u < total)
@@ -2792,11 +2806,11 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                 if (s->gpio_first_pin == 0)
                 {
                     uint32_t k;
-                    for (k = 3u; k + 1u < total; k += 2u)
+                    for (k = 3u; k + 1u < total; ++k)
                     {
                         uint16_t cand = rd16le(g + k);
 
-                        if (cand == 0)
+                        if (cand == 0u)
                             continue;
                         if (cand == pin_table_off || cand == source_name_off)
                             continue;
@@ -2804,6 +2818,7 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                             continue;
 
                         s->gpio_first_pin = cand;
+                        s->gpio_pin_guessed = 1u;
                         break;
                     }
                 }
@@ -2959,28 +2974,56 @@ static void decode_first_gpio_descriptor_legacy(hidi2c_acpi_summary_t *s)
             s->gpio_pin_table_off = rd16le(g + 13);
             s->gpio_source_off = rd16le(g + 17);
             s->gpio_first_pin = 0u;
+            s->gpio_pin_guessed = 0u;
             s->gpio_source[0] = 0;
 
             pin_table_off = s->gpio_pin_table_off;
             source_name_off = s->gpio_source_off;
 
+            /*
+              First choice: trust the declared pin-table offset if it points
+              inside the descriptor payload.
+            */
             if (pin_table_off != 0u && pin_table_off + 1u < total)
+            {
                 s->gpio_first_pin = rd16le(g + pin_table_off);
+            }
 
+            /*
+              Fallback: legacy descriptors on this platform are still not fully
+              decoded, so scan for a plausible 16-bit pin entry.
+
+              Use byte-by-byte scanning rather than stepping by 2, because the
+              old layout assumptions may be slightly off and we do not want to
+              miss an odd-aligned candidate.
+            */
             if (s->gpio_first_pin == 0u)
             {
-                for (k = 3u; k + 1u < total; k += 2u)
+                for (k = 3u; k + 1u < total; ++k)
                 {
                     uint16_t cand = rd16le(g + k);
 
                     if (cand == 0u)
                         continue;
+
+                    /* do not rediscover internal offsets as "pins" */
                     if (cand == pin_table_off || cand == source_name_off)
                         continue;
+
+                    /* reject values that clearly look like in-descriptor offsets */
                     if (cand >= total)
                         continue;
 
+                    /*
+                      Avoid obviously tiny header-ish values.
+                      Keep 1 valid if that is truly all we have, but prefer
+                      something beyond the fixed header area first.
+                    */
+                    if (cand < 3u)
+                        continue;
+
                     s->gpio_first_pin = cand;
+                    s->gpio_pin_guessed = 1u;
                     break;
                 }
             }

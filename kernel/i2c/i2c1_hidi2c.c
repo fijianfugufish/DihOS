@@ -1823,14 +1823,17 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex8(regs.tcpd_desc_trusted);
         
 
-        if (regs.tcpd_gpio_valid)
-        {
-            terminal_print("ACPI TCPD gpio raw pin:");
-            terminal_print_hex32(regs.tcpd_gpio_pin);
-            terminal_print(" flags:");
-            terminal_print_hex32(regs.tcpd_gpio_flags);
-            
-        }
+        terminal_print("ACPI TCPD gpio raw pin:");
+        terminal_print_hex32(regs.tcpd_gpio_pin);
+        terminal_print(" flags:");
+        terminal_print_hex32(regs.tcpd_gpio_flags);
+        terminal_print(" conn_type:");
+        terminal_print_hex8(regs.tcpd_gpio_conn_type);
+        terminal_print(" pin_cfg:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_cfg);
+        terminal_print(" guessed:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_guessed);
+        terminal_print("\n");
     }
     else
     {
