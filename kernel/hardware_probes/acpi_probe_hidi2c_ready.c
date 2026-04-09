@@ -1,5 +1,6 @@
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "terminal/terminal_api.h"
+#include "kwrappers/string.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -176,6 +177,23 @@ typedef struct
     uint16_t d3;
     uint8_t d4[8];
 } guid128_t;
+
+typedef struct
+{
+    uint8_t found;
+    uint8_t conn_type;
+    uint16_t flags;
+    uint8_t pin_cfg;
+    uint16_t first_pin;
+    uint8_t pin_guessed;
+    char source[32];
+    uint16_t desc_len;
+    uint8_t desc_raw[32];
+} parsed_gpio_desc_t;
+
+static uint32_t decode_all_gpio_descriptors(const hidi2c_acpi_summary_t *s,
+                                            parsed_gpio_desc_t *out0,
+                                            parsed_gpio_desc_t *out1);
 
 static const guid128_t HID_I2C_GUID = {
     0x3CDFF6F7u, 0x4267u, 0x4555u, {0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE}};
@@ -2176,25 +2194,9 @@ static int classify_and_export_device(const uint8_t *aml,
         {
             uint32_t i;
 
-            /*
-              IMPORTANT:
-              gpio_first_pin recovered from ACPI _CRS is NOT yet proven to be
-              a directly usable Qualcomm TLMM GPIO number.
-
-              Export the metadata for logging/diagnostics, but do NOT mark it
-              as safe-to-drive yet.
-            */
             g_hidi2c_regs.eckb_gpio_valid = 0u;
             g_hidi2c_regs.eckb_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.eckb_gpio_flags = s->gpio_flags;
-            g_hidi2c_regs.eckb_gpio_conn_type = s->gpio_conn_type;
-            g_hidi2c_regs.eckb_gpio_pin_cfg = s->gpio_pin_cfg;
-            g_hidi2c_regs.eckb_gpio_pin_guessed = s->gpio_pin_guessed;
-            g_hidi2c_regs.eckb_gpio_from_legacy = s->gpio_from_legacy;
-            g_hidi2c_regs.eckb_gpio_desc_len = s->gpio_desc_len;
-
-            for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_desc_raw); ++i)
-                g_hidi2c_regs.eckb_gpio_desc_raw[i] = s->gpio_desc_raw[i];
 
             for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_source); ++i)
             {
@@ -2258,56 +2260,94 @@ static int classify_and_export_device(const uint8_t *aml,
         if (s->sb_found)
             g_hidi2c_regs.tcpd_addr = (uint8_t)(s->sb_slave_addr & 0x7Fu);
 
-        if (s->gpio_found)
         {
-            uint32_t i;
+            parsed_gpio_desc_t g0, g1;
+            uint32_t gpio_count = decode_all_gpio_descriptors(s, &g0, &g1);
 
-            /*
-              IMPORTANT:
-              gpio_first_pin recovered from ACPI _CRS is NOT yet proven to be
-              a directly usable Qualcomm TLMM GPIO number.
+            g_hidi2c_regs.tcpd_gpio_count = (uint8_t)gpio_count;
 
-              Keep the recovered values for logs, but prevent the runtime HID
-              path from driving this line until a real ACPI->TLMM translation
-              layer exists.
-            */
-            g_hidi2c_regs.tcpd_gpio_valid = 0u;
-            g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
-            g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
-            g_hidi2c_regs.tcpd_gpio_conn_type = s->gpio_conn_type;
-            g_hidi2c_regs.tcpd_gpio_pin_cfg = s->gpio_pin_cfg;
-            g_hidi2c_regs.tcpd_gpio_pin_guessed = s->gpio_pin_guessed;
-            g_hidi2c_regs.tcpd_gpio_from_legacy = s->gpio_from_legacy;
-            g_hidi2c_regs.tcpd_gpio_desc_len = s->gpio_desc_len;
-
-            for (i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_desc_raw); ++i)
-                g_hidi2c_regs.tcpd_gpio_desc_raw[i] = s->gpio_desc_raw[i];
-
-            for (i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source); ++i)
+            if (gpio_count >= 1u)
             {
-                g_hidi2c_regs.tcpd_gpio_source[i] = s->gpio_source[i];
-                if (!s->gpio_source[i])
-                    break;
+                g_hidi2c_regs.tcpd_gpio_pin = g0.first_pin;
+                g_hidi2c_regs.tcpd_gpio_flags = g0.flags;
+                g_hidi2c_regs.tcpd_gpio_conn_type = g0.conn_type;
+                g_hidi2c_regs.tcpd_gpio_pin_cfg = g0.pin_cfg;
+                g_hidi2c_regs.tcpd_gpio_pin_guessed = g0.pin_guessed;
+
+                for (uint32_t i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source); ++i)
+                {
+                    g_hidi2c_regs.tcpd_gpio_source[i] = g0.source[i];
+                    if (!g0.source[i])
+                        break;
+                }
+
+                g_hidi2c_regs.tcpd_gpio_desc_len = g0.desc_len;
+                for (uint32_t i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_desc_raw); ++i)
+                    g_hidi2c_regs.tcpd_gpio_desc_raw[i] = g0.desc_raw[i];
             }
 
-            if (i == sizeof(g_hidi2c_regs.tcpd_gpio_source))
-                g_hidi2c_regs.tcpd_gpio_source[sizeof(g_hidi2c_regs.tcpd_gpio_source) - 1] = 0;
-        }
+            if (gpio_count >= 2u)
+            {
+                g_hidi2c_regs.tcpd_gpio_pin1 = g0.first_pin;
+                g_hidi2c_regs.tcpd_gpio_flags1 = g0.flags;
+                g_hidi2c_regs.tcpd_gpio_conn_type1 = g0.conn_type;
+                g_hidi2c_regs.tcpd_gpio_pin_cfg1 = g0.pin_cfg;
+                g_hidi2c_regs.tcpd_gpio_pin_guessed1 = g0.pin_guessed;
 
-        if (s->gpio_found)
-        {
-            terminal_print("TCPD ACPI GPIO recovered but NOT enabled for drive; raw pin: ");
-            terminal_print_inline_hex32(s->gpio_first_pin);
-            terminal_print("flags: ");
-            terminal_print_inline_hex32(s->gpio_flags);
-            terminal_print("conn_type: ");
-            terminal_print_inline_hex8(s->gpio_conn_type);
-            terminal_print("pin_cfg: ");
-            terminal_print_inline_hex8(s->gpio_pin_cfg);
-            terminal_print("guessed: ");
-            terminal_print_inline_hex8(s->gpio_pin_guessed);
-            terminal_print("source: ");
-            terminal_print_inline(s->gpio_source[0] ? s->gpio_source : "(none)");
+                for (uint32_t i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source1); ++i)
+                {
+                    g_hidi2c_regs.tcpd_gpio_source1[i] = g0.source[i];
+                    if (!g0.source[i])
+                        break;
+                }
+
+                g_hidi2c_regs.tcpd_gpio_pin2 = g1.first_pin;
+                g_hidi2c_regs.tcpd_gpio_flags2 = g1.flags;
+                g_hidi2c_regs.tcpd_gpio_conn_type2 = g1.conn_type;
+                g_hidi2c_regs.tcpd_gpio_pin_cfg2 = g1.pin_cfg;
+                g_hidi2c_regs.tcpd_gpio_pin_guessed2 = g1.pin_guessed;
+
+                for (uint32_t i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source2); ++i)
+                {
+                    g_hidi2c_regs.tcpd_gpio_source2[i] = g1.source[i];
+                    if (!g1.source[i])
+                        break;
+                }
+            }
+
+            terminal_print("TCPD GPIO count:");
+            terminal_print_hex8((uint8_t)gpio_count);
+            terminal_print("\n");
+
+            if (gpio_count >= 1u)
+            {
+                terminal_print("TCPD GPIO[0] pin:");
+                terminal_print_hex32(g0.first_pin);
+                terminal_print(" flags:");
+                terminal_print_hex32(g0.flags);
+                terminal_print(" conn:");
+                terminal_print_hex8(g0.conn_type);
+                terminal_print(" cfg:");
+                terminal_print_hex8(g0.pin_cfg);
+                terminal_print(" guessed:");
+                terminal_print_hex8(g0.pin_guessed);
+                terminal_print("\n");
+            }
+
+            if (gpio_count >= 2u)
+            {
+                terminal_print("TCPD GPIO[1] pin:");
+                terminal_print_hex32(g1.first_pin);
+                terminal_print(" flags:");
+                terminal_print_hex32(g1.flags);
+                terminal_print(" conn:");
+                terminal_print_hex8(g1.conn_type);
+                terminal_print(" cfg:");
+                terminal_print_hex8(g1.pin_cfg);
+                terminal_print(" guessed:");
+                terminal_print_hex8(g1.pin_guessed);
+                terminal_print("\n");
+            }
         }
     }
 
@@ -2750,6 +2790,136 @@ static void snapshot_gpio_descriptor(hidi2c_acpi_summary_t *s,
 
     for (; i < 32u; ++i)
         s->gpio_desc_raw[i] = 0u;
+}
+
+static void parse_gpio_descriptor_current_layout(const uint8_t *g,
+                                                 uint32_t total,
+                                                 parsed_gpio_desc_t *out)
+{
+    uint32_t k;
+
+    if (!g || !out)
+        return;
+
+    out->found = 1u;
+    out->conn_type = 0u;
+    out->flags = 0u;
+    out->pin_cfg = 0u;
+    out->first_pin = 0u;
+    out->pin_guessed = 0u;
+    out->source[0] = 0;
+    out->desc_len = (uint16_t)((total < 32u) ? total : 32u);
+
+    for (k = 0; k < out->desc_len; ++k)
+        out->desc_raw[k] = g[k];
+    for (; k < 32u; ++k)
+        out->desc_raw[k] = 0u;
+
+    if (total >= 12u)
+    {
+        out->conn_type = g[4];
+        out->flags = rd16le(g + 7);
+        out->pin_cfg = g[9];
+        out->first_pin = rd16le(g + 10);
+    }
+
+    if (total > 18u)
+    {
+        uint32_t source_off = 18u;
+        uint8_t c0 = g[source_off];
+
+        if (c0 == '\\' || c0 == '_' || (c0 >= 'A' && c0 <= 'Z'))
+        {
+            copy_crs_string(g, total, (uint16_t)source_off,
+                            out->source, sizeof(out->source));
+        }
+    }
+
+    if (out->first_pin == 0u)
+    {
+        for (k = 3u; k + 1u < total; ++k)
+        {
+            uint16_t cand = rd16le(g + k);
+
+            if (cand == 0u)
+                continue;
+            if (cand >= total)
+                continue;
+            if (cand < 3u)
+                continue;
+
+            out->first_pin = cand;
+            out->pin_guessed = 1u;
+            break;
+        }
+    }
+}
+
+static uint32_t decode_all_gpio_descriptors(const hidi2c_acpi_summary_t *s,
+                                            parsed_gpio_desc_t *out0,
+                                            parsed_gpio_desc_t *out1)
+{
+    const uint8_t *p;
+    uint32_t len;
+    uint32_t off = 0;
+    uint32_t count = 0;
+
+    if (out0)
+        memset(out0, 0, sizeof(*out0));
+    if (out1)
+        memset(out1, 0, sizeof(*out1));
+
+    if (!s || !s->crs_buf || !s->crs_buf_len)
+        return 0;
+
+    p = s->crs_buf;
+    len = s->crs_buf_len;
+
+    while (off + 3u <= len)
+    {
+        uint8_t raw_tag = p[off];
+
+        if ((raw_tag & 0x80u) == 0)
+        {
+            uint8_t item_len = (uint8_t)(raw_tag & 0x07u);
+            uint8_t item = (uint8_t)((raw_tag >> 3) & 0x0Fu);
+
+            if (item == 0x0Fu)
+                break;
+
+            if (off + 1u + item_len > len)
+                break;
+
+            off += 1u + item_len;
+            continue;
+        }
+
+        {
+            uint16_t item_len = rd16le(p + off + 1);
+            const uint8_t *g = p + off;
+            uint32_t total = 3u + item_len;
+
+            if (off + total > len)
+                break;
+
+            if (raw_tag == 0x8Eu)
+            {
+                if (count == 0u && out0)
+                    parse_gpio_descriptor_current_layout(g, total, out0);
+                else if (count == 1u && out1)
+                    parse_gpio_descriptor_current_layout(g, total, out1);
+
+                ++count;
+
+                if (count >= 2u)
+                    break;
+            }
+
+            off += total;
+        }
+    }
+
+    return count;
 }
 
 static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)

@@ -35,6 +35,21 @@ extern "C"
         uint16_t eckb_gpio_desc_len;
         uint8_t eckb_gpio_desc_raw[32];
 
+        uint8_t eckb_gpio_count;
+        uint16_t eckb_gpio_pin1;
+        uint16_t eckb_gpio_flags1;
+        uint8_t eckb_gpio_conn_type1;
+        uint8_t eckb_gpio_pin_cfg1;
+        uint8_t eckb_gpio_pin_guessed1;
+        char eckb_gpio_source1[32];
+
+        uint16_t eckb_gpio_pin2;
+        uint16_t eckb_gpio_flags2;
+        uint8_t eckb_gpio_conn_type2;
+        uint8_t eckb_gpio_pin_cfg2;
+        uint8_t eckb_gpio_pin_guessed2;
+        char eckb_gpio_source2[32];
+
         uint8_t tcpd_gpio_valid;
         uint16_t tcpd_gpio_pin;
         uint16_t tcpd_gpio_flags;
@@ -45,6 +60,21 @@ extern "C"
         uint8_t tcpd_gpio_from_legacy;
         uint16_t tcpd_gpio_desc_len;
         uint8_t tcpd_gpio_desc_raw[32];
+
+        uint8_t tcpd_gpio_count;
+        uint16_t tcpd_gpio_pin1;
+        uint16_t tcpd_gpio_flags1;
+        uint8_t tcpd_gpio_conn_type1;
+        uint8_t tcpd_gpio_pin_cfg1;
+        uint8_t tcpd_gpio_pin_guessed1;
+        char tcpd_gpio_source1[32];
+
+        uint16_t tcpd_gpio_pin2;
+        uint16_t tcpd_gpio_flags2;
+        uint8_t tcpd_gpio_conn_type2;
+        uint8_t tcpd_gpio_pin_cfg2;
+        uint8_t tcpd_gpio_pin_guessed2;
+        char tcpd_gpio_source2[32];
 
         uint8_t tcpd_ps0_valid;
         uint16_t tcpd_ps0_len;

@@ -1996,20 +1996,29 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32(regs.tcpd_desc_reg);
         terminal_print(" trust:");
         terminal_print_hex8(regs.tcpd_desc_trusted);
-        
 
-        terminal_print("ACPI TCPD gpio raw pin:");
-        terminal_print_hex32(regs.tcpd_gpio_pin);
+        terminal_print("ACPI TCPD gpio count:");
+        terminal_print_hex8(regs.tcpd_gpio_count);
+        terminal_print("\n");
+
+        terminal_print("ACPI TCPD gpio1 pin:");
+        terminal_print_hex32(regs.tcpd_gpio_pin1);
         terminal_print(" flags:");
-        terminal_print_hex32(regs.tcpd_gpio_flags);
-        terminal_print(" conn_type:");
-        terminal_print_hex8(regs.tcpd_gpio_conn_type);
-        terminal_print(" pin_cfg:");
-        terminal_print_hex8(regs.tcpd_gpio_pin_cfg);
+        terminal_print_hex32(regs.tcpd_gpio_flags1);
+        terminal_print(" cfg:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_cfg1);
         terminal_print(" guessed:");
-        terminal_print_hex8(regs.tcpd_gpio_pin_guessed);
-        terminal_print(" legacy:");
-        terminal_print_hex8(regs.tcpd_gpio_from_legacy);
+        terminal_print_hex8(regs.tcpd_gpio_pin_guessed1);
+        terminal_print("\n");
+
+        terminal_print("ACPI TCPD gpio2 pin:");
+        terminal_print_hex32(regs.tcpd_gpio_pin2);
+        terminal_print(" flags:");
+        terminal_print_hex32(regs.tcpd_gpio_flags2);
+        terminal_print(" cfg:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_cfg2);
+        terminal_print(" guessed:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_guessed2);
         terminal_print("\n");
 
         dump_tcpd_gpio_desc(&regs);
