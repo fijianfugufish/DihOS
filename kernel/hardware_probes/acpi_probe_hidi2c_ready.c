@@ -2797,55 +2797,76 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
             */
             if (raw_tag == 0x8Eu)
             {
-                uint16_t pin_table_off = 0;
-                uint16_t source_name_off = 0;
-                uint8_t conn_type = 0;
-                uint16_t flags = 0;
-                uint8_t pin_cfg = 0;
-
-                s->gpio_found = 1;
-
-                /*
-                  Use the same layout your old probe successfully surfaced from
-                  the TCPD/ECKB buffers. We keep the same extraction offsets,
-                  but only after identifying the correct raw descriptor tag.
-                */
-                if (total >= 19u)
-                {
-                    conn_type = g[4];
-                    flags = rd16le(g + 7);
-                    pin_cfg = g[9];
-                    pin_table_off = rd16le(g + 13);
-                    source_name_off = rd16le(g + 17);
-                }
-
-                s->gpio_conn_type = conn_type;
-                s->gpio_flags = flags;
-                s->gpio_pin_cfg = pin_cfg;
-                s->gpio_pin_table_off = pin_table_off;
-                s->gpio_source_off = source_name_off;
-                s->gpio_first_pin = 0;
+                s->gpio_found = 1u;
+                s->gpio_first_pin = 0u;
                 s->gpio_source[0] = 0;
-                s->gpio_pin_guessed = 0;
+                s->gpio_pin_guessed = 0u;
+                s->gpio_from_legacy = 0u;
+
                 snapshot_gpio_descriptor(s, g, total, 0u);
 
-                if (pin_table_off != 0u &&
-                    pin_table_off + 1u < total)
-                {
-                    uint16_t pin_from_table = rd16le(g + pin_table_off);
+                /*
+                  For the live 0x8E descriptors we are seeing, the old
+                  “pin_table_off/source_name_off” interpretation is wrong.
 
-                    /*
-                      Do not blindly trust tiny values just because they came
-                      from pin_table_off. A value of 1 may still be structurally
-                      valid but semantically wrong for TLMM driving.
-                    */
-                    if (pin_from_table != 0u)
-                        s->gpio_first_pin = pin_from_table;
+                  Example from your log:
+                    8E 19 00 01 00 01 02 00 00 01 06 00 80 1A 06 00 2C 00 5C ...
+                  If read as offsets:
+                    pin_table_off  = 0x061A
+                    source_name_off = 0x5C00
+                  which is impossible for a 0x1C-byte descriptor.
+
+                  So use the layout that actually matches the observed bytes:
+                    g[4]      = connection type
+                    g[7..8]   = flags
+                    g[9]      = pin config
+                    g[10..11] = first pin
+                    g[18..]   = source path string
+                */
+                if (total >= 12u)
+                {
+                    s->gpio_conn_type = g[4];
+                    s->gpio_flags = rd16le(g + 7);
+                    s->gpio_pin_cfg = g[9];
+                    s->gpio_first_pin = rd16le(g + 10);
+                }
+                else
+                {
+                    s->gpio_conn_type = 0u;
+                    s->gpio_flags = 0u;
+                    s->gpio_pin_cfg = 0u;
+                    s->gpio_first_pin = 0u;
                 }
 
                 /*
-                  Fallback scan stays, but now it runs on the correct GPIO
-                  descriptor instead of the serial bus one.
+                  These are no longer trustworthy as offsets for this format.
+                  Keep them zeroed so later code does not accidentally rely on
+                  the old mis-decoded values.
+                */
+                s->gpio_pin_table_off = 0u;
+                s->gpio_source_off = 0u;
+
+                /*
+                  Source path string in the live descriptor begins at byte 18:
+                    \_SB.I2C1
+                  Only accept it if it actually looks like a path/string.
+                */
+                if (total > 18u)
+                {
+                    uint32_t source_off = 18u;
+                    uint8_t c0 = g[source_off];
+
+                    if (c0 == '\\' || c0 == '_' ||
+                        (c0 >= 'A' && c0 <= 'Z'))
+                    {
+                        copy_crs_string(g, total, source_off,
+                                        s->gpio_source, sizeof(s->gpio_source));
+                    }
+                }
+
+                /*
+                  If the direct fixed-layout pin is still zero, do one cautious
+                  fallback scan. Prefer non-tiny values first.
                 */
                 if (s->gpio_first_pin == 0u)
                 {
@@ -2856,8 +2877,6 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
 
                         if (cand == 0u)
                             continue;
-                        if (cand == pin_table_off || cand == source_name_off)
-                            continue;
                         if (cand >= total)
                             continue;
                         if (cand < 3u)
@@ -2867,13 +2886,6 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                         s->gpio_pin_guessed = 1u;
                         break;
                     }
-                }
-
-                if (source_name_off != 0 &&
-                    source_name_off < total)
-                {
-                    copy_crs_string(g, total, source_name_off,
-                                    s->gpio_source, sizeof(s->gpio_source));
                 }
 
                 return;
@@ -2929,27 +2941,54 @@ static void decode_first_serialbus_descriptor_legacy(hidi2c_acpi_summary_t *s)
           Old working probes identified raw 0x8C buffers as the I2C serial bus
           resource for both ECKB and TCPD.
         */
-        if (raw_tag == 0x8Cu && total >= 0x20u)
+        if (raw_tag == 0x8Eu && total >= 0x0Cu)
         {
-            s->sb_found = 1u;
+            s->gpio_found = 1u;
+            s->gpio_conn_type = g[4];
+            s->gpio_flags = rd16le(g + 7);
+            s->gpio_pin_cfg = g[9];
+            s->gpio_first_pin = rd16le(g + 10);
+            s->gpio_pin_guessed = 0u;
+            s->gpio_from_legacy = 1u;
+            s->gpio_pin_table_off = 0u;
+            s->gpio_source_off = 0u;
+            s->gpio_source[0] = 0;
 
-            /*
-              Preserve the same layout the old probe successfully surfaced.
-              This is still runtime-decoded from the live CRS bytes.
-            */
-            s->sb_gen_rev = g[3];
-            s->sb_bus_type = g[5];
-            s->sb_flags_lo = g[6];
-            s->sb_flags_hi = rd16le(g + 7);
-            s->sb_type_rev = g[9];
-            s->sb_type_data_len = rd16le(g + 10);
-            s->sb_speed_hz = rd32le(g + 12);
-            s->sb_slave_addr = rd16le(g + 16);
-            s->sb_source_off = rd16le(g + 18);
+            snapshot_gpio_descriptor(s, g, total, 1u);
 
-            if (s->sb_source_off < total)
-                copy_crs_string(g, total, s->sb_source_off,
-                                s->sb_source, sizeof(s->sb_source));
+            if (total > 18u)
+            {
+                uint32_t source_off = 18u;
+                uint8_t c0 = g[source_off];
+
+                if (c0 == '\\' || c0 == '_' ||
+                    (c0 >= 'A' && c0 <= 'Z'))
+                {
+                    copy_crs_string(g, total, source_off,
+                                    s->gpio_source, sizeof(s->gpio_source));
+                }
+            }
+
+            if (s->gpio_first_pin == 0u)
+            {
+                uint32_t k;
+                for (k = 3u; k + 1u < total; ++k)
+                {
+                    uint16_t cand = rd16le(g + k);
+
+                    if (cand == 0u)
+                        continue;
+                    if (cand >= total)
+                        continue;
+                    if (cand < 3u)
+                        continue;
+
+                    s->gpio_first_pin = cand;
+                    s->gpio_pin_guessed = 1u;
+                    break;
+                }
+            }
+
             return;
         }
 
