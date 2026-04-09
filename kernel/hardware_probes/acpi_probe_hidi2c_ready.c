@@ -164,6 +164,9 @@ typedef struct
     uint32_t ggparent_obj_off;
 
     uint8_t gpio_pin_guessed;
+    uint8_t gpio_from_legacy;
+    uint16_t gpio_desc_len;
+    uint8_t gpio_desc_raw[32];
 } hidi2c_acpi_summary_t;
 
 typedef struct
@@ -2187,6 +2190,11 @@ static int classify_and_export_device(const uint8_t *aml,
             g_hidi2c_regs.eckb_gpio_conn_type = s->gpio_conn_type;
             g_hidi2c_regs.eckb_gpio_pin_cfg = s->gpio_pin_cfg;
             g_hidi2c_regs.eckb_gpio_pin_guessed = s->gpio_pin_guessed;
+            g_hidi2c_regs.eckb_gpio_from_legacy = s->gpio_from_legacy;
+            g_hidi2c_regs.eckb_gpio_desc_len = s->gpio_desc_len;
+
+            for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_desc_raw); ++i)
+                g_hidi2c_regs.eckb_gpio_desc_raw[i] = s->gpio_desc_raw[i];
 
             for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_source); ++i)
             {
@@ -2266,8 +2274,14 @@ static int classify_and_export_device(const uint8_t *aml,
             g_hidi2c_regs.tcpd_gpio_valid = 0u;
             g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
-            g_hidi2c_regs.tcpd_gpio_pin = s->gpio_first_pin;
-            g_hidi2c_regs.tcpd_gpio_flags = s->gpio_flags;
+            g_hidi2c_regs.tcpd_gpio_conn_type = s->gpio_conn_type;
+            g_hidi2c_regs.tcpd_gpio_pin_cfg = s->gpio_pin_cfg;
+            g_hidi2c_regs.tcpd_gpio_pin_guessed = s->gpio_pin_guessed;
+            g_hidi2c_regs.tcpd_gpio_from_legacy = s->gpio_from_legacy;
+            g_hidi2c_regs.tcpd_gpio_desc_len = s->gpio_desc_len;
+
+            for (i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_desc_raw); ++i)
+                g_hidi2c_regs.tcpd_gpio_desc_raw[i] = s->gpio_desc_raw[i];
 
             for (i = 0; i < sizeof(g_hidi2c_regs.tcpd_gpio_source); ++i)
             {
@@ -2717,6 +2731,27 @@ static void decode_first_serialbus_descriptor(hidi2c_acpi_summary_t *s)
     }
 }
 
+static void snapshot_gpio_descriptor(hidi2c_acpi_summary_t *s,
+                                     const uint8_t *g,
+                                     uint32_t total,
+                                     uint8_t from_legacy)
+{
+    uint32_t i, n;
+
+    if (!s || !g || total == 0u)
+        return;
+
+    s->gpio_from_legacy = from_legacy;
+    s->gpio_desc_len = (uint16_t)((total < 32u) ? total : 32u);
+
+    n = s->gpio_desc_len;
+    for (i = 0; i < n; ++i)
+        s->gpio_desc_raw[i] = g[i];
+
+    for (; i < 32u; ++i)
+        s->gpio_desc_raw[i] = 0u;
+}
+
 static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
 {
     const uint8_t *p;
@@ -2792,18 +2827,27 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                 s->gpio_first_pin = 0;
                 s->gpio_source[0] = 0;
                 s->gpio_pin_guessed = 0;
+                snapshot_gpio_descriptor(s, g, total, 0u);
 
-                if (pin_table_off != 0 &&
+                if (pin_table_off != 0u &&
                     pin_table_off + 1u < total)
                 {
-                    s->gpio_first_pin = rd16le(g + pin_table_off);
+                    uint16_t pin_from_table = rd16le(g + pin_table_off);
+
+                    /*
+                      Do not blindly trust tiny values just because they came
+                      from pin_table_off. A value of 1 may still be structurally
+                      valid but semantically wrong for TLMM driving.
+                    */
+                    if (pin_from_table != 0u)
+                        s->gpio_first_pin = pin_from_table;
                 }
 
                 /*
                   Fallback scan stays, but now it runs on the correct GPIO
                   descriptor instead of the serial bus one.
                 */
-                if (s->gpio_first_pin == 0)
+                if (s->gpio_first_pin == 0u)
                 {
                     uint32_t k;
                     for (k = 3u; k + 1u < total; ++k)
@@ -2815,6 +2859,8 @@ static void decode_first_gpio_descriptor(hidi2c_acpi_summary_t *s)
                         if (cand == pin_table_off || cand == source_name_off)
                             continue;
                         if (cand >= total)
+                            continue;
+                        if (cand < 3u)
                             continue;
 
                         s->gpio_first_pin = cand;
@@ -2976,6 +3022,7 @@ static void decode_first_gpio_descriptor_legacy(hidi2c_acpi_summary_t *s)
             s->gpio_first_pin = 0u;
             s->gpio_pin_guessed = 0u;
             s->gpio_source[0] = 0;
+            snapshot_gpio_descriptor(s, g, total, 1u);
 
             pin_table_off = s->gpio_pin_table_off;
             source_name_off = s->gpio_source_off;

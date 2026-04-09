@@ -673,9 +673,33 @@ static void tcpd_dump_dsm_prefix(const uint8_t *body, uint16_t len, const char *
     {
         terminal_print_inline(" ");
         terminal_print_inline_hex8(body[i]);
-    }
+    }    
+}
 
-    
+static void dump_tcpd_gpio_desc(const hidi2c_acpi_regs *regs)
+{
+    uint32_t i, n;
+
+    if (!regs || regs->tcpd_gpio_desc_len == 0u)
+        return;
+
+    terminal_print("ACPI TCPD gpio desc source:");
+    terminal_print_hex8(regs->tcpd_gpio_from_legacy);
+    terminal_print(" len:");
+    terminal_print_hex32(regs->tcpd_gpio_desc_len);
+    terminal_print("\n");
+
+    n = regs->tcpd_gpio_desc_len;
+    if (n > 32u)
+        n = 32u;
+
+    terminal_print("ACPI TCPD gpio desc raw:");
+    for (i = 0; i < n; ++i)
+    {
+        terminal_print(" ");
+        terminal_print_hex8(regs->tcpd_gpio_desc_raw[i]);
+    }
+    terminal_print("\n");
 }
 
 static void tcpd_try_tcpd_dsm_from_acpi(const hidi2c_acpi_regs *regs)
@@ -1833,7 +1857,11 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex8(regs.tcpd_gpio_pin_cfg);
         terminal_print(" guessed:");
         terminal_print_hex8(regs.tcpd_gpio_pin_guessed);
+        terminal_print(" legacy:");
+        terminal_print_hex8(regs.tcpd_gpio_from_legacy);
         terminal_print("\n");
+
+        dump_tcpd_gpio_desc(&regs);
     }
     else
     {

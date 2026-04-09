@@ -28,11 +28,23 @@ extern "C"
         uint16_t eckb_gpio_pin;
         uint16_t eckb_gpio_flags;
         char eckb_gpio_source[32];
+        uint8_t eckb_gpio_conn_type;
+        uint8_t eckb_gpio_pin_cfg;
+        uint8_t eckb_gpio_pin_guessed;
+        uint8_t eckb_gpio_from_legacy;
+        uint16_t eckb_gpio_desc_len;
+        uint8_t eckb_gpio_desc_raw[32];
 
         uint8_t tcpd_gpio_valid;
         uint16_t tcpd_gpio_pin;
         uint16_t tcpd_gpio_flags;
         char tcpd_gpio_source[32];
+        uint8_t tcpd_gpio_conn_type;
+        uint8_t tcpd_gpio_pin_cfg;
+        uint8_t tcpd_gpio_pin_guessed;
+        uint8_t tcpd_gpio_from_legacy;
+        uint16_t tcpd_gpio_desc_len;
+        uint8_t tcpd_gpio_desc_raw[32];
 
         uint8_t tcpd_ps0_valid;
         uint16_t tcpd_ps0_len;
@@ -61,14 +73,6 @@ extern "C"
         uint8_t tcpd_gio0_dsm_valid;
         uint16_t tcpd_gio0_dsm_len;
         uint8_t tcpd_gio0_dsm_body[HIDI2C_ACPI_MAX_METHOD_BODY];
-
-        uint8_t eckb_gpio_conn_type;
-        uint8_t eckb_gpio_pin_cfg;
-        uint8_t eckb_gpio_pin_guessed;
-
-        uint8_t tcpd_gpio_conn_type;
-        uint8_t tcpd_gpio_pin_cfg;
-        uint8_t tcpd_gpio_pin_guessed;
     } hidi2c_acpi_regs;
 
     int acpi_hidi2c_get_regs_from_rsdp(uint64_t rsdp_phys, hidi2c_acpi_regs *out);
