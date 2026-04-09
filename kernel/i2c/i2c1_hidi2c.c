@@ -14,6 +14,9 @@
 #define I2C_HID_OPCODE_SET_POWER 0x08u
 #define I2C_HID_PWR_ON 0x00u
 
+#define TCPD_GPIO_TEST_ENABLE 1u
+#define TCPD_GPIO_TEST_ACTIVE_HIGH 1u
+
 static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
 static uint8_t g_bus_ready = 0;
@@ -1784,6 +1787,114 @@ static int tcpd_simple_acpi_sequence(const hidi2c_acpi_regs *regs, hidi2c_device
     return ok ? 0 : -1;
 }
 
+static int tcpd_controlled_gpio_test(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
+{
+    int rc;
+    uint32_t active;
+    uint32_t inactive;
+
+    if (!regs || !dev)
+        return -1;
+
+    if (regs->tcpd_gpio_pin == 0u)
+    {
+        terminal_print("TCPD controlled GPIO test: no pin\n");
+        return -1;
+    }
+
+    if (regs->tcpd_gpio_pin_guessed)
+    {
+        terminal_print("TCPD controlled GPIO test: skipped because pin is guessed\n");
+        return -1;
+    }
+
+    terminal_print("TCPD controlled GPIO test pin:");
+    terminal_print_hex32(regs->tcpd_gpio_pin);
+    terminal_print(" flags:");
+    terminal_print_hex32(regs->tcpd_gpio_flags);
+    terminal_print(" conn_type:");
+    terminal_print_hex8(regs->tcpd_gpio_conn_type);
+    terminal_print(" pin_cfg:");
+    terminal_print_hex8(regs->tcpd_gpio_pin_cfg);
+    terminal_print("\n");
+
+    rc = gpio_init();
+    terminal_print("TCPD controlled GPIO test gpio_init rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    rc = gpio_set_output(regs->tcpd_gpio_pin);
+    terminal_print("TCPD controlled GPIO test gpio_set_output rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+#if TCPD_GPIO_TEST_ACTIVE_HIGH
+    active = GPIO_VALUE_HIGH;
+    inactive = GPIO_VALUE_LOW;
+    terminal_print("TCPD controlled GPIO polarity: active-high\n");
+#else
+    active = GPIO_VALUE_LOW;
+    inactive = GPIO_VALUE_HIGH;
+    terminal_print("TCPD controlled GPIO polarity: active-low\n");
+#endif
+
+    /*
+      Start inactive, then pulse active briefly, then back inactive.
+      Keep it much smaller than the old ladder.
+    */
+    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
+    terminal_print("TCPD controlled GPIO write inactive rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    delay_ms_approx(10u);
+
+    rc = gpio_write(regs->tcpd_gpio_pin, active);
+    terminal_print("TCPD controlled GPIO write active rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    delay_ms_approx(15u);
+
+    rc = gpio_write(regs->tcpd_gpio_pin, inactive);
+    terminal_print("TCPD controlled GPIO write inactive2 rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+    if (rc != 0)
+        return -1;
+
+    delay_ms_approx(80u);
+
+    /*
+      Important:
+      Check whether the device still ACKs immediately after the pulse.
+      Earlier bad GPIO attempts caused NACK behaviour.
+    */
+    rc = i2c1_bus_addr_only(dev->i2c_addr_7bit);
+    terminal_print("TCPD controlled GPIO post-pulse addr rc:");
+    terminal_print_hex32((uint32_t)rc);
+    terminal_print("\n");
+
+    if (rc != 0)
+    {
+        terminal_print("TCPD controlled GPIO test: device stopped ACKing after pulse\n");
+        return -1;
+    }
+
+    /*
+      If it still ACKs, do the normal wake+fetch once.
+    */
+    return tcpd_wake_and_fetch(dev, "gpio-controlled-test", 120u);
+}
+
 void i2c1_hidi2c_init(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs regs;
@@ -1920,10 +2031,17 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         g_aml_t1 = 0;
 
         /*
-          Keep GPIO out of the picture for now.
-          The current ACPI GPIO extraction is still diagnostic-only.
+          Controlled one-shot GPIO test:
+          now that the pin decodes consistently as 6 and is not guessed,
+          try a single pulse before the ACPI-only sequence.
         */
+#if TCPD_GPIO_TEST_ENABLE
+        terminal_print("TCPD controlled GPIO test enabled\n");
+        if (!ok && tcpd_controlled_gpio_test(&regs, &g_tpd) == 0)
+            ok = 1;
+#else
         terminal_print("TCPD GPIO-assisted path disabled for safety\n");
+#endif
 
         /*
           First try the simplified ACPI path that only uses the methods that
