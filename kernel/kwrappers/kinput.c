@@ -1,5 +1,6 @@
 #include "kwrappers/kinput.h"
 #include "i2c/i2c1_hidi2c.h"
+#include "usb/usb_hid.h"
 #include <stdint.h>
 
 static uint8_t g_keys_now[256];
@@ -8,6 +9,9 @@ static kinput_mouse_state g_mouse;
 static int16_t g_tpd_last_x = 0;
 static int16_t g_tpd_last_y = 0;
 static uint8_t g_tpd_have_last = 0;
+
+static usb_hid_t g_usb;
+static uint8_t g_usb_ok = 0;
 
 static void keys_clear(uint8_t *a)
 {
@@ -27,51 +31,53 @@ static void set_key(uint8_t usage)
         g_keys_now[usage] = 1;
 }
 
-static void parse_keyboard_report(const hidi2c_raw_report *r)
+static int16_t rd16s(const uint8_t *p)
 {
-    uint32_t base = 0;
+    return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+/* -------------------- keyboard parsers -------------------- */
+
+static void merge_keyboard_boot_report(const uint8_t *data, uint32_t len)
+{
     uint8_t mods = 0;
 
-    if (!r || !r->available || r->len < 8)
+    if (!data || len < 8)
         return;
 
-    keys_copy(g_keys_prev, g_keys_now);
-    keys_clear(g_keys_now);
+    mods = data[0];
 
-    if (r->len >= 9)
-        base = 1;
+    if (mods & 0x01) set_key(0xE0);
+    if (mods & 0x02) set_key(0xE1);
+    if (mods & 0x04) set_key(0xE2);
+    if (mods & 0x08) set_key(0xE3);
+    if (mods & 0x10) set_key(0xE4);
+    if (mods & 0x20) set_key(0xE5);
+    if (mods & 0x40) set_key(0xE6);
+    if (mods & 0x80) set_key(0xE7);
 
-    mods = r->data[base + 0];
-
-    if (mods & 0x01)
-        set_key(0xE0);
-    if (mods & 0x02)
-        set_key(0xE1);
-    if (mods & 0x04)
-        set_key(0xE2);
-    if (mods & 0x08)
-        set_key(0xE3);
-    if (mods & 0x10)
-        set_key(0xE4);
-    if (mods & 0x20)
-        set_key(0xE5);
-    if (mods & 0x40)
-        set_key(0xE6);
-    if (mods & 0x80)
-        set_key(0xE7);
-
-    for (uint32_t i = 2; i < 8 && (base + i) < r->len; ++i)
+    for (uint32_t i = 2; i < 8; ++i)
     {
-        uint8_t usage = r->data[base + i];
+        uint8_t usage = data[i];
         if (usage != 0 && usage != 1)
             set_key(usage);
     }
 }
 
-static int16_t rd16s(const uint8_t *p)
+static void merge_i2c_keyboard_report(const hidi2c_raw_report *r)
 {
-    return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+    uint32_t base = 0;
+
+    if (!r || !r->available || r->len < 8)
+        return;
+
+    if (r->len >= 9)
+        base = 1;
+
+    merge_keyboard_boot_report(&r->data[base], r->len - base);
 }
+
+/* -------------------- mouse parsers -------------------- */
 
 static void parse_touchpad_report(const hidi2c_raw_report *r)
 {
@@ -90,7 +96,7 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
 
         if (dx > -2048 && dx < 2048 && dy > -2048 && dy < 2048)
         {
-            g_mouse.buttons = r->data[base + 0] & 0x07u;
+            g_mouse.buttons = (g_mouse.buttons | (r->data[base + 0] & 0x07u));
             g_mouse.dx += dx;
             g_mouse.dy += dy;
             if ((base + 5) < r->len)
@@ -104,7 +110,7 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
         int16_t x = rd16s(&r->data[base + 1]);
         int16_t y = rd16s(&r->data[base + 3]);
 
-        g_mouse.buttons = r->data[base + 0] & 0x07u;
+        g_mouse.buttons = (g_mouse.buttons | (r->data[base + 0] & 0x07u));
 
         if (g_tpd_have_last)
         {
@@ -118,35 +124,86 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
     }
 }
 
-void kinput_init(uint64_t rsdp_phys)
+static void parse_usb_mouse_report(const uint8_t *data, uint32_t len)
+{
+    if (!data || len < 3)
+        return;
+
+    g_mouse.buttons = (g_mouse.buttons | (data[0] & 0x07u));
+    g_mouse.dx += (int8_t)data[1];
+    g_mouse.dy += (int8_t)data[2];
+
+    if (len >= 4)
+        g_mouse.wheel += (int8_t)data[3];
+}
+
+/* -------------------- public API -------------------- */
+
+void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
 {
     keys_clear(g_keys_now);
     keys_clear(g_keys_prev);
+
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
     g_mouse.buttons = 0;
+
     g_tpd_last_x = 0;
     g_tpd_last_y = 0;
     g_tpd_have_last = 0;
 
+    g_usb_ok = 0;
+    g_usb.has_keyboard = 0;
+    g_usb.has_mouse = 0;
+
+    /* Existing ACPI/I2C HID path */
     i2c1_hidi2c_init(rsdp_phys);
+
+    /* Also try USB HID.*/
+    if (usb_hid_probe(&g_usb, xhci_mmio_base, rsdp_phys) == 0)
+        g_usb_ok = 1;
 }
 
 void kinput_poll(void)
 {
     const hidi2c_device *kbd;
     const hidi2c_device *tpd;
+    uint8_t report[8];
+    uint32_t got = 0;
 
+    /* Snapshot last frame once, then rebuild current frame from all devices */
+    keys_copy(g_keys_prev, g_keys_now);
+    keys_clear(g_keys_now);
+
+    g_mouse.dx = 0;
+    g_mouse.dy = 0;
+    g_mouse.wheel = 0;
+    g_mouse.buttons = 0;
+
+    /* Poll ACPI/I2C HID devices */
     i2c1_hidi2c_poll();
 
     kbd = i2c1_hidi2c_keyboard();
     tpd = i2c1_hidi2c_touchpad();
 
     if (kbd)
-        parse_keyboard_report(&kbd->last_report);
+        merge_i2c_keyboard_report(&kbd->last_report);
+
     if (tpd)
         parse_touchpad_report(&tpd->last_report);
+
+    /* Poll USB HID devices too */
+    if (g_usb_ok)
+    {
+        got = 0;
+        if (g_usb.has_keyboard && usb_hid_kbd_read(&g_usb, report, &got) == 0 && got >= 8)
+            merge_keyboard_boot_report(report, got);
+
+        got = 0;
+        if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, report, &got) == 0 && got >= 3)
+            parse_usb_mouse_report(report, got);
+    }
 }
 
 int kinput_key_down(uint8_t usage)
@@ -188,6 +245,7 @@ void kinput_mouse_consume(kinput_mouse_state *out)
 {
     if (out)
         *out = g_mouse;
+
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;

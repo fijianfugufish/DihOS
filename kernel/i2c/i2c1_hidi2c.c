@@ -14,7 +14,7 @@
 #define I2C_HID_OPCODE_SET_POWER 0x08u
 #define I2C_HID_PWR_ON 0x00u
 
-#define TCPD_GPIO_TEST_ENABLE 1u
+#define TCPD_GPIO_TEST_ENABLE 0u
 
 static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
@@ -119,6 +119,54 @@ static uint64_t g_aml_gabl = 0;
 static uint64_t g_aml_lidb = 0;
 static uint64_t g_aml_t0 = 0;
 static uint64_t g_aml_t1 = 0;
+
+static void tcpd_drive_gpio_wake_edge(uint64_t value)
+{
+    int rc;
+
+    if (!g_aml_gabl || g_tpd.gpio_pin == 0u)
+        return;
+
+    rc = gpio_init();
+    if (rc != 0)
+    {
+        terminal_print("AML GPIO gpio_init rc:");
+        terminal_print_hex32((uint32_t)rc);
+        terminal_print("\n");
+        return;
+    }
+
+    rc = gpio_set_output(g_tpd.gpio_pin);
+    if (rc != 0)
+    {
+        terminal_print("AML GPIO gpio_set_output rc:");
+        terminal_print_hex32((uint32_t)rc);
+        terminal_print(" pin:");
+        terminal_print_hex32(g_tpd.gpio_pin);
+        terminal_print("\n");
+        return;
+    }
+
+    if (value)
+    {
+        (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_LOW);
+        delay_us_approx(1000u);
+        (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_HIGH);
+        delay_ms_approx(10u);
+
+        terminal_print("AML kick GPIO pin:");
+        terminal_print_hex32(g_tpd.gpio_pin);
+        terminal_print("\n");
+        return;
+    }
+
+    (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_LOW);
+    delay_us_approx(1000u);
+
+    terminal_print("AML drive GPIO low pin:");
+    terminal_print_hex32(g_tpd.gpio_pin);
+    terminal_print("\n");
+}
 
 static void norm_acpi_name(const char *src, char *dst, uint32_t cap)
 {
@@ -259,6 +307,9 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
         terminal_print("AML write GABL=");
         terminal_print_hex32((uint32_t)value);
 
+        if (value && (g_aml_lidr || g_aml_lidb))
+            tcpd_drive_gpio_wake_edge(g_aml_lidr ? g_aml_lidr : g_aml_lidb);
+
         return 0;
     }
 
@@ -268,6 +319,8 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write LIDB=");
         terminal_print_hex32((uint32_t)value);
+
+        tcpd_drive_gpio_wake_edge(value);
         
         return 0;
     }
@@ -278,6 +331,8 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
 
         terminal_print("AML write LIDR=");
         terminal_print_hex32((uint32_t)value);
+
+        tcpd_drive_gpio_wake_edge(value);
         
         return 0;
     }
@@ -324,8 +379,8 @@ static void tcpd_try_method_from_acpi_ex(const char *tag,
                                          const uint64_t *args,
                                          uint32_t arg_count)
 {
-    aml_tiny_method m;
-    aml_tiny_host h;
+    aml_tiny_method m = {0};
+    aml_tiny_host h = {0};
     uint64_t ret = 0;
     int rc;
 
@@ -341,6 +396,7 @@ static void tcpd_try_method_from_acpi_ex(const char *tag,
     m.aml_len = len;
     m.scope_prefix = scope_prefix ? scope_prefix : "\\_SB.D0?_";
     m.arg_count = arg_count;
+    m.use_typed_args = 0u;
 
     for (uint32_t i = 0; i < 7u; ++i)
         m.args[i] = 0;
@@ -636,19 +692,6 @@ static void tcpd_try_ini_from_acpi(const hidi2c_acpi_regs *regs)
                                                regs->tcpd_ini_valid));
 }
 
-static void tcpd_try_ps0_from_acpi(const hidi2c_acpi_regs *regs)
-{
-    if (!regs)
-        return;
-    tcpd_try_method_from_acpi("_PS0",
-                              "\\_SB.D0?_",
-                              regs->tcpd_ps0_body,
-                              regs->tcpd_ps0_len,
-                              aml_body_present(regs->tcpd_ps0_body,
-                                               regs->tcpd_ps0_len,
-                                               regs->tcpd_ps0_valid));
-}
-
 static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
 {
     uint64_t args[2];
@@ -658,7 +701,8 @@ static void tcpd_try_gio0_reg_from_acpi(const hidi2c_acpi_regs *regs)
 
     /*
       GIO0._REG checks Arg0 against 0x08, then stores Arg1 into GABL.
-      Use _REG(0x08, 1) to simulate OpRegion connect/enable.
+      Run it once up front to mirror the OpRegion connect/enable path before
+      the child _DSM starts advertising a descriptor register hint.
     */
     args[0] = 0x08u;
     args[1] = 1u;
@@ -803,11 +847,24 @@ static void tcpd_try_gio0_dsm_from_acpi(const hidi2c_acpi_regs *regs)
 static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
 {
     uint8_t reg0[2];
+    uint16_t reg;
 
     if (!dev)
         return;
 
-    terminal_print("TCPD: minimal wake probe\n");
+    reg = g_tcpd_desc_reg_hint ? g_tcpd_desc_reg_hint :
+          (dev->hid_desc_reg ? dev->hid_desc_reg : TCPD_DESC_REG_ACPI);
+
+    terminal_print("TCPD: minimal wake probe reg:");
+    terminal_print_hex32((uint32_t)reg);
+    terminal_print("\n");
+
+    if (g_tpd.gpio_pin != 0u && g_aml_gabl)
+    {
+        terminal_print("TCPD: pre-probe GPIO wake edge\n");
+        tcpd_drive_gpio_wake_edge(1u);
+        delay_ms_approx(40u);
+    }
 
     i2c1_bus_set_quiet(1);
 
@@ -816,7 +873,7 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
     delay_us_approx(1000u);
 
     /* 2) write descriptor register pointer */
-    wr16(reg0, TCPD_DESC_REG_ACPI);
+    wr16(reg0, reg);
     (void)i2c1_bus_write(dev->i2c_addr_7bit, reg0, 2);
     delay_ms_approx(20u);
 
@@ -1237,117 +1294,6 @@ static int hidi2c_try_desc_reg_read_only_after_pointer(hidi2c_device *dev, uint1
     return 0;
 }
 
-static int hidi2c_try_desc_reg_combined_endian(hidi2c_device *dev, uint16_t reg, int big_endian)
-{
-    uint8_t tx[2];
-    uint8_t rx[30];
-    int rc;
-
-    for (uint32_t i = 0; i < sizeof(rx); ++i)
-        rx[i] = 0;
-
-    if (big_endian)
-        wr16be(tx, reg);
-    else
-        wr16(tx, reg);
-
-    rc = i2c1_bus_write_read_combined(dev->i2c_addr_7bit, tx, 2, rx, sizeof(rx));
-
-    terminal_print(dev->name);
-    terminal_print_inline(big_endian ? " comb-BE reg:" : " comb-LE reg:");
-    terminal_print_inline_hex32(reg);
-    terminal_print_inline(" rc:");
-    terminal_print_inline_hex32((uint32_t)rc);
-    terminal_print_inline(" b0:");
-    terminal_print_inline_hex8(rx[0]);
-    terminal_print_inline(" b1:");
-    terminal_print_inline_hex8(rx[1]);
-    terminal_print_inline(" b2:");
-    terminal_print_inline_hex8(rx[2]);
-    terminal_print_inline(" b3:");
-    terminal_print_inline_hex8(rx[3]);
-    
-
-    if (rc != 0)
-        return -1;
-
-    desc_parse(&dev->desc, rx, sizeof(rx));
-    if (!desc_looks_valid(&dev->desc))
-        return -1;
-
-    dev->hid_desc_reg = reg;
-    return 0;
-}
-
-static int hidi2c_scan_for_desc(hidi2c_device *dev)
-{
-    uint8_t tx[2];
-    uint8_t rx[30];
-    uint16_t reg;
-
-    if (!dev)
-        return -1;
-
-    i2c1_bus_set_quiet(1);
-
-    for (reg = 0x0000u; reg <= 0x0400u; reg += 2u)
-    {
-        hidi2c_desc d;
-        int rc;
-
-        wr16(tx, reg);
-
-        for (uint32_t i = 0; i < sizeof(rx); ++i)
-            rx[i] = 0;
-
-        rc = i2c1_bus_write_read(dev->i2c_addr_7bit, tx, 2u, rx, sizeof(rx));
-        if (rc == 0 && buf_any_nonzero(rx, sizeof(rx)))
-        {
-            print_probe8("scan split", reg, rx);
-
-            d.valid = 0;
-            desc_parse(&d, rx, sizeof(rx));
-
-            if (desc_looks_valid(&d))
-            {
-                dev->desc = d;
-                dev->hid_desc_reg = reg;
-                i2c1_bus_set_quiet(0);
-                terminal_print("FOUND HID DESC split @ ");
-                terminal_print_inline_hex32(reg);
-                
-                return 0;
-            }
-        }
-
-        for (uint32_t i = 0; i < sizeof(rx); ++i)
-            rx[i] = 0;
-
-        rc = i2c1_bus_write_read_combined(dev->i2c_addr_7bit, tx, 2u, rx, sizeof(rx));
-        if (rc == 0 && buf_any_nonzero(rx, sizeof(rx)))
-        {
-            print_probe8("scan comb", reg, rx);
-
-            d.valid = 0;
-            desc_parse(&d, rx, sizeof(rx));
-
-            if (desc_looks_valid(&d))
-            {
-                dev->desc = d;
-                dev->hid_desc_reg = reg;
-                i2c1_bus_set_quiet(0);
-                terminal_print("FOUND HID DESC comb @ ");
-                terminal_print_inline_hex32(reg);
-                
-                return 0;
-            }
-        }
-    }
-
-    i2c1_bus_set_quiet(0);
-    return -1;
-}
-
 static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
 {
     uint16_t reg;
@@ -1421,6 +1367,12 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
             return 0;
     }
 
+    if (hint_reg != 0u)
+    {
+        terminal_print("TCPD hinted reg no hit\n");
+        return -1;
+    }
+
     /*
       Final bounded scan.
       Still runtime-driven, still small, but no longer "0x20 or nothing".
@@ -1449,12 +1401,6 @@ static int hidi2c_fetch_desc_touchpad(hidi2c_device *dev)
     }
 
     terminal_print("TCPD scan rdonly no hit\n");
-
-    terminal_print("TCPD full scan start\n");
-    if (hidi2c_scan_for_desc(dev) == 0)
-        return 0;
-
-    terminal_print("TCPD full scan no hit\n");
     return -1;
 }
 
@@ -1808,26 +1754,21 @@ static int tcpd_simple_acpi_sequence(const hidi2c_acpi_regs *regs, hidi2c_device
 
     /*
       The log shows TCPD ACKing reliably while the descriptor reads stay zero.
-      So prefer ACPI setup that can plausibly change device state:
-      connect the GIO0 opregion, try the device power-on method if exported,
-      then use the existing _STA / _INI / GIO0._DSM flow.
+      Keep the ACPI sequence focused on the stages that were already producing
+      useful results in logs, while still connecting the GIO0 opregion once
+      before the child _DSM path starts advertising a descriptor hint.
      */
 
-    if (!ok &&
-        aml_body_present(regs->tcpd_gio0_reg_body,
+    if (aml_body_present(regs->tcpd_gio0_reg_body,
                          regs->tcpd_gio0_reg_len,
-                         regs->tcpd_gio0_reg_valid) &&
-        tcpd_run_acpi_stage_and_probe(regs, dev, "GIO0._REG-1", tcpd_try_gio0_reg_from_acpi, 20u, 0) == 0)
-        ok = 1;
+                         regs->tcpd_gio0_reg_valid))
+    {
+        terminal_print("TCPD ACPI stage begin: GIO0._REG\n");
+        tcpd_try_gio0_reg_from_acpi(regs);
+        delay_ms_approx(20u);
+    }
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "STA-1", tcpd_try_sta_from_acpi, 20u, 0) == 0)
-        ok = 1;
-
-    if (!ok &&
-        aml_body_present(regs->tcpd_ps0_body,
-                         regs->tcpd_ps0_len,
-                         regs->tcpd_ps0_valid) &&
-        tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-1", tcpd_try_ps0_from_acpi, 60u, 1) == 0)
         ok = 1;
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "INI-1", tcpd_try_ini_from_acpi, 40u, 1) == 0)
@@ -1844,20 +1785,6 @@ static int tcpd_simple_acpi_sequence(const hidi2c_acpi_regs *regs, hidi2c_device
     }
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "STA-2", tcpd_try_sta_from_acpi, 20u, 0) == 0)
-        ok = 1;
-
-    if (!ok &&
-        aml_body_present(regs->tcpd_gio0_reg_body,
-                         regs->tcpd_gio0_reg_len,
-                         regs->tcpd_gio0_reg_valid) &&
-        tcpd_run_acpi_stage_and_probe(regs, dev, "GIO0._REG-2", tcpd_try_gio0_reg_from_acpi, 20u, 0) == 0)
-        ok = 1;
-
-    if (!ok &&
-        aml_body_present(regs->tcpd_ps0_body,
-                         regs->tcpd_ps0_len,
-                         regs->tcpd_ps0_valid) &&
-        tcpd_run_acpi_stage_and_probe(regs, dev, "PS0-2", tcpd_try_ps0_from_acpi, 80u, 1) == 0)
         ok = 1;
 
     if (!ok && tcpd_run_acpi_stage_and_probe(regs, dev, "INI-2", tcpd_try_ini_from_acpi, 60u, 1) == 0)
@@ -1970,7 +1897,18 @@ static int tcpd_controlled_gpio_test_one_polarity(const hidi2c_acpi_regs *regs,
         return -1;
     }
 
-    return tcpd_wake_and_fetch(dev, tag, 120u);
+    delay_ms_approx(40u);
+
+    if (hidi2c_fetch_desc_touchpad_retry(dev, 1u) == 0)
+    {
+        terminal_print("TCPD controlled GPIO fetch success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("TCPD controlled GPIO fetch miss: ");
+    terminal_print_inline(tag);
+    return -1;
 }
 
 static int tcpd_controlled_gpio_test(const hidi2c_acpi_regs *regs, hidi2c_device *dev)
@@ -2072,6 +2010,8 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             g_tpd.i2c_addr_7bit = regs.tcpd_addr;
         if (regs.tcpd_desc_reg)
             g_tpd.hid_desc_reg = regs.tcpd_desc_reg;
+        if (regs.tcpd_gpio_pin != 0u)
+            g_tpd.gpio_pin = regs.tcpd_gpio_pin;
 
         terminal_print("ACPI ECKB addr:");
         terminal_print_hex8(g_kbd.i2c_addr_7bit);
@@ -2090,6 +2030,18 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
 
         terminal_print("ACPI TCPD gpio count:");
         terminal_print_hex8(regs.tcpd_gpio_count);
+        terminal_print("\n");
+
+        terminal_print("ACPI TCPD gpio resolved pin:");
+        terminal_print_hex32(regs.tcpd_gpio_pin);
+        terminal_print(" valid:");
+        terminal_print_hex8(regs.tcpd_gpio_valid);
+        terminal_print(" flags:");
+        terminal_print_hex32(regs.tcpd_gpio_flags);
+        terminal_print(" cfg:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_cfg);
+        terminal_print(" guessed:");
+        terminal_print_hex8(regs.tcpd_gpio_pin_guessed);
         terminal_print("\n");
 
         terminal_print("ACPI TCPD gpio1 pin:");
@@ -2174,7 +2126,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         g_aml_gabl = 0;
         g_aml_lids = 0;
         g_aml_lidb = 0;
-        g_aml_lidr = 0;
+        g_aml_lidr = 1;
         g_aml_t0 = 0;
         g_aml_t1 = 0;
 
@@ -2201,14 +2153,22 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         /*
           If still dead, try repeated no-GPIO wake probes with larger settles.
         */
-        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-1", 120u) == 0)
-            ok = 1;
+        if (!ok && g_tcpd_desc_reg_hint != 0u)
+        {
+            if (tcpd_wake_and_fetch(&g_tpd, "hint-settle", 220u) == 0)
+                ok = 1;
+        }
+        else
+        {
+            if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-1", 120u) == 0)
+                ok = 1;
 
-        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-2", 200u) == 0)
-            ok = 1;
+            if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-2", 200u) == 0)
+                ok = 1;
 
-        if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-3", 300u) == 0)
-            ok = 1;
+            if (!ok && tcpd_wake_and_fetch(&g_tpd, "no-gpio-3", 300u) == 0)
+                ok = 1;
+        }
 
         /*
           Final fallback:
@@ -2216,8 +2176,9 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         */
         if (!ok)
         {
-            delay_ms_approx(250u);
-            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd, 3u) == 0)
+            delay_ms_approx(g_tcpd_desc_reg_hint ? 320u : 250u);
+            if (hidi2c_fetch_desc_touchpad_retry(&g_tpd,
+                                                g_tcpd_desc_reg_hint ? 1u : 3u) == 0)
                 ok = 1;
         }
 

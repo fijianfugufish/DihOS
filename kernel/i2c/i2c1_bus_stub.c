@@ -142,6 +142,8 @@ static uint32_t i2c1_error_bits(void)
            M_CMD_ABORT_EN;
 }
 
+static void i2c1_drain_rx_junk(void);
+
 static int i2c1_wait_idle(void)
 {
     uint32_t spins = 0;
@@ -385,6 +387,66 @@ static void fifo_write_bytes_now(const uint8_t *buf, uint32_t len)
     }
 }
 
+static int i2c1_run_write_phase(uint8_t addr7,
+                                const uint8_t *src,
+                                uint32_t tx_len,
+                                uint32_t m_param_bits,
+                                uint32_t *wm_irq_out,
+                                uint32_t *phase_irq_out)
+{
+    uint32_t wm_irq = 0;
+    uint32_t phase_irq = 0;
+    int rc;
+
+    if (i2c1_wait_idle() != 0)
+        return -1;
+
+    wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
+    io_barrier();
+    i2c1_drain_rx_junk();
+
+    wr32(SE_I2C_TX_TRANS_LEN, tx_len);
+    wr32(SE_I2C_RX_TRANS_LEN, 0u);
+
+    wr32(SE_GENI_TX_WATERMARK_REG, 1u);
+    io_barrier();
+
+    wr32(SE_GENI_M_CMD0, build_cmd(I2C_WRITE, addr7, m_param_bits));
+    io_barrier();
+
+    rc = i2c1_wait_tx_watermark(&wm_irq);
+    if (rc == 0)
+    {
+        wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
+        io_barrier();
+
+        fifo_write_bytes_now(src, tx_len);
+
+        wr32(SE_GENI_TX_WATERMARK_REG, 0u);
+        wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
+        io_barrier();
+
+        rc = i2c1_wait_done_or_idle(&phase_irq);
+    }
+
+    wr32(SE_GENI_TX_WATERMARK_REG, 0u);
+    wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
+    io_barrier();
+
+    if (wm_irq_out)
+        *wm_irq_out = wm_irq;
+    if (phase_irq_out)
+        *phase_irq_out = phase_irq;
+
+    if (rc != 0)
+    {
+        i2c1_abort_if_needed();
+        return -1;
+    }
+
+    return 0;
+}
+
 static void i2c1_dump_rx_words_once(uint32_t expected_len)
 {
     uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
@@ -579,7 +641,8 @@ int i2c1_bus_init(void)
 int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
 {
     const uint8_t *src = (const uint8_t *)tx;
-    uint32_t irq = 0;
+    uint32_t wm_irq = 0;
+    uint32_t phase_irq = 0;
     int rc;
 
     if (!g_inited && i2c1_bus_init() != 0)
@@ -588,67 +651,31 @@ int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
     if (!src || tx_len == 0)
         return -1;
 
-    if (i2c1_wait_idle() != 0)
-        return -1;
-
-    wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-    io_barrier();
-    i2c1_drain_rx_junk();
-
-    wr32(SE_I2C_TX_TRANS_LEN, tx_len);
-    wr32(SE_I2C_RX_TRANS_LEN, 0u);
-
-    /* ask controller to request TX data */
-    wr32(SE_GENI_TX_WATERMARK_REG, 1u);
-    io_barrier();
-
-    /* launch command first */
-    wr32(SE_GENI_M_CMD0, build_cmd(I2C_WRITE, addr7, 0u));
-    io_barrier();
-
-    rc = i2c1_wait_tx_watermark(&irq);
+    rc = i2c1_run_write_phase(addr7,
+                              src,
+                              tx_len,
+                              0u,
+                              &wm_irq,
+                              &phase_irq);
 
     if (!g_i2c1_quiet)
     {
         terminal_print("i2c wr wm a:");
         terminal_print_inline_hex8(addr7);
         terminal_print_inline(" rc:");
-        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline_hex32((uint32_t)((rc == 0) ? 0 : 0xFFFFFFFFu));
         terminal_print_inline(" irq:");
-        terminal_print_inline_hex32(irq);
+        terminal_print_inline_hex32(wm_irq);
         terminal_print_inline(" txst:");
         terminal_print_inline_hex32(rd32(SE_GENI_TX_FIFO_STATUS));
         terminal_print("\n");
-    }
-    if (rc != 0)
-    {
-        wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-        io_barrier();
-        i2c1_abort_if_needed();
-        return -1;
-    }
 
-    /* clear watermark event and feed FIFO */
-    wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
-    io_barrier();
-
-    fifo_write_bytes_now(src, tx_len);
-
-    /* all TX data queued: stop watermark requests now */
-    wr32(SE_GENI_TX_WATERMARK_REG, 0u);
-    wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
-    io_barrier();
-
-    rc = i2c1_wait_done_or_idle(&irq);
-
-    if (!g_i2c1_quiet)
-    {
         terminal_print("i2c wr phase a:");
         terminal_print_inline_hex8(addr7);
         terminal_print_inline(" rc:");
-        terminal_print_inline_hex32((uint32_t)rc);
+        terminal_print_inline_hex32((uint32_t)((rc == 0) ? 0 : 0xFFFFFFFFu));
         terminal_print_inline(" irq:");
-        terminal_print_inline_hex32(irq);
+        terminal_print_inline_hex32(phase_irq);
         terminal_print_inline(" st:");
         terminal_print_inline_hex32(rd32(SE_GENI_STATUS));
         terminal_print_inline(" rxst:");
@@ -662,15 +689,8 @@ int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len)
         terminal_print("\n");
     }
 
-    wr32(SE_GENI_TX_WATERMARK_REG, 0u);
-    wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-    io_barrier();
-
     if (rc != 0)
-    {
-        i2c1_abort_if_needed();
         return -1;
-    }
 
     return 0;
 }
@@ -681,6 +701,8 @@ int i2c1_bus_write_read(uint8_t addr7,
 {
     const uint8_t *src = (const uint8_t *)tx;
     uint8_t *dst = (uint8_t *)rx;
+    uint32_t wm_irq = 0;
+    uint32_t phase_irq = 0;
     uint32_t irq = 0;
     int rc;
 
@@ -693,53 +715,14 @@ int i2c1_bus_write_read(uint8_t addr7,
     if (tx_len == 0 || rx_len == 0)
         return -1;
 
-    if (i2c1_wait_idle() != 0)
-        return -1;
-
-    /*
-      Phase 1:
-      write the register pointer, but hold the bus for a repeated start.
-    */
-    wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-    io_barrier();
-    i2c1_drain_rx_junk();
-
-    wr32(SE_I2C_TX_TRANS_LEN, tx_len);
-    wr32(SE_I2C_RX_TRANS_LEN, 0u);
-
-    wr32(SE_GENI_TX_WATERMARK_REG, 1u);
-    io_barrier();
-
-    wr32(SE_GENI_M_CMD0, build_cmd(I2C_WRITE, addr7, STOP_STRETCH));
-    io_barrier();
-
-    rc = i2c1_wait_tx_watermark(&irq);
+    rc = i2c1_run_write_phase(addr7,
+                              src,
+                              tx_len,
+                              STOP_STRETCH,
+                              &wm_irq,
+                              &phase_irq);
     if (rc != 0)
-    {
-        wr32(SE_GENI_TX_WATERMARK_REG, 0u);
-        wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-        io_barrier();
-        i2c1_abort_if_needed();
         return -1;
-    }
-
-    wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
-    io_barrier();
-
-    fifo_write_bytes_now(src, tx_len);
-
-    wr32(SE_GENI_TX_WATERMARK_REG, 0u);
-    wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
-    io_barrier();
-
-    rc = i2c1_wait_done_or_idle(&irq);
-    if (rc != 0)
-    {
-        wr32(SE_GENI_M_IRQ_CLEAR, 0xFFFFFFFFu);
-        io_barrier();
-        i2c1_abort_if_needed();
-        return -1;
-    }
 
     /*
       Phase 2:
@@ -754,7 +737,7 @@ int i2c1_bus_write_read(uint8_t addr7,
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_read_ready(rx_len, &irq);
+    rc = i2c1_wait_done(&irq);
 
     if (!g_i2c1_quiet)
     {
@@ -824,7 +807,7 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_read_ready(rx_len, &irq);
+    rc = i2c1_wait_done(&irq);
 
     if (!g_i2c1_quiet)
     {
@@ -958,7 +941,7 @@ int i2c1_bus_write_read_combined(uint8_t addr7,
     wr32(SE_GENI_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_read_ready(rx_len, &irq);
 
     if (!g_i2c1_quiet)
     {

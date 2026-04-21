@@ -2268,6 +2268,7 @@ static int classify_and_export_device(const uint8_t *aml,
 
             if (gpio_count >= 1u)
             {
+                g_hidi2c_regs.tcpd_gpio_valid = (g0.first_pin != 0u) ? 1u : 0u;
                 g_hidi2c_regs.tcpd_gpio_pin = g0.first_pin;
                 g_hidi2c_regs.tcpd_gpio_flags = g0.flags;
                 g_hidi2c_regs.tcpd_gpio_conn_type = g0.conn_type;

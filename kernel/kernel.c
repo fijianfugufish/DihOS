@@ -81,7 +81,7 @@ void kmain(const boot_info *bi)
     terminal_initialize(&font);
     terminal_print("terminal online");
 
-    kinput_init(bi->acpi_rsdp);
+    kinput_init(bi->xhci_mmio_base, bi->acpi_rsdp);
 
     terminal_print("^^ i sure hope this log is good ^^");
 
@@ -319,16 +319,25 @@ void kmain(const boot_info *bi)
     {
         kinput_poll();
 
-        if ((dbg_tick++ & 0x3FFFu) == 0u)
-        {
-            if (kinput_key_down(0x04)) /* HID usage 0x04 = 'A' */
-                terminal_print("A down\n");
+        /* keyboard edge tests */
+        if (kinput_key_pressed(KEY_A))  /* HID usage 0x04 = 'A' */
+            terminal_print("A pressed\n");
 
-            if (kinput_mouse_dx() || kinput_mouse_dy() || kinput_mouse_buttons())
-            {
-                terminal_print("mouse move/buttons\n");
-                kinput_mouse_consume(0);
-            }
+        if (kinput_key_released(KEY_A))
+            terminal_print("A released\n");
+
+        /* optional extra sanity checks */
+        if (kinput_key_pressed(KEY_LSHIFT))  /* Left Shift */
+            terminal_print("LShift pressed\n");
+
+        if (kinput_key_released(KEY_LSHIFT))
+            terminal_print("LShift released\n");
+
+        /* mouse */
+        if (kinput_mouse_dx() || kinput_mouse_dy() || kinput_mouse_wheel() || kinput_mouse_buttons())
+        {
+            terminal_print("mouse activity\n");
+            kinput_mouse_consume(0);
         }
 
         kgfx_render_all(black);
