@@ -505,8 +505,10 @@ static trb_t *ring_next(trb_t *ring, uint32_t size, uint32_t *enq, uint8_t *cycl
         // Program LINK TRB with current producer cycle, TC=1
         link->d3 = (TRB_TYPE_LINK << 10) | (1u << 1) | ((*cycle) & 1u);
 
-        // Wrap to start and TOGGLE producer cycle
-        *enq = 0;
+        // Wrap to start, consume ring[0], and TOGGLE producer cycle.
+        // The next enqueue must advance to ring[1], otherwise we keep
+        // reusing ring[0] forever after the first wrap.
+        *enq = 1;
         *cycle ^= 1u;
         return &ring[0];
     }
@@ -794,9 +796,12 @@ static int wait_cmd_complete(uint32_t ms, trb_t *out)
     return wait_event_type(33u, ms, out); /* 33 = Command Completion Event */
 }
 
-// NOTE: This records CC + remaining length only.
-// Success and Short Packet are both valid completions here; exact-length policy
-// is decided by the caller.
+// NOTE:
+//   0  = transfer completed successfully (including Short Packet)
+//   1  = timed out waiting for a Transfer Event
+//  -1  = Transfer Event arrived but completed with an error CC
+//
+// Exact-length policy is decided by the caller.
 static int wait_xfer_complete(uint32_t ms)
 {
     dot(180, 0x00FFFFu); /* wait_xfer_complete called */
@@ -806,7 +811,7 @@ static int wait_xfer_complete(uint32_t ms)
     dot(r == 0 ? 181 : 189, r == 0 ? 0x00FF00u : 0xFF0000u);
 
     if (r != 0)
-        return -1;
+        return 1;
 
     // Transfer Event TRB:
     // d2[23:0]  = Transfer Length Remaining
@@ -3595,9 +3600,22 @@ int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
         int r = wait_xfer_complete(timeout_ms);
         g_expect_valid = 0;
 
-        if (r != 0)
+        if (r > 0)
         {
             // Treat as "no packet right now" rather than fatal.
+            rc = 1;
+            goto out;
+        }
+
+        if (r < 0)
+        {
+            /*
+             * The controller completed this TRB with an error CC.
+             * Drop the pending request so the next poll can post a fresh one
+             * instead of waiting forever on a TRB that has already completed.
+             */
+            d->intr_pending_active = 0;
+            d->intr_pending_trbptr = 0;
             rc = 1;
             goto out;
         }

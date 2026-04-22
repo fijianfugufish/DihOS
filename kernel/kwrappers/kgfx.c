@@ -476,25 +476,18 @@ static void bb_blit_argb32_clip(int32_t x, int32_t y,
         uint8_t *drow8 = BB_ptr + (uint32_t)(cy0 + (int32_t)iy) * BB_stride + (uint32_t)cx0 * 4u;
         uint32_t *drow = (uint32_t *)drow8;
 
-        if (global_alpha == 255)
-        {
-            // check if this row is fully opaque (cheap early-out: sample a few pixels)
-            // OR just assume opaque for your BMP-generated images.
-            // If you assume opaque: just copy the pixels directly.
-
-            // Copy packed 32-bit pixels
-            for (uint32_t ix = 0; ix < copy_w; ++ix)
-                drow[ix] = srow[ix] & 0x00FFFFFFu | 0xFF000000u;
-
-            continue;
-        }
-
         for (uint32_t ix = 0; ix < copy_w; ++ix)
         {
             uint32_t sp = srow[ix]; // 0xAARRGGBB
             uint8_t sa = (uint8_t)(sp >> 24);
             if (sa == 0)
                 continue;
+
+            if (global_alpha == 255 && sa == 255)
+            {
+                drow[ix] = sp & 0x00FFFFFFu | 0xFF000000u;
+                continue;
+            }
 
             // Multiply per-pixel alpha by object alpha
             // out_a = (sa * global_alpha) / 255 with rounding

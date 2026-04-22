@@ -1,7 +1,6 @@
 #include "kwrappers/kinput.h"
 #include "i2c/i2c1_hidi2c.h"
 #include "usb/usb_hid.h"
-#include "terminal/terminal_api.h"
 #include <stdint.h>
 
 static uint8_t g_keys_now[256];
@@ -253,7 +252,6 @@ void kinput_poll(void)
     uint8_t kbd_report[8];
     uint8_t mouse_report[16];
     uint32_t got = 0;
-    static uint32_t dbg_usb_mouse_packets = 0;
 
     /* Snapshot last frame once, then rebuild current frame from all devices */
     keys_copy(g_keys_prev, g_keys_now);
@@ -285,25 +283,7 @@ void kinput_poll(void)
 
         got = 0;
         if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, mouse_report, &got) == 0 && got >= 1)
-        {
-            if (dbg_usb_mouse_packets < 16)
-            {
-                dbg_usb_mouse_packets++;
-
-                terminal_print_inline("usb mouse pkt len=");
-                terminal_print_inline_hex32(got);
-
-                for (uint32_t i = 0; i < got && i < 16u; ++i)
-                {
-                    terminal_print_inline(" ");
-                    terminal_print_inline_hex8(mouse_report[i]);
-                }
-
-                terminal_print("");
-            }
-
             parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
-        }
     }
 }
 

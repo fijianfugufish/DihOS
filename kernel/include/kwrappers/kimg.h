@@ -13,8 +13,11 @@ typedef struct kimg
     uint32_t *px;
 } kimg;
 
+#define KIMG_BMP_FLAG_MAGENTA_TRANSPARENT 0x00000001u
+
 // Load uncompressed BMP (24-bit or 32-bit). Returns 0 on success.
 int kimg_load_bmp(kimg *out, const char *path);
+int kimg_load_bmp_flags(kimg *out, const char *path, uint32_t flags);
 
 // Draw at (x,y). global_alpha multiplies per-pixel alpha (0..255).
 void kimg_draw(const kimg *img, int x, int y, uint8_t global_alpha);

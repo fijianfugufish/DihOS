@@ -8,6 +8,7 @@
 #include "usb/blockdev.h"
 #include "kwrappers/string.h"
 #include "kwrappers/kinput.h"
+#include "kwrappers/kmouse.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 
 #include "terminal/terminal_api.h"
@@ -88,7 +89,7 @@ void kmain(const boot_info *bi)
     terminal_flush_log();
     kgfx_render_all(black);
 
-    // Load "cat" image (BMP -> ARGB32) only if mounted
+    // Load images (BMP -> ARGB32) only if mounted
     kimg cat_img = (kimg){0};
     int have_cat = 0;
     if (mounted && kimg_load_bmp(&cat_img, "0:/OS/System/Images/cat.bmp") == 0)
@@ -307,6 +308,12 @@ void kmain(const boot_info *bi)
         terminal_warn("cat not loaded");
     }
 
+    if (kmouse_init("0:/OS/System/Images/Mouse/idle.bmp") != 0)
+    {
+        terminal_warn("cursor not loaded");
+    }
+    kmouse_set_sensitivity_pct(300);
+
     kgfx_render_all(black);
 
     uint32_t frame = 0;
@@ -318,6 +325,7 @@ void kmain(const boot_info *bi)
     for (;;)
     {
         kinput_poll();
+        kmouse_update();
 
         /* keyboard edge tests */
         if (kinput_key_pressed(KEY_A))  /* HID usage 0x04 = 'A' */
@@ -332,23 +340,6 @@ void kmain(const boot_info *bi)
 
         if (kinput_key_released(KEY_LSHIFT))
             terminal_print("LShift released\n");
-
-        /* mouse */
-        if (kinput_mouse_dx() || kinput_mouse_dy() || kinput_mouse_wheel() || kinput_mouse_buttons())
-        {
-            kinput_mouse_state m;
-            kinput_mouse_consume(&m);
-
-            terminal_print_inline("mouse raw dx=");
-            terminal_print_inline_hex32((uint32_t)m.dx);
-            terminal_print_inline(" dy=");
-            terminal_print_inline_hex32((uint32_t)m.dy);
-            terminal_print_inline(" wheel=");
-            terminal_print_inline_hex32((uint32_t)m.wheel);
-            terminal_print_inline(" buttons=");
-            terminal_print_inline_hex8(m.buttons);
-            terminal_print("");
-        }
 
         kgfx_render_all(black);
         frame++;

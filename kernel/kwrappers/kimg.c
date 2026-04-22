@@ -44,10 +44,21 @@ static inline uint32_t pack_pixel(uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 #endif
 }
 
+static inline uint8_t kimg_apply_bmp_alpha_flags(uint8_t r, uint8_t g, uint8_t b, uint8_t a, uint32_t flags)
+{
+    if ((flags & KIMG_BMP_FLAG_MAGENTA_TRANSPARENT) &&
+        r == 0xFFu && g == 0x00u && b == 0xFFu)
+    {
+        return 0u;
+    }
+
+    return a;
+}
+
 // Loads BMP (24/32 bpp, BI_RGB only) into 32-bit pixels in pmem.
 // out->px points to pixels, out->w/out->h set.
 // Returns 0 on success.
-int kimg_load_bmp(kimg *out, const char *path)
+int kimg_load_bmp_flags(kimg *out, const char *path, uint32_t flags)
 {
     g_kimg_dbg.err = 0;
     g_kimg_dbg.yfile = 0;
@@ -329,7 +340,8 @@ int kimg_load_bmp(kimg *out, const char *path)
                 uint8_t b = src[x * 3u + 0u];
                 uint8_t g = src[x * 3u + 1u];
                 uint8_t r = src[x * 3u + 2u];
-                drow[x] = pack_pixel(r, g, b, 0xFFu);
+                uint8_t a = kimg_apply_bmp_alpha_flags(r, g, b, 0xFFu, flags);
+                drow[x] = pack_pixel(r, g, b, a);
             }
         }
         else
@@ -339,7 +351,7 @@ int kimg_load_bmp(kimg *out, const char *path)
                 uint8_t b = src[x * 4u + 0u];
                 uint8_t g = src[x * 4u + 1u];
                 uint8_t r = src[x * 4u + 2u];
-                uint8_t a = src[x * 4u + 3u];
+                uint8_t a = kimg_apply_bmp_alpha_flags(r, g, b, src[x * 4u + 3u], flags);
                 drow[x] = pack_pixel(r, g, b, a);
             }
         }
@@ -352,4 +364,9 @@ int kimg_load_bmp(kimg *out, const char *path)
     out->w = abs_w;
     out->h = abs_h;
     return 0;
+}
+
+int kimg_load_bmp(kimg *out, const char *path)
+{
+    return kimg_load_bmp_flags(out, path, 0);
 }
