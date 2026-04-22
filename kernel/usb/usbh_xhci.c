@@ -66,6 +66,8 @@
 
 #define DESC_DEV 1
 #define DESC_CONFIG 2
+#define DESC_HID 0x21
+#define DESC_REPORT 0x22
 #define DESC_INTERFACE 4
 #define DESC_ENDPOINT 5
 
@@ -197,6 +199,29 @@ static void xhci_dbg_ep_line(uint8_t addr, uint8_t attr)
     kgfx_render_all(black);
 }
 
+static void xhci_dbg_portsc_line(const char *tag, int port_id, int attempt, uint32_t v)
+{
+    terminal_print_inline(tag);
+    terminal_print_inline(" p=");
+    terminal_print_inline_hex32((uint32_t)port_id);
+    terminal_print_inline(" try=");
+    terminal_print_inline_hex32((uint32_t)attempt);
+    terminal_print_inline(" ccs=");
+    terminal_print_inline_hex8((uint8_t)((v & PORTSC_CCS) ? 1u : 0u));
+    terminal_print_inline(" pp=");
+    terminal_print_inline_hex8((uint8_t)((v & PORTSC_PP) ? 1u : 0u));
+    terminal_print_inline(" ped=");
+    terminal_print_inline_hex8((uint8_t)((v & PORTSC_PED) ? 1u : 0u));
+    terminal_print_inline(" pls=");
+    terminal_print_inline_hex8((uint8_t)((v & PORTSC_PLS_MASK) >> 5));
+    terminal_print_inline(" pr=");
+    terminal_print_inline_hex8((uint8_t)((v & PORTSC_PR) ? 1u : 0u));
+    terminal_print_inline(" v=");
+    terminal_print_inline_hex32(v);
+    terminal_print("");
+    kgfx_render_all(black);
+}
+
 static void xhci_dbg_dump_cfg_brief(const uint8_t *cfg, uint16_t len)
 {
     terminal_print("cfg dump: start");
@@ -310,10 +335,140 @@ typedef struct
     uint32_t n_ports;
     int slot_id, port_id;
 } xhci_t;
-static xhci_t G;
 
+typedef struct
+{
+    xhci_t hc;
+    uint8_t claimed_ports[256];
+    uint8_t ac64;
+    uint32_t ctx_dwords;
+    uint32_t ctx_stride;
+    uint8_t in_use;
+} xhci_saved_state_t;
+
+static xhci_t G;
+static uint8_t g_claimed_ports[256];
+static xhci_saved_state_t g_saved_states[8];
 static uint32_t G_ctx_dwords = 16; /* default 64B contexts */
 static uint32_t G_ctx_stride = 64; /* bytes per context   */
+
+static void claimed_ports_copy(uint8_t *dst, const uint8_t *src)
+{
+    for (uint32_t i = 0; i < 256; ++i)
+        dst[i] = src[i];
+}
+
+static void claimed_ports_clear(void)
+{
+    for (uint32_t i = 0; i < 256; ++i)
+        g_claimed_ports[i] = 0;
+}
+
+static xhci_saved_state_t *alloc_saved_state(void)
+{
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(g_saved_states) / sizeof(g_saved_states[0])); ++i)
+    {
+        if (!g_saved_states[i].in_use)
+        {
+            g_saved_states[i].in_use = 1;
+            return &g_saved_states[i];
+        }
+    }
+
+    return 0;
+}
+
+static int port_is_claimed(uint8_t port_id)
+{
+    return port_id != 0 && g_claimed_ports[port_id] != 0;
+}
+
+static void port_claim(uint8_t port_id)
+{
+    if (port_id != 0)
+        g_claimed_ports[port_id] = 1;
+}
+
+static void dev_state_save(usbh_dev_t *d)
+{
+    xhci_saved_state_t *saved = 0;
+
+    if (!d)
+        return;
+
+    if (d->hc && d->hc != &G)
+        saved = (xhci_saved_state_t *)(uintptr_t)d->hc;
+    else
+        saved = alloc_saved_state();
+
+    if (saved)
+    {
+        saved->hc = G;
+        saved->ac64 = (uint8_t)g_xhci_ac64;
+        saved->ctx_dwords = G_ctx_dwords;
+        saved->ctx_stride = G_ctx_stride;
+        claimed_ports_copy(saved->claimed_ports, g_claimed_ports);
+        d->hc = saved;
+    }
+
+    d->slot_id = (uint8_t)G.slot_id;
+    d->port_id = (uint8_t)G.port_id;
+    d->devctx = (void *)(uintptr_t)G.dev_ctx;
+    d->input_ctx = (void *)(uintptr_t)G.input_ctx;
+    d->ctrl_tr = (void *)(uintptr_t)G.ctrl_tr;
+    d->bulk_in_tr = (void *)(uintptr_t)G.bulk_in_tr;
+    d->bulk_out_tr = (void *)(uintptr_t)G.bulk_out_tr;
+    d->intr_in_tr = (void *)(uintptr_t)G.intr_in_tr;
+    d->ctrl_enq = G.ctrl_enq;
+    d->bin_enq = G.bin_enq;
+    d->bout_enq = G.bout_enq;
+    d->iin_enq = G.iin_enq;
+    d->ctrl_cycle = G.ctrl_cycle;
+    d->bin_cycle = G.bin_cycle;
+    d->bout_cycle = G.bout_cycle;
+    d->iin_cycle = G.iin_cycle;
+}
+
+static int dev_state_load(const usbh_dev_t *d)
+{
+    const xhci_saved_state_t *saved;
+
+    if (!d)
+        return -1;
+
+    saved = (const xhci_saved_state_t *)(uintptr_t)d->hc;
+    if (saved && saved != (const xhci_saved_state_t *)(uintptr_t)&G && saved->in_use && saved->hc.mmio_base)
+    {
+        G = saved->hc;
+        g_xhci_ac64 = saved->ac64;
+        G_ctx_dwords = saved->ctx_dwords;
+        G_ctx_stride = saved->ctx_stride;
+        claimed_ports_copy(g_claimed_ports, saved->claimed_ports);
+        return 0;
+    }
+
+    if (d->slot_id == 0 || !d->devctx || !d->input_ctx || !d->ctrl_tr)
+        return -1;
+
+    G.slot_id = d->slot_id;
+    G.port_id = d->port_id;
+    G.dev_ctx = (uint64_t)(uintptr_t)d->devctx;
+    G.input_ctx = (uint64_t)(uintptr_t)d->input_ctx;
+    G.ctrl_tr = (uint64_t)(uintptr_t)d->ctrl_tr;
+    G.bulk_in_tr = (uint64_t)(uintptr_t)d->bulk_in_tr;
+    G.bulk_out_tr = (uint64_t)(uintptr_t)d->bulk_out_tr;
+    G.intr_in_tr = (uint64_t)(uintptr_t)d->intr_in_tr;
+    G.ctrl_enq = d->ctrl_enq;
+    G.bin_enq = d->bin_enq;
+    G.bout_enq = d->bout_enq;
+    G.iin_enq = d->iin_enq;
+    G.ctrl_cycle = d->ctrl_cycle;
+    G.bin_cycle = d->bin_cycle;
+    G.bout_cycle = d->bout_cycle;
+    G.iin_cycle = d->iin_cycle;
+
+    return 0;
+}
 
 /* ---- CTX types ---- */
 #pragma pack(push, 16)
@@ -579,39 +734,6 @@ static int wait_event_type(uint32_t expect_type, uint32_t timeout_ms, trb_t *out
                 g_xhci_last_ev_ptr_lo = cur.d0;
                 g_xhci_last_ev_len = cur.d2 & 0x00FFFFFFu; // this is "remaining", not "done"
 
-                // --- FILTER: if caller set an expectation, ignore unrelated transfer events ---
-                if (type == 32u && g_expect_valid)
-                {
-                    uint32_t ev_epid = (e->d3 >> 16) & 0x1Fu;
-                    uint32_t ev_slot = (e->d3 >> 24) & 0xFFu;
-
-                    uint64_t ev_ptr = ((uint64_t)e->d1 << 32) | (uint64_t)e->d0;
-
-                    if (ev_epid != g_expect_epid || ev_slot != g_expect_slot || ev_ptr != g_expect_trbptr)
-                    {
-                        // record what we skipped (optional, but helps)
-                        g_expect_mismatch++;
-                        g_expect_last_bad_epid = ev_epid;
-                        g_expect_last_bad_slot = ev_slot;
-                        g_expect_last_bad_ptr_lo = e->d0;
-                        g_expect_last_bad_ptr_hi = e->d1;
-
-                        // consume this event and keep waiting for the right one
-                        idx++;
-                        if (idx >= G.ev.size)
-                        {
-                            idx = 0;
-                            ccs ^= 1;
-                        }
-                        G.ev.deq = idx;
-                        G.ev.cycle = ccs;
-                        evring_write_erdp();
-
-                        dot(188, 0xFF00FFu); // magenta: ignored wrong Transfer Event
-                        continue;
-                    }
-                }
-
                 // If we are waiting for a specific bulk TRB, ignore unrelated transfer events.
                 if (expect_type == 32u && g_expect_valid)
                 {
@@ -672,8 +794,9 @@ static int wait_cmd_complete(uint32_t ms, trb_t *out)
     return wait_event_type(33u, ms, out); /* 33 = Command Completion Event */
 }
 
-// NOTE: This now records CC + remaining length, and only enforces CC==Success.
-// Whether a short transfer is "fatal" is decided by the caller (bulk_in/out).
+// NOTE: This records CC + remaining length only.
+// Success and Short Packet are both valid completions here; exact-length policy
+// is decided by the caller.
 static int wait_xfer_complete(uint32_t ms)
 {
     dot(180, 0x00FFFFu); /* wait_xfer_complete called */
@@ -694,8 +817,8 @@ static int wait_xfer_complete(uint32_t ms)
     g_last_xfer_cc = cc;
     g_last_xfer_rem = rem;
 
-    // 1 = Success (xHCI)
-    if (cc != 1u)
+    // 1 = Success, 13 = Short Packet (valid for IN/interrupt transfers)
+    if (cc != 1u && cc != 13u)
         return -1;
 
     return 0;
@@ -1307,6 +1430,12 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
         return -1;
     }
 
+    if (G.mmio_base == mmio && G.cmd.base && G.ev.evt_base && G.dcbaa)
+    {
+        dot(7, C_OK);
+        return 0;
+    }
+
     /* quick sanity: CAPLENGTH in [0x20..0x40], HCIVERSION major == 0x01 */
     {
         volatile const xhci_caps_t *c = (volatile const xhci_caps_t *)(uintptr_t)mmio;
@@ -1325,6 +1454,8 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 
     if (xhci_map_regs(mmio))
         return -1;
+
+    claimed_ports_clear();
 
     dot(2, C_YL);
 
@@ -1348,13 +1479,16 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     if (init_dcbaa_and_scratch())
         return -1;
 
-    /* enable 1 slot + run */
+    /* enable enough slots for boot media + one HID device, then run */
     {
         uint32_t max_slots = G.R.cap->HCSPARAMS1 & 0xFFu;
+        uint32_t cfg_slots;
         if (!max_slots)
             return -1;
 
-        G.R.op->CONFIG = (G.R.op->CONFIG & ~0xFFu) | 1u;
+        cfg_slots = (max_slots >= 2u) ? 2u : 1u;
+
+        G.R.op->CONFIG = (G.R.op->CONFIG & ~0xFFu) | cfg_slots;
         mmio_wmb();
 
         /* Run controller (your existing helper) */
@@ -1549,6 +1683,102 @@ static int reset_first_connected_port(int *port_id_out)
     }
 
     dot(10, C_ER); /* fail */
+    return -1;
+}
+
+static int reset_specific_connected_port(int port_id)
+{
+    enum
+    {
+        HID_RESET_MAX_TRIES = 4,
+        HID_RESET_PR_TIMEOUT_MS = 120,
+        HID_RESET_READY_TIMEOUT_MS = 180,
+        HID_RESET_RETRY_DELAY_MS = 10
+    };
+
+    if (port_id <= 0 || port_id > (int)G.n_ports)
+        return -1;
+
+    for (int tries = 0; tries < HID_RESET_MAX_TRIES; ++tries)
+    {
+        int attempt = tries + 1;
+        volatile uint32_t *PORTSC = &G.R.ports[port_id - 1].PORTSC;
+        uint32_t v = *PORTSC;
+
+        xhci_dbg_portsc_line("hid reset: start", port_id, attempt, v);
+
+        if (!(v & PORTSC_PP))
+        {
+            *PORTSC = v | PORTSC_PP;
+            mmio_wmb();
+            mdelay(20);
+            v = *PORTSC;
+            xhci_dbg_portsc_line("hid reset: after-pp", port_id, attempt, v);
+        }
+
+        {
+            uint32_t chg = (PORTSC_CSC | PORTSC_PEC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC);
+            if (v & chg)
+            {
+                *PORTSC = v | chg;
+                mmio_wmb();
+                (void)*PORTSC;
+                v = *PORTSC;
+                xhci_dbg_portsc_line("hid reset: after-rw1c", port_id, attempt, v);
+            }
+        }
+
+        if (!(v & PORTSC_CCS))
+        {
+            xhci_dbg_portsc_line("hid reset: no-ccs", port_id, attempt, v);
+            mdelay(HID_RESET_RETRY_DELAY_MS);
+            continue;
+        }
+
+        *PORTSC = v | PORTSC_PR;
+        mmio_wmb();
+        xhci_dbg_portsc_line("hid reset: pr-set", port_id, attempt, *PORTSC);
+
+        for (int i = 0; i < HID_RESET_PR_TIMEOUT_MS; ++i)
+        {
+            uint32_t s = *PORTSC;
+            if (!(s & PORTSC_PR))
+            {
+                uint32_t pls = (s & PORTSC_PLS_MASK) >> 5;
+
+                xhci_dbg_portsc_line("hid reset: pr-clear", port_id, attempt, s);
+
+                /*
+                 * Some ports briefly report the exact ready state we want
+                 * immediately after reset clears, then fall back out while
+                 * the slower wait loop keeps polling. Accept that state
+                 * directly here so HID can continue to enumeration.
+                 */
+                if ((s & PORTSC_CCS) && (s & PORTSC_PED) && (pls == 0))
+                {
+                    xhci_dbg_portsc_line("hid reset: ok", port_id, attempt, s);
+                    return 0;
+                }
+
+                if (wait_port_u0_enabled((uint32_t)(port_id - 1), HID_RESET_READY_TIMEOUT_MS) == 0)
+                {
+                    xhci_dbg_portsc_line("hid reset: ok", port_id, attempt, *PORTSC);
+                    return 0;
+                }
+
+                xhci_dbg_portsc_line("hid reset: not-ready", port_id, attempt, *PORTSC);
+                break;
+            }
+            mdelay(1);
+        }
+
+        if ((*PORTSC & PORTSC_PR) != 0)
+            xhci_dbg_portsc_line("hid reset: pr-timeout", port_id, attempt, *PORTSC);
+
+        mdelay(HID_RESET_RETRY_DELAY_MS);
+    }
+
+    xhci_dbg("hid reset: failed all tries");
     return -1;
 }
 
@@ -1780,6 +2010,36 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
     return 0;
 }
 
+static void copy_bytes(void *dst, const void *src, uint32_t n)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+
+    if (!d || !s)
+        return;
+
+    for (uint32_t i = 0; i < n; ++i)
+        d[i] = s[i];
+}
+
+int usbh_control_xfer(usbh_dev_t *d,
+                      uint8_t bmRequestType, uint8_t bRequest,
+                      uint16_t wValue, uint16_t wIndex,
+                      void *data, uint16_t wLength)
+{
+    int rc;
+
+    if (!d || !d->configured)
+        return -1;
+
+    if (dev_state_load(d) != 0)
+        return -1;
+
+    rc = control_xfer(bmRequestType, bRequest, wValue, wIndex, data, wLength);
+    dev_state_save(d);
+    return rc;
+}
+
 /* ===== parse MSC IF (accept 0x50 or 0x62), configure bulk → dot #14 ===== */
 typedef struct
 {
@@ -1793,17 +2053,320 @@ typedef struct
     uint8_t if_num;
     uint8_t ep_in_num;
     uint16_t mps_in;
+    uint8_t interval;
+    uint8_t subclass;
     uint8_t protocol; // 1=boot keyboard, 2=boot mouse
+    uint16_t report_desc_len;
+    uint8_t mouse_valid;
+    uint8_t mouse_has_report_id;
+    uint8_t mouse_report_id;
+    uint8_t mouse_buttons;
+    uint16_t mouse_btn_bits;
+    uint16_t mouse_x_bits;
+    uint16_t mouse_y_bits;
+    uint16_t mouse_wheel_bits;
+    uint8_t mouse_btn_size;
+    uint8_t mouse_x_size;
+    uint8_t mouse_y_size;
+    uint8_t mouse_wheel_size;
 } hid_eps_t;
 
-static int parse_config_for_hid_boot(const uint8_t *cfg, uint16_t len, uint8_t want_protocol, hid_eps_t *out)
+typedef struct
 {
-    out->if_num = 0;
-    out->ep_in_num = 0;
-    out->mps_in = 8;
-    out->protocol = 0;
+    uint8_t usage_page;
+    uint32_t report_size;
+    uint32_t report_count;
+    uint8_t report_id;
+    uint8_t has_report_id;
+} hid_globals_t;
 
-    uint16_t off = 0;
+static uint32_t hid_item_u32(const uint8_t *p, uint8_t nbytes)
+{
+    uint32_t v = 0;
+
+    if (!p)
+        return 0;
+
+    if (nbytes > 0)
+        v |= (uint32_t)p[0];
+    if (nbytes > 1)
+        v |= (uint32_t)p[1] << 8;
+    if (nbytes > 2)
+        v |= (uint32_t)p[2] << 16;
+    if (nbytes > 3)
+        v |= (uint32_t)p[3] << 24;
+
+    return v;
+}
+
+static uint32_t hid_usage_for_index(const uint32_t *usages, uint8_t usage_count,
+                                    uint8_t have_usage_range, uint32_t usage_min, uint32_t usage_max,
+                                    uint32_t index)
+{
+    if (index < usage_count)
+        return usages[index];
+
+    if (have_usage_range)
+    {
+        uint32_t range_count = 0;
+        if (usage_max >= usage_min)
+            range_count = usage_max - usage_min + 1u;
+
+        if (index < range_count)
+            return usage_min + index;
+    }
+
+    return 0;
+}
+
+static void hid_capture_mouse_input(hid_eps_t *out, const hid_globals_t *g,
+                                    const uint32_t *usages, uint8_t usage_count,
+                                    uint8_t have_usage_range, uint32_t usage_min, uint32_t usage_max,
+                                    uint16_t bit_base)
+{
+    uint8_t report_id = 0;
+    uint8_t buttons = 0;
+
+    if (!out || !g || g->report_size == 0 || g->report_count == 0)
+        return;
+
+    report_id = g->has_report_id ? g->report_id : 0;
+    if (out->mouse_valid || out->mouse_buttons || out->mouse_x_size || out->mouse_y_size || out->mouse_wheel_size)
+    {
+        uint8_t out_report_id = out->mouse_has_report_id ? out->mouse_report_id : 0;
+        if (out_report_id != report_id)
+            return;
+    }
+    else
+    {
+        out->mouse_has_report_id = g->has_report_id;
+        out->mouse_report_id = report_id;
+    }
+
+    if (g->usage_page == 0x09u && out->mouse_buttons == 0)
+    {
+        if (have_usage_range && usage_max >= usage_min && usage_min <= 8u)
+        {
+            uint32_t count = usage_max - usage_min + 1u;
+            if (count > g->report_count)
+                count = g->report_count;
+            if (count > 8u)
+                count = 8u;
+            buttons = (uint8_t)count;
+        }
+        else if (usage_count > 0)
+        {
+            buttons = usage_count;
+            if (buttons > g->report_count)
+                buttons = (uint8_t)g->report_count;
+            if (buttons > 8u)
+                buttons = 8u;
+        }
+
+        if (buttons > 0)
+        {
+            out->mouse_buttons = buttons;
+            out->mouse_btn_bits = bit_base;
+            out->mouse_btn_size = (uint8_t)g->report_size;
+        }
+    }
+
+    if (g->usage_page == 0x01u)
+    {
+        for (uint32_t i = 0; i < g->report_count; ++i)
+        {
+            uint32_t usage = hid_usage_for_index(usages, usage_count, have_usage_range, usage_min, usage_max, i);
+            uint16_t bit_off = (uint16_t)(bit_base + (uint16_t)(i * g->report_size));
+
+            if (usage == 0x30u && out->mouse_x_size == 0)
+            {
+                out->mouse_x_bits = bit_off;
+                out->mouse_x_size = (uint8_t)g->report_size;
+            }
+            else if (usage == 0x31u && out->mouse_y_size == 0)
+            {
+                out->mouse_y_bits = bit_off;
+                out->mouse_y_size = (uint8_t)g->report_size;
+            }
+            else if (usage == 0x38u && out->mouse_wheel_size == 0)
+            {
+                out->mouse_wheel_bits = bit_off;
+                out->mouse_wheel_size = (uint8_t)g->report_size;
+            }
+        }
+    }
+
+    if (out->mouse_buttons > 0 && out->mouse_x_size > 0 && out->mouse_y_size > 0)
+        out->mouse_valid = 1;
+}
+
+static int hid_parse_mouse_report_desc(const uint8_t *desc, uint16_t len, hid_eps_t *out)
+{
+    hid_globals_t g;
+    hid_globals_t g_stack[4];
+    uint16_t bit_cursor[256];
+    uint32_t usages[16];
+    uint8_t usage_count = 0;
+    uint8_t have_usage_range = 0;
+    uint32_t usage_min = 0;
+    uint32_t usage_max = 0;
+    uint8_t collection_mouse[16];
+    uint8_t collection_depth = 0;
+    uint8_t stack_depth = 0;
+    uint16_t i = 0;
+
+    if (!desc || !out)
+        return -1;
+
+    g.usage_page = 0;
+    g.report_size = 0;
+    g.report_count = 0;
+    g.report_id = 0;
+    g.has_report_id = 0;
+
+    for (uint32_t k = 0; k < 256u; ++k)
+        bit_cursor[k] = 0;
+    for (uint32_t k = 0; k < 16u; ++k)
+        collection_mouse[k] = 0;
+
+    out->mouse_valid = 0;
+    out->mouse_has_report_id = 0;
+    out->mouse_report_id = 0;
+    out->mouse_buttons = 0;
+    out->mouse_btn_bits = 0;
+    out->mouse_x_bits = 0;
+    out->mouse_y_bits = 0;
+    out->mouse_wheel_bits = 0;
+    out->mouse_btn_size = 0;
+    out->mouse_x_size = 0;
+    out->mouse_y_size = 0;
+    out->mouse_wheel_size = 0;
+
+    while (i < len)
+    {
+        uint8_t b = desc[i++];
+        uint8_t size_code;
+        uint8_t size;
+        uint8_t type;
+        uint8_t tag;
+        uint32_t val;
+        uint8_t current_mouse = (collection_depth > 0) ? collection_mouse[collection_depth - 1] : 0;
+
+        if (b == 0xFEu)
+        {
+            uint8_t long_size;
+            if (i + 1 >= len)
+                break;
+            long_size = desc[i];
+            i += 2;
+            if (i + long_size > len)
+                break;
+            i += long_size;
+            continue;
+        }
+
+        size_code = b & 0x03u;
+        size = (size_code == 3u) ? 4u : size_code;
+        type = (b >> 2) & 0x03u;
+        tag = (b >> 4) & 0x0Fu;
+
+        if ((uint32_t)i + size > len)
+            break;
+
+        val = hid_item_u32(&desc[i], size);
+
+        if (type == 0u)
+        {
+            if (tag == 8u)
+            {
+                if (current_mouse && (val & 0x01u) == 0)
+                    hid_capture_mouse_input(out, &g, usages, usage_count, have_usage_range, usage_min, usage_max, bit_cursor[g.report_id]);
+
+                bit_cursor[g.report_id] = (uint16_t)(bit_cursor[g.report_id] + (uint16_t)(g.report_size * g.report_count));
+            }
+            else if (tag == 10u)
+            {
+                uint32_t usage = 0;
+                uint8_t parent_mouse = current_mouse;
+                uint8_t is_mouse = parent_mouse;
+
+                if (usage_count > 0)
+                    usage = usages[usage_count - 1];
+                else if (have_usage_range)
+                    usage = usage_min;
+
+                if ((val & 0xFFu) == 1u && g.usage_page == 0x01u && usage == 0x02u)
+                    is_mouse = 1;
+
+                if (collection_depth < 16u)
+                    collection_mouse[collection_depth++] = is_mouse;
+            }
+            else if (tag == 12u)
+            {
+                if (collection_depth > 0)
+                    collection_depth--;
+            }
+
+            usage_count = 0;
+            have_usage_range = 0;
+        }
+        else if (type == 1u)
+        {
+            if (tag == 0u)
+                g.usage_page = (uint8_t)val;
+            else if (tag == 7u)
+                g.report_size = val;
+            else if (tag == 8u)
+            {
+                g.report_id = (uint8_t)val;
+                g.has_report_id = 1;
+            }
+            else if (tag == 9u)
+                g.report_count = val;
+            else if (tag == 10u)
+            {
+                if (stack_depth < 4u)
+                    g_stack[stack_depth++] = g;
+            }
+            else if (tag == 11u)
+            {
+                if (stack_depth > 0)
+                    g = g_stack[--stack_depth];
+            }
+        }
+        else if (type == 2u)
+        {
+            if (tag == 0u)
+            {
+                if (usage_count < 16u)
+                    usages[usage_count++] = val;
+            }
+            else if (tag == 1u)
+            {
+                usage_min = val;
+                have_usage_range = 1;
+            }
+            else if (tag == 2u)
+            {
+                usage_max = val;
+                have_usage_range = 1;
+            }
+        }
+
+        i = (uint16_t)(i + size);
+    }
+
+    return out->mouse_valid ? 0 : -1;
+}
+
+static int find_next_hid_interface(const uint8_t *cfg, uint16_t len, uint16_t *scan_off, hid_eps_t *out)
+{
+    uint16_t off;
+
+    if (!cfg || !scan_off || !out)
+        return -1;
+
+    off = *scan_off;
 
     while (off + 2 <= len)
     {
@@ -1813,60 +2376,135 @@ static int parse_config_for_hid_boot(const uint8_t *cfg, uint16_t len, uint8_t w
         if (!L || off + L > len)
             break;
 
-        if (T == DESC_INTERFACE && L >= 9)
+        if (T == DESC_INTERFACE && L >= 9 && cfg[off + 5] == 0x03u)
         {
-            uint8_t ifnum = cfg[off + 2];
-            uint8_t cls = cfg[off + 5];
-            uint8_t sub = cfg[off + 6];
-            uint8_t proto = cfg[off + 7];
+            uint16_t o = (uint16_t)(off + L);
 
-            if (cls == 0x03) // any HID interface
+            memset(out, 0, sizeof(*out));
+            out->if_num = cfg[off + 2];
+            out->mps_in = 8;
+            out->subclass = cfg[off + 6];
+            out->protocol = cfg[off + 7];
+
+            while (o + 2 <= len)
             {
-                uint16_t o = off + L;
+                uint8_t L2 = cfg[o];
+                uint8_t T2 = cfg[o + 1];
 
-                while (o + 2 <= len)
+                if (!L2 || o + L2 > len)
+                    break;
+
+                if (T2 == DESC_HID && L2 >= 9 && cfg[o + 6] == DESC_REPORT)
                 {
-                    uint8_t L2 = cfg[o];
-                    uint8_t T2 = cfg[o + 1];
+                    out->report_desc_len = (uint16_t)cfg[o + 7] | ((uint16_t)cfg[o + 8] << 8);
+                }
+                else if (T2 == DESC_ENDPOINT && L2 >= 7)
+                {
+                    uint8_t addr = cfg[o + 2];
+                    uint8_t attr = cfg[o + 3] & 0x3u;
+                    uint16_t mps = (uint16_t)cfg[o + 4] | ((uint16_t)cfg[o + 5] << 8);
 
-                    if (!L2 || o + L2 > len)
-                        break;
-
-                    if (T2 == DESC_ENDPOINT && L2 >= 7)
+                    if (attr == 3u && (addr & 0x80u) && out->ep_in_num == 0)
                     {
-                        uint8_t addr = cfg[o + 2];
-                        uint8_t attr = cfg[o + 3] & 0x3;
-                        uint16_t mps = (uint16_t)cfg[o + 4] | ((uint16_t)cfg[o + 5] << 8);
-
-                        if (attr == 3 && (addr & 0x80))
-                        {
-                            out->if_num = ifnum;
-                            out->ep_in_num = addr & 0x0F;
-                            out->mps_in = mps;
-                            out->protocol = proto;
-
-                            return 0;
-                        }
+                        out->ep_in_num = addr & 0x0Fu;
+                        out->mps_in = mps;
+                        out->interval = cfg[o + 6];
                     }
-                    else if (T2 == DESC_INTERFACE)
+                }
+                else if (T2 == DESC_INTERFACE)
+                {
+                    break;
+                }
+
+                o = (uint16_t)(o + L2);
+            }
+
+            *scan_off = o;
+            if (out->ep_in_num != 0)
+                return 0;
+
+            off = o;
+            continue;
+        }
+
+        off = (uint16_t)(off + L);
+    }
+
+    *scan_off = off;
+    return -1;
+}
+
+static void hid_copy_mouse_format_to_dev(usbh_dev_t *D, const hid_eps_t *ep)
+{
+    if (!D || !ep)
+        return;
+
+    D->hid_has_report_id = ep->mouse_has_report_id;
+    D->hid_report_id = ep->mouse_report_id;
+    D->hid_mouse_valid = ep->mouse_valid;
+    D->hid_mouse_buttons = ep->mouse_buttons;
+    D->hid_mouse_btn_bits = ep->mouse_btn_bits;
+    D->hid_mouse_x_bits = ep->mouse_x_bits;
+    D->hid_mouse_y_bits = ep->mouse_y_bits;
+    D->hid_mouse_wheel_bits = ep->mouse_wheel_bits;
+    D->hid_mouse_btn_size = ep->mouse_btn_size;
+    D->hid_mouse_x_size = ep->mouse_x_size;
+    D->hid_mouse_y_size = ep->mouse_y_size;
+    D->hid_mouse_wheel_size = ep->mouse_wheel_size;
+}
+
+static int parse_config_for_hid_boot(const uint8_t *cfg, uint16_t len, uint8_t want_protocol, hid_eps_t *out)
+{
+    uint16_t scan_off = 0;
+    hid_eps_t best_boot;
+
+    memset(&best_boot, 0, sizeof(best_boot));
+    memset(out, 0, sizeof(*out));
+    best_boot.mps_in = 8;
+    out->mps_in = 8;
+
+    while (find_next_hid_interface(cfg, len, &scan_off, out) == 0)
+    {
+        if (out->subclass == 1u &&
+            ((want_protocol == 1u && out->protocol == 1u) ||
+             (want_protocol == 2u && out->protocol == 2u) ||
+             (want_protocol == 0u && (out->protocol == 1u || out->protocol == 2u))))
+        {
+            if (best_boot.ep_in_num == 0)
+                best_boot = *out;
+        }
+
+        if (want_protocol != 1u && out->report_desc_len > 0 && out->report_desc_len <= 1024u)
+        {
+            uint8_t *report_desc = (uint8_t *)alloc_dma(out->report_desc_len);
+            if (report_desc)
+            {
+                for (uint32_t i = 0; i < out->report_desc_len; ++i)
+                    report_desc[i] = 0;
+
+                xhci_dbg("hid enum: get report desc");
+                if (control_xfer(0x81, 6, (DESC_REPORT << 8) | 0, out->if_num, report_desc, out->report_desc_len) == 0)
+                {
+                    xhci_dbg("hid enum: parse report desc");
+                    if (hid_parse_mouse_report_desc(report_desc, out->report_desc_len, out) == 0)
                     {
-                        break;
+                        xhci_dbg("hid enum: mouse report ok");
+                        out->protocol = 2u;
+                        return 0;
                     }
-
-                    o += L2;
                 }
             }
         }
+    }
 
-        off += L;
+    if (best_boot.ep_in_num != 0)
+    {
+        *out = best_boot;
+        return 0;
     }
 
     return -1;
 }
-
-// This build enumerates a single MSC device; remember its interface number so
-// BOT reset recovery uses the correct wIndex.
-static uint8_t g_msc_ifnum = 0;
 
 static int parse_config_for_msc(const uint8_t *cfg, uint16_t len, msc_eps_t *out)
 {
@@ -2052,16 +2690,82 @@ static int configure_bulk_endpoints(uint8_t ep_in, uint16_t mps_in, uint8_t ep_o
     return (cc == 1) ? 0 : -1;
 }
 
-static int configure_interrupt_in_endpoint(uint8_t ep_in, uint16_t mps_in)
+static uint8_t xhci_intr_interval_from_binterval(uint8_t b_interval, uint32_t port_speed)
+{
+    uint8_t interval = b_interval;
+
+    if (interval == 0)
+        interval = 1;
+
+    if (port_speed >= 3u)
+        return (uint8_t)(interval - 1u);
+
+    {
+        uint8_t v = 0;
+        uint8_t frames = interval;
+        uint8_t log2_ceil = 0;
+
+        while (v < frames)
+        {
+            v = (v == 0) ? 1u : (uint8_t)(v << 1);
+            if (v < frames)
+                ++log2_ceil;
+        }
+
+        return (uint8_t)(3u + log2_ceil);
+    }
+}
+
+static uint8_t hid_intr_poll_timeout_ms(uint8_t b_interval, uint32_t port_speed)
+{
+    uint32_t ms = 0;
+    uint8_t interval = b_interval;
+
+    if (interval == 0)
+        interval = 1;
+
+    if (port_speed >= 3u)
+    {
+        uint32_t shift = (interval > 16u) ? 15u : (uint32_t)(interval - 1u);
+        uint32_t microframes = 1u << shift;
+        ms = (microframes + 7u) >> 3;
+        if (ms == 0)
+            ms = 1u;
+    }
+    else
+    {
+        ms = interval;
+    }
+
+    if (ms < 2u)
+        ms = 2u;
+    if (ms > 16u)
+        ms = 16u;
+
+    return (uint8_t)ms;
+}
+
+static int configure_interrupt_in_endpoint(uint8_t ep_in, uint16_t mps_in, uint8_t b_interval)
 {
     uint8_t *in = (uint8_t *)(uintptr_t)G.input_ctx;
     uint8_t *dev = (uint8_t *)(uintptr_t)G.dev_ctx;
+    uint32_t portsc = 0;
+    uint32_t port_speed = 0;
+    uint32_t avg_trb = 0;
+    uint32_t max_esit = 0;
+    uint8_t xhci_interval = 0;
     if (!in || !dev)
         return -1;
 
     uint8_t dci_in = dci_from_ep(ep_in, 1);
     if (!dci_in)
         return -1;
+
+    portsc = G.R.ports[G.port_id - 1].PORTSC;
+    port_speed = (portsc >> PORTSC_SPEED_SHIFT) & 0xFu;
+    xhci_interval = xhci_intr_interval_from_binterval(b_interval, port_speed);
+    avg_trb = mps_in ? mps_in : 8u;
+    max_esit = mps_in ? mps_in : 8u;
 
     uint8_t ce = dci_in;
 
@@ -2099,10 +2803,11 @@ static int configure_interrupt_in_endpoint(uint8_t ep_in, uint16_t mps_in)
         uint64_t dq = ((uint64_t)G.intr_in_tr) | 1u; // DCS=1
 
         // EP Type = 7 (Interrupt IN)
+        ep[0] = ((uint32_t)xhci_interval & 0xFFu) << 16;
         ep[1] = (3u << 1) | (7u << 3) | ((uint32_t)mps_in << 16);
         ep[2] = (uint32_t)dq;
         ep[3] = (uint32_t)(dq >> 32);
-        ep[4] = 0x1000u;
+        ep[4] = (avg_trb & 0xFFFFu) | ((max_esit & 0xFFFFu) << 16);
     }
 
 #undef EP_CTX_PTR
@@ -2129,7 +2834,13 @@ static int configure_interrupt_in_endpoint(uint8_t ep_in, uint16_t mps_in)
     {
         uint32_t cc = (evt.d2 >> 24) & 0xFF;
         if (cc != 1) // Success
+        {
+            terminal_print_inline("hid intr cfg cc=");
+            terminal_print_inline_hex32(cc);
+            terminal_print("");
+            kgfx_render_all(black);
             return -1;
+        }
     }
 
     return 0;
@@ -2194,18 +2905,11 @@ static int address_device_bsr1(void)
     return do_address_device(1);
 }
 
-static int enumerate_first_hid_boot(usbh_dev_t *D, uint8_t want_protocol)
+static int enumerate_hid_boot_on_port(usbh_dev_t *D, uint8_t want_protocol, int port_id)
 {
-    xhci_dbg("hid enum: start");
-
-    if (!D)
-    {
-        xhci_dbg("hid enum: null dev");
-        return -1;
-    }
-
-    xhci_dbg("hid enum: reset_first_connected_port");
-    if (reset_first_connected_port(&G.port_id))
+    xhci_dbg("hid enum: reset candidate port");
+    G.port_id = port_id;
+    if (reset_specific_connected_port(G.port_id))
     {
         xhci_dbg("hid enum: reset port failed");
         return -1;
@@ -2320,11 +3024,14 @@ static int enumerate_first_hid_boot(usbh_dev_t *D, uint8_t want_protocol)
         return -1;
     }
 
-    xhci_dbg("hid enum: set boot protocol");
-    if (control_xfer(0x21, 0x0B, 0, ep.if_num, 0, 0))
+    if (ep.protocol == 1u && ep.mouse_valid == 0)
     {
-        xhci_dbg("hid enum: set boot protocol failed");
-        return -1;
+        xhci_dbg("hid enum: set boot protocol");
+        if (control_xfer(0x21, 0x0B, 0, ep.if_num, 0, 0))
+        {
+            xhci_dbg("hid enum: set boot protocol failed");
+            return -1;
+        }
     }
 
     xhci_dbg("hid enum: set idle");
@@ -2335,7 +3042,7 @@ static int enumerate_first_hid_boot(usbh_dev_t *D, uint8_t want_protocol)
     }
 
     xhci_dbg("hid enum: configure intr in ep");
-    if (configure_interrupt_in_endpoint(ep.ep_in_num, ep.mps_in))
+    if (configure_interrupt_in_endpoint(ep.ep_in_num, ep.mps_in, ep.interval))
     {
         xhci_dbg("hid enum: configure intr ep failed");
         return -1;
@@ -2343,20 +3050,87 @@ static int enumerate_first_hid_boot(usbh_dev_t *D, uint8_t want_protocol)
 
     D->configured = 1;
     D->addr = (uint8_t)G.slot_id;
+    D->slot_id = (uint8_t)G.slot_id;
+    D->port_id = (uint8_t)G.port_id;
     D->ep_intr_in = ep.ep_in_num;
     D->mps_intr_in = ep.mps_in;
     D->hid_if_num = ep.if_num;
     D->hid_protocol = ep.protocol;
-    D->hc = &G;
-    D->devctx = (void *)(uintptr_t)G.dev_ctx;
+    D->hid_poll_ms = hid_intr_poll_timeout_ms(ep.interval,
+                                              (G.R.ports[G.port_id - 1].PORTSC >> PORTSC_SPEED_SHIFT) & 0xFu);
+    hid_copy_mouse_format_to_dev(D, &ep);
+    dev_state_save(D);
+    port_claim((uint8_t)G.port_id);
 
     xhci_dbg("hid enum: success");
     return 0;
 }
 
+static int enumerate_first_hid_boot(usbh_dev_t *D, uint8_t want_protocol)
+{
+    xhci_dbg("hid enum: start");
+
+    if (!D)
+    {
+        xhci_dbg("hid enum: null dev");
+        return -1;
+    }
+
+    D->configured = 0;
+    D->slot_id = 0;
+    D->port_id = 0;
+    D->ep_intr_in = 0;
+    D->mps_intr_in = 0;
+    D->hid_if_num = 0;
+    D->hid_protocol = 0;
+    D->hid_poll_ms = 0;
+    D->hid_has_report_id = 0;
+    D->hid_report_id = 0;
+    D->hid_mouse_valid = 0;
+    D->hid_mouse_buttons = 0;
+    D->hid_mouse_btn_bits = 0;
+    D->hid_mouse_x_bits = 0;
+    D->hid_mouse_y_bits = 0;
+    D->hid_mouse_wheel_bits = 0;
+    D->hid_mouse_btn_size = 0;
+    D->hid_mouse_x_size = 0;
+    D->hid_mouse_y_size = 0;
+    D->hid_mouse_wheel_size = 0;
+    D->devctx = 0;
+    D->input_ctx = 0;
+    D->ctrl_tr = 0;
+    D->bulk_in_tr = 0;
+    D->bulk_out_tr = 0;
+    D->intr_in_tr = 0;
+    D->intr_buf = 0;
+    D->intr_buf_len = 0;
+    D->intr_pending_trbptr = 0;
+    D->intr_pending_active = 0;
+
+    for (int port_id = 1; port_id <= (int)G.n_ports; ++port_id)
+    {
+        if (port_is_claimed((uint8_t)port_id))
+            continue;
+
+        if (!(G.R.ports[port_id - 1].PORTSC & PORTSC_CCS))
+            continue;
+
+        if (enumerate_hid_boot_on_port(D, want_protocol, port_id) == 0)
+            return 0;
+    }
+
+    xhci_dbg("hid enum: no matching HID boot device");
+    return -1;
+}
+
 int usbh_enumerate_first_hid_keyboard(usbh_dev_t *D)
 {
     return enumerate_first_hid_boot(D, 1);
+}
+
+int usbh_enumerate_first_hid(usbh_dev_t *D)
+{
+    return enumerate_first_hid_boot(D, 0);
 }
 
 int usbh_enumerate_first_hid_mouse(usbh_dev_t *D)
@@ -2365,14 +3139,18 @@ int usbh_enumerate_first_hid_mouse(usbh_dev_t *D)
 }
 
 /* ===== public enumeration (drives the dots) ===== */
-int usbh_enumerate_first_msc(usbh_dev_t *D)
+static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
 {
-    dot(80, 0x00FF00u); /* entered usbh_------------enumerate_first_msc */
-
-    if (!D)
-        return -1;
-
-    if (reset_first_connected_port(&G.port_id))
+    if (port_id > 0)
+    {
+        G.port_id = port_id;
+        if (reset_specific_connected_port(G.port_id))
+        {
+            dot(86, 0xFF0000u); /* failed before port reset success */
+            return -1;
+        }
+    }
+    else if (reset_first_connected_port(&G.port_id))
     {
         dot(86, 0xFF0000u); /* failed before port reset success */
         return -1;
@@ -2486,9 +3264,6 @@ int usbh_enumerate_first_msc(usbh_dev_t *D)
         return -1;
     dot(114, 0x00FF00u); /* parse_config_for_msc ok */
 
-    // Remember MSC interface number for BOT reset recovery.
-    g_msc_ifnum = ep.if_num;
-
     dot(115, 0xFFFF00u); /* configure_bulk_endpoints */
     if (configure_bulk_endpoints(ep.ep_in_num, ep.mps_in, ep.ep_out_num, ep.mps_out))
         return -1;
@@ -2498,12 +3273,55 @@ int usbh_enumerate_first_msc(usbh_dev_t *D)
 
     D->configured = 1;
     D->addr = (uint8_t)G.slot_id;
+    D->slot_id = (uint8_t)G.slot_id;
+    D->port_id = (uint8_t)G.port_id;
+    D->msc_if_num = ep.if_num;
     D->ep_bulk_in = ep.ep_in_num;
     D->ep_bulk_out = ep.ep_out_num;
     D->mps_bulk_in = ep.mps_in;
     D->mps_bulk_out = ep.mps_out;
+    dev_state_save(D);
+    port_claim((uint8_t)G.port_id);
 
     return 0;
+}
+
+int usbh_enumerate_first_msc(usbh_dev_t *D)
+{
+    dot(80, 0x00FF00u); /* entered usbh_------------enumerate_first_msc */
+
+    if (!D)
+        return -1;
+
+    D->configured = 0;
+    D->addr = 0;
+    D->slot_id = 0;
+    D->port_id = 0;
+    D->msc_if_num = 0;
+    D->ep_bulk_in = 0;
+    D->ep_bulk_out = 0;
+    D->mps_bulk_in = 0;
+    D->mps_bulk_out = 0;
+    D->devctx = 0;
+    D->input_ctx = 0;
+    D->ctrl_tr = 0;
+    D->bulk_in_tr = 0;
+    D->bulk_out_tr = 0;
+    D->intr_in_tr = 0;
+    D->intr_buf = 0;
+    D->intr_buf_len = 0;
+    D->intr_pending_trbptr = 0;
+    D->intr_pending_active = 0;
+    D->ctrl_enq = 0;
+    D->bin_enq = 0;
+    D->bout_enq = 0;
+    D->iin_enq = 0;
+    D->ctrl_cycle = 0;
+    D->bin_cycle = 0;
+    D->bout_cycle = 0;
+    D->iin_cycle = 0;
+
+    return enumerate_msc_on_port(D, 0);
 }
 
 /* ===== bulk helpers (used by MSC) ===== */
@@ -2541,12 +3359,20 @@ static trb_t *post_normal_trb(uint64_t ring_pa,
 
 int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *got)
 {
+    int rc = -1;
+
     usbh_dbg_dot(160, 0x00FF00u); // bulk_out_got entered
 
     if (got)
         *got = 0;
 
     if (!d || !d->configured || !buf || len == 0)
+    {
+        usbh_dbg_dot(169, 0xFF0000u);
+        return -1;
+    }
+
+    if (dev_state_load(d) != 0)
     {
         usbh_dbg_dot(169, 0xFF0000u);
         return -1;
@@ -2576,7 +3402,7 @@ int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *go
     if (r != 0)
     {
         usbh_dbg_dot(176, 0xFF0000u);
-        return -1;
+        goto out;
     }
 
     // Compute "bytes done" from remaining.
@@ -2592,11 +3418,15 @@ int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *go
     if (done != len)
     {
         usbh_dbg_dot(166, 0xFF0000u);
-        return -1;
+        goto out;
     }
 
     usbh_dbg_dot(165, 0x00FF00u);
-    return 0;
+    rc = 0;
+
+out:
+    dev_state_save(d);
+    return rc;
 }
 
 // Legacy API: strict exact-length
@@ -2612,12 +3442,20 @@ int usbh_bulk_out(usbh_dev_t *d, const void *buf, uint32_t len)
 
 int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 {
+    int rc = -1;
+
     usbh_dbg_dot(170, 0x00FF00u); // bulk_in_got entered
 
     if (got)
         *got = 0;
 
     if (!d || !d->configured || !buf || len == 0)
+    {
+        usbh_dbg_dot(179, 0xFF0000u);
+        return -1;
+    }
+
+    if (dev_state_load(d) != 0)
     {
         usbh_dbg_dot(179, 0xFF0000u);
         return -1;
@@ -2646,7 +3484,7 @@ int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
     if (r != 0)
     {
         usbh_dbg_dot(176, 0xFF0000u);
-        return -1;
+        goto out;
     }
 
     uint32_t rem = g_last_xfer_rem;
@@ -2672,7 +3510,11 @@ int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
      * Do NOT treat short packets as errors.
      */
     usbh_dbg_dot(175, 0x00FF00u);
-    return 0;
+    rc = 0;
+
+out:
+    dev_state_save(d);
+    return rc;
 }
 
 // Legacy API: strict exact-length
@@ -2684,49 +3526,107 @@ int usbh_bulk_in(usbh_dev_t *d, void *buf, uint32_t len)
 
 int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 {
+    int rc = -1;
+    uint32_t xfer_len = 0;
+    uint32_t timeout_ms = 0;
+    uint32_t done = 0;
+
     if (got)
         *got = 0;
 
     if (!d || !d->configured || !buf || len == 0 || !d->ep_intr_in)
         return -1;
 
-    dma_invalidate(buf, len);
+    if (dev_state_load(d) != 0)
+        return -1;
 
-    trb_t *t = post_normal_trb((uint64_t)G.intr_in_tr, &G.iin_enq, &G.iin_cycle, buf, len);
-    dma_flush((void *)(uintptr_t)G.intr_in_tr, 256 * sizeof(trb_t));
-
-    g_expect_trbptr = (uint64_t)(uintptr_t)t;
-    g_expect_slot = (uint8_t)G.slot_id;
-    g_expect_epid = dci_from_ep(d->ep_intr_in, 1);
-    g_expect_valid = 1;
-
-    ring_ep_db((uint8_t)G.slot_id, g_expect_epid);
-
+    if (!d->intr_buf)
     {
-        // IMPORTANT:
-        // Use a tiny timeout so input polling cannot freeze the whole kernel.
-        int r = wait_xfer_complete(1);
+        uint32_t alloc_len = d->mps_intr_in ? d->mps_intr_in : len;
+        if (alloc_len < len)
+            alloc_len = len;
+        if (alloc_len < 16u)
+            alloc_len = 16u;
+        if (alloc_len > 64u)
+            alloc_len = 64u;
+
+        d->intr_buf = alloc_dma(alloc_len);
+        if (!d->intr_buf)
+            goto out;
+
+        d->intr_buf_len = alloc_len;
+        d->intr_pending_trbptr = 0;
+        d->intr_pending_active = 0;
+    }
+
+    if (d->intr_buf_len == 0)
+        d->intr_buf_len = len ? len : 16u;
+
+    xfer_len = d->intr_buf_len;
+
+    if (!d->intr_pending_active)
+    {
+        trb_t *t;
+
+        dma_invalidate(d->intr_buf, xfer_len);
+        t = post_normal_trb((uint64_t)G.intr_in_tr, &G.iin_enq, &G.iin_cycle, d->intr_buf, xfer_len);
+        dma_flush((void *)(uintptr_t)G.intr_in_tr, 256 * sizeof(trb_t));
+
+        d->intr_pending_trbptr = (uint64_t)(uintptr_t)t;
+        d->intr_pending_active = 1;
+
+        g_expect_trbptr = d->intr_pending_trbptr;
+        g_expect_slot = (uint8_t)G.slot_id;
+        g_expect_epid = dci_from_ep(d->ep_intr_in, 1);
+        g_expect_valid = 1;
+
+        ring_ep_db((uint8_t)G.slot_id, g_expect_epid);
+    }
+    else
+    {
+        g_expect_trbptr = d->intr_pending_trbptr;
+        g_expect_slot = (uint8_t)G.slot_id;
+        g_expect_epid = dci_from_ep(d->ep_intr_in, 1);
+        g_expect_valid = 1;
+    }
+
+    timeout_ms = d->hid_poll_ms ? d->hid_poll_ms : 2u;
+    {
+        int r = wait_xfer_complete(timeout_ms);
         g_expect_valid = 0;
 
         if (r != 0)
         {
             // Treat as "no packet right now" rather than fatal.
-            return 1;
+            rc = 1;
+            goto out;
         }
     }
 
+    d->intr_pending_active = 0;
+    d->intr_pending_trbptr = 0;
+
     {
         uint32_t rem = g_last_xfer_rem;
-        uint32_t done = (rem <= len) ? (len - rem) : len;
-
-        if (got)
-            *got = done;
-
-        if (done)
-            dma_invalidate(buf, done);
+        done = (rem <= xfer_len) ? (xfer_len - rem) : xfer_len;
     }
 
-    return 0;
+    if (done)
+    {
+        uint32_t copy_n = (done < len) ? done : len;
+
+        dma_invalidate(d->intr_buf, done);
+        copy_bytes(buf, d->intr_buf, copy_n);
+
+        if (got)
+            *got = copy_n;
+    }
+
+    rc = 0;
+
+out:
+    dev_state_save(d);
+    return rc;
 }
 
 int usbh_intr_in(usbh_dev_t *d, void *buf, uint32_t len)
@@ -2742,17 +3642,17 @@ int usbh_msc_bot_recover(usbh_dev_t *d)
     if (!d)
         return -1;
 
-    if (control_xfer(0x21, 0xFF, 0, (uint16_t)g_msc_ifnum, 0, 0) != 0)
+    if (usbh_control_xfer(d, 0x21, 0xFF, 0, (uint16_t)d->msc_if_num, 0, 0) != 0)
         return -1;
 
     // CLEAR_FEATURE(ENDPOINT_HALT) requires full endpoint address in wIndex
     uint16_t ep_in_addr = (uint16_t)(0x80u | (d->ep_bulk_in & 0x0Fu));
     uint16_t ep_out_addr = (uint16_t)(d->ep_bulk_out & 0x0Fu);
 
-    if (control_xfer(0x02, 0x01, 0, ep_in_addr, 0, 0) != 0)
+    if (usbh_control_xfer(d, 0x02, 0x01, 0, ep_in_addr, 0, 0) != 0)
         return -1;
 
-    if (control_xfer(0x02, 0x01, 0, ep_out_addr, 0, 0) != 0)
+    if (usbh_control_xfer(d, 0x02, 0x01, 0, ep_out_addr, 0, 0) != 0)
         return -1;
 
     return 0;

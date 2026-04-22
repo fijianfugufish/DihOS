@@ -1,6 +1,7 @@
 #include "kwrappers/kinput.h"
 #include "i2c/i2c1_hidi2c.h"
 #include "usb/usb_hid.h"
+#include "terminal/terminal_api.h"
 #include <stdint.h>
 
 static uint8_t g_keys_now[256];
@@ -34,6 +35,45 @@ static void set_key(uint8_t usage)
 static int16_t rd16s(const uint8_t *p)
 {
     return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t usb_hid_extract_bits(const uint8_t *data, uint32_t len, uint16_t bit_off, uint8_t bit_size)
+{
+    uint32_t v = 0;
+
+    if (!data || bit_size == 0 || bit_size > 32)
+        return 0;
+
+    for (uint32_t i = 0; i < bit_size; ++i)
+    {
+        uint32_t abs_bit = (uint32_t)bit_off + i;
+        uint32_t byte_idx = abs_bit >> 3;
+        uint32_t bit_idx = abs_bit & 7u;
+
+        if (byte_idx >= len)
+            break;
+
+        if ((data[byte_idx] >> bit_idx) & 1u)
+            v |= (1u << i);
+    }
+
+    return v;
+}
+
+static int32_t usb_hid_sign_extend(uint32_t v, uint8_t bits)
+{
+    if (bits == 0 || bits >= 32)
+        return (int32_t)v;
+
+    if (v & (1u << (bits - 1u)))
+        v |= ~((1u << bits) - 1u);
+
+    return (int32_t)v;
+}
+
+static int32_t usb_hid_extract_signed_bits(const uint8_t *data, uint32_t len, uint16_t bit_off, uint8_t bit_size)
+{
+    return usb_hid_sign_extend(usb_hid_extract_bits(data, len, bit_off, bit_size), bit_size);
 }
 
 /* -------------------- keyboard parsers -------------------- */
@@ -124,9 +164,50 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
     }
 }
 
-static void parse_usb_mouse_report(const uint8_t *data, uint32_t len)
+static void parse_usb_mouse_report(const usbh_dev_t *dev, const uint8_t *data, uint32_t len)
 {
-    if (!data || len < 3)
+    if (!data || len == 0)
+        return;
+
+    if (dev && dev->hid_mouse_valid)
+    {
+        const uint8_t *payload = data;
+        uint32_t payload_len = len;
+        uint8_t buttons = 0;
+        int32_t dx = 0;
+        int32_t dy = 0;
+        int32_t wheel = 0;
+
+        if (dev->hid_has_report_id)
+        {
+            if (payload_len == 0 || payload[0] != dev->hid_report_id)
+                return;
+
+            payload += 1;
+            payload_len -= 1;
+        }
+
+        for (uint32_t i = 0; i < dev->hid_mouse_buttons && i < 3u; ++i)
+        {
+            uint16_t bit_off = (uint16_t)(dev->hid_mouse_btn_bits + (uint16_t)(i * dev->hid_mouse_btn_size));
+            if (usb_hid_extract_bits(payload, payload_len, bit_off, dev->hid_mouse_btn_size) != 0)
+                buttons |= (uint8_t)(1u << i);
+        }
+
+        dx = usb_hid_extract_signed_bits(payload, payload_len, dev->hid_mouse_x_bits, dev->hid_mouse_x_size);
+        dy = usb_hid_extract_signed_bits(payload, payload_len, dev->hid_mouse_y_bits, dev->hid_mouse_y_size);
+
+        if (dev->hid_mouse_wheel_size)
+            wheel = usb_hid_extract_signed_bits(payload, payload_len, dev->hid_mouse_wheel_bits, dev->hid_mouse_wheel_size);
+
+        g_mouse.buttons = (g_mouse.buttons | buttons);
+        g_mouse.dx += dx;
+        g_mouse.dy += dy;
+        g_mouse.wheel += wheel;
+        return;
+    }
+
+    if (len < 3)
         return;
 
     g_mouse.buttons = (g_mouse.buttons | (data[0] & 0x07u));
@@ -169,8 +250,10 @@ void kinput_poll(void)
 {
     const hidi2c_device *kbd;
     const hidi2c_device *tpd;
-    uint8_t report[8];
+    uint8_t kbd_report[8];
+    uint8_t mouse_report[16];
     uint32_t got = 0;
+    static uint32_t dbg_usb_mouse_packets = 0;
 
     /* Snapshot last frame once, then rebuild current frame from all devices */
     keys_copy(g_keys_prev, g_keys_now);
@@ -197,12 +280,30 @@ void kinput_poll(void)
     if (g_usb_ok)
     {
         got = 0;
-        if (g_usb.has_keyboard && usb_hid_kbd_read(&g_usb, report, &got) == 0 && got >= 8)
-            merge_keyboard_boot_report(report, got);
+        if (g_usb.has_keyboard && usb_hid_kbd_read(&g_usb, kbd_report, &got) == 0 && got >= 8)
+            merge_keyboard_boot_report(kbd_report, got);
 
         got = 0;
-        if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, report, &got) == 0 && got >= 3)
-            parse_usb_mouse_report(report, got);
+        if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, mouse_report, &got) == 0 && got >= 1)
+        {
+            if (dbg_usb_mouse_packets < 16)
+            {
+                dbg_usb_mouse_packets++;
+
+                terminal_print_inline("usb mouse pkt len=");
+                terminal_print_inline_hex32(got);
+
+                for (uint32_t i = 0; i < got && i < 16u; ++i)
+                {
+                    terminal_print_inline(" ");
+                    terminal_print_inline_hex8(mouse_report[i]);
+                }
+
+                terminal_print("");
+            }
+
+            parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
+        }
     }
 }
 

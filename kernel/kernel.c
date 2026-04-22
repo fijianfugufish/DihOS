@@ -336,8 +336,18 @@ void kmain(const boot_info *bi)
         /* mouse */
         if (kinput_mouse_dx() || kinput_mouse_dy() || kinput_mouse_wheel() || kinput_mouse_buttons())
         {
-            terminal_print("mouse activity\n");
-            kinput_mouse_consume(0);
+            kinput_mouse_state m;
+            kinput_mouse_consume(&m);
+
+            terminal_print_inline("mouse raw dx=");
+            terminal_print_inline_hex32((uint32_t)m.dx);
+            terminal_print_inline(" dy=");
+            terminal_print_inline_hex32((uint32_t)m.dy);
+            terminal_print_inline(" wheel=");
+            terminal_print_inline_hex32((uint32_t)m.wheel);
+            terminal_print_inline(" buttons=");
+            terminal_print_inline_hex8(m.buttons);
+            terminal_print("");
         }
 
         kgfx_render_all(black);
