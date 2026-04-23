@@ -328,7 +328,7 @@ void kmain(const boot_info *bi)
     {
         terminal_warn("cursor not loaded");
     }
-    kmouse_set_sensitivity_pct(300);
+    kmouse_set_sensitivity_pct(500);
 
     kgfx_render_all(black);
 

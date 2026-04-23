@@ -25,7 +25,7 @@ typedef struct
 static kmouse_ctx_t G;
 
 #define KMOUSE_CURSOR_BASE_PATH "0:/OS/System/Images/Mouse/"
-#define KMOUSE_CURSOR_SCALE_PCT 200u
+#define KMOUSE_CURSOR_SCALE_PCT 150u
 
 static const char *kmouse_cursor_file_name(kmouse_cursor cursor)
 {
