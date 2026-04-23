@@ -17,6 +17,7 @@ extern "C"
     void terminal_warn(const char *s);
     void terminal_error(const char *s);
     void terminal_success(const char *s);
+    void terminal_update_input(void);
 
     void terminal_print_hex64(uint64_t v);
     void terminal_print_hex32(uint32_t v);

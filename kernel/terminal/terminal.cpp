@@ -6,6 +6,8 @@ extern "C"
 #include "kwrappers/ktext.h"
 #include "kwrappers/colors.h"
 #include "kwrappers/kfile.h"
+#include "kwrappers/kwindow.h"
+#include "kwrappers/kmouse.h"
 }
 
 static char g_log_line[16384];
@@ -186,6 +188,8 @@ void Terminal::ResetState()
     line_count = 0;
     font_ptr = 0;
     w = 0;
+    scroll_y = 0;
+    text_base_y = 0;
 
     window.idx = -1;
     text_handle.idx = -1;
@@ -204,26 +208,28 @@ void Terminal::Initialize(kfont *font)
     ResetState();
     font_ptr = font;
 
-    window = kgfx_obj_add_rect(x, y, width, height, z, dark_gray, active);
-    w = kgfx_obj_ref(window);
-    w->outline = gray;
-    w->outline_width = 2;
+    kwindow_style style = kwindow_style_default();
+    window = kwindow_create(x, y, width, height, z, font_ptr, "Terminal", &style);
 
     text_handle = kgfx_obj_add_text(
         font_ptr,
         text_storage,
-        x + padding_x,
-        y + padding_y,
-        z + 1,
+        padding_x,
+        padding_y * 2,
+        0,
         white,
         255,
         scale,
         1,
-        padding_y,
+        int(padding_y / 2),
         KTEXT_ALIGN_LEFT,
         active);
 
+    kgfx_obj_set_parent(text_handle, kwindow_root(window));
+
     text_ptr = kgfx_obj_ref(text_handle);
+    text_base_y = padding_y * 2;
+    scroll_y = 0;
 
     KFile f;
     if (kfile_open(&f, "0:/OS/System/Logs/terminal.txt",
@@ -359,3 +365,28 @@ void Terminal::ToggleQuiet()
 void Terminal::SetQuiet() { terminal_quiet = 1; }
 
 void Terminal::SetLoud() { terminal_quiet = 0; }
+
+void Terminal::UpdateInput()
+{
+    kmouse_state mouse = {0};
+    kgfx_obj *root = 0;
+
+    if (!text_ptr)
+        return;
+
+    kmouse_get_state(&mouse);
+    if (mouse.wheel == 0)
+        return;
+
+    root = kgfx_obj_ref(kwindow_root(window));
+    if (!root || root->kind != KGFX_OBJ_RECT || !root->visible)
+        return;
+
+    if (mouse.x < root->u.rect.x || mouse.y < root->u.rect.y ||
+        mouse.x >= root->u.rect.x + (int32_t)root->u.rect.w ||
+        mouse.y >= root->u.rect.y + (int32_t)root->u.rect.h)
+        return;
+
+    scroll_y += mouse.wheel * 24;
+    text_ptr->u.text.y = text_base_y + scroll_y;
+}

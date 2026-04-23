@@ -52,6 +52,11 @@ extern "C" void terminal_success(const char *s)
     g_terminal.Success(s);
 }
 
+extern "C" void terminal_update_input(void)
+{
+    g_terminal.UpdateInput();
+}
+
 extern "C" void terminal_toggle_quiet()
 {
     g_terminal.ToggleQuiet();

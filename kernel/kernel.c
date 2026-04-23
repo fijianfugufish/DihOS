@@ -42,6 +42,9 @@ void kmain(const boot_info *bi)
 
     pmem_init(bi);
 
+    kbutton_init();
+    kwindow_init();
+
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
 
     // Breadcrumb A: we reached kernel and framebuffer works
@@ -242,9 +245,6 @@ void kmain(const boot_info *bi)
     kgfx_obj_handle winB = kgfx_obj_add_circle(260, 180, 60, 2, dark_turquoise, 1);
     kwindow_handle demo_window = {-1};
 
-    kbutton_init();
-    kwindow_init();
-
     kgfx_obj_ref(taskbar)->outline_width = 2;
     kgfx_obj_ref(taskbar)->outline = black;
     kgfx_obj_ref(winA)->outline_width = 3;
@@ -342,12 +342,11 @@ void kmain(const boot_info *bi)
 
     static uint32_t dbg_tick = 0;
 
-    terminal_clear();
-
     for (;;)
     {
         kinput_poll();
         kmouse_update();
+        terminal_update_input();
         kwindow_update_all();
         kbutton_update_all();
 

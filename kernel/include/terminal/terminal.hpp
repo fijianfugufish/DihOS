@@ -4,6 +4,7 @@ extern "C"
 {
 #include "kwrappers/kgfx.h"
 #include "kwrappers/ktext.h"
+#include "kwrappers/kwindow.h"
 }
 
 class Terminal
@@ -21,6 +22,7 @@ public:
     void Warn(const char *text);
     void Error(const char *text);
     void Success(const char *text);
+    void UpdateInput();
 
     void ToggleQuiet();
     void SetQuiet();
@@ -42,12 +44,14 @@ private:
     int padding_x;
     int padding_y;
     int line_spacing;
+    int scroll_y;
+    int text_base_y;
 
     int line_count;
 
     kfont *font_ptr;
 
-    kgfx_obj_handle window;
+    kwindow_handle window;
     kgfx_obj *w;
 
     static const int TEXT_CAP = 262144;

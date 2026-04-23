@@ -152,6 +152,8 @@ typedef struct
     int32_t origin_x;
     int32_t origin_y;
     int32_t z;
+    int32_t root_z;
+    uint16_t root_idx;
     kgfx_clip_rect clip;
     uint8_t ready;
     uint8_t visiting;
@@ -551,6 +553,8 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
     r->origin_x = local_x;
     r->origin_y = local_y;
     r->z = o->z;
+    r->root_z = o->z;
+    r->root_idx = idx;
     r->clip.enabled = 1;
     r->clip.x0 = 0;
     r->clip.y0 = 0;
@@ -575,6 +579,8 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
         r->origin_x += parent->origin_x;
         r->origin_y += parent->origin_y;
         r->z += parent->z;
+        r->root_z = parent->root_z;
+        r->root_idx = parent->root_idx;
         r->clip = parent->clip;
 
         if (o->clip_to_parent && obj_world_bounds_clip(&g_objs[(uint16_t)o->parent_idx], parent->origin_x, parent->origin_y, &parent_bounds))
@@ -754,6 +760,8 @@ static uint64_t obj_visual_hash(const kgfx_obj *o, const kgfx_resolved_obj *r)
     hash_mix_i32(&h, r->origin_x);
     hash_mix_i32(&h, r->origin_y);
     hash_mix_i32(&h, r->z);
+    hash_mix_i32(&h, r->root_z);
+    hash_mix_u16(&h, r->root_idx);
     hash_mix_u8(&h, r->clip.enabled);
     hash_mix_i32(&h, r->clip.x0);
     hash_mix_i32(&h, r->clip.y0);
@@ -1499,7 +1507,41 @@ static void bb_circle_outline_outside_clip(int32_t cx, int32_t cy,
 
 /* ---------- z-sort (stable) over generic objects ---------- */
 
-static void sort_render_entries(kgfx_render_entry *entries, uint16_t n)
+static int render_entry_cmp(const kgfx_render_entry *a, const kgfx_render_entry *b,
+                            const kgfx_resolved_obj *resolved)
+{
+    const kgfx_resolved_obj *ra = &resolved[a->idx];
+    const kgfx_resolved_obj *rb = &resolved[b->idx];
+
+    if (ra->root_z < rb->root_z)
+        return -1;
+    if (ra->root_z > rb->root_z)
+        return 1;
+
+    /*
+     * Keep different parent roots isolated even when they share z.
+     * Child/local z may reorder only inside the same root subtree.
+     */
+    if (ra->root_idx < rb->root_idx)
+        return -1;
+    if (ra->root_idx > rb->root_idx)
+        return 1;
+
+    if (ra->z < rb->z)
+        return -1;
+    if (ra->z > rb->z)
+        return 1;
+
+    if (a->idx < b->idx)
+        return -1;
+    if (a->idx > b->idx)
+        return 1;
+
+    return 0;
+}
+
+static void sort_render_entries(kgfx_render_entry *entries, uint16_t n,
+                                const kgfx_resolved_obj *resolved)
 {
     if (n <= 1)
         return;
@@ -1510,7 +1552,7 @@ static void sort_render_entries(kgfx_render_entry *entries, uint16_t n)
         {
             kgfx_render_entry v = entries[i];
             uint16_t k = i;
-            while (k > 0 && entries[k - 1].z > v.z)
+            while (k > 0 && render_entry_cmp(&entries[k - 1], &v, resolved) > 0)
             {
                 entries[k] = entries[k - 1];
                 --k;
@@ -1532,7 +1574,7 @@ static void sort_render_entries(kgfx_render_entry *entries, uint16_t n)
             uint16_t a = L, b = M;
             while (a < M && b < R)
             {
-                if (entries[a].z <= entries[b].z)
+                if (render_entry_cmp(&entries[a], &entries[b], resolved) <= 0)
                     tmp[out++] = entries[a++];
                 else
                     tmp[out++] = entries[b++];
@@ -1633,7 +1675,7 @@ void kgfx_render_all(kcolor clear_color)
     }
 
     // 2) stable z-sort
-    sort_render_entries(entries, n);
+    sort_render_entries(entries, n, resolved);
 
     // 3) decide which pixels need to be refreshed
     if (!g_have_prev_frame || !color_equal(g_prev_clear_color, clear_color))

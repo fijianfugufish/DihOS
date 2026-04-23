@@ -204,6 +204,52 @@ static int kwindow_point_in_bounds(int32_t x, int32_t y, const kwindow_resolved_
     return x >= r->clip.x0 && y >= r->clip.y0 && x < r->clip.x1 && y < r->clip.y1;
 }
 
+static int kwindow_raise_to_front(int idx)
+{
+    kgfx_obj *target = 0;
+    int32_t max_z = 0;
+    int max_z_valid = 0;
+    int has_same_z_other = 0;
+
+    if (idx < 0 || idx >= KWINDOW_MAX)
+        return 0;
+    if (!G_windows[idx].used || !G_windows[idx].visible)
+        return 0;
+
+    target = kgfx_obj_ref(G_windows[idx].root);
+    if (!target || target->kind != KGFX_OBJ_RECT || !target->visible)
+        return 0;
+
+    for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
+        kgfx_obj *root = 0;
+
+        if (!G_windows[i].used || !G_windows[i].visible)
+            continue;
+
+        root = kgfx_obj_ref(G_windows[i].root);
+        if (!root || root->kind != KGFX_OBJ_RECT || !root->visible)
+            continue;
+
+        if (!max_z_valid || root->z > max_z)
+        {
+            max_z = root->z;
+            max_z_valid = 1;
+        }
+
+        if ((int)i != idx && root->z == target->z)
+            has_same_z_other = 1;
+    }
+
+    if (!max_z_valid)
+        return 0;
+
+    if (target->z < max_z || has_same_z_other)
+        target->z = max_z + 1;
+
+    return 1;
+}
+
 static void kwindow_close_click(kbutton_handle button, void *user)
 {
     kwindow_slot *slot = (kwindow_slot *)user;
@@ -387,6 +433,8 @@ void kwindow_update_all(void)
     uint8_t left_down = 0;
     uint8_t left_pressed = 0;
     int dragging_idx = -1;
+    int focus_idx = -1;
+    int32_t focus_z = 0;
     int candidate_idx = -1;
     int32_t candidate_z = 0;
 
@@ -422,13 +470,25 @@ void kwindow_update_all(void)
     {
         for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
         {
+            kwindow_resolved_rect root_bounds = {0};
             kwindow_resolved_rect titlebar_bounds = {0};
             kwindow_resolved_rect close_bounds = {0};
+            int over_window = 0;
             int over_titlebar = 0;
             int over_close = 0;
 
             if (!G_windows[i].used || !G_windows[i].visible)
                 continue;
+
+            if (kwindow_resolve_rect_bounds(G_windows[i].root, &root_bounds))
+            {
+                over_window = kwindow_point_in_bounds(mouse.x, mouse.y, &root_bounds);
+                if (over_window && (focus_idx < 0 || root_bounds.z >= focus_z))
+                {
+                    focus_idx = (int)i;
+                    focus_z = root_bounds.z;
+                }
+            }
 
             if (!kwindow_resolve_rect_bounds(G_windows[i].titlebar, &titlebar_bounds))
                 continue;
@@ -446,6 +506,9 @@ void kwindow_update_all(void)
                 candidate_z = titlebar_bounds.z;
             }
         }
+
+        if (focus_idx >= 0)
+            kwindow_raise_to_front(focus_idx);
 
         if (candidate_idx >= 0)
             G_windows[candidate_idx].dragging = 1;
