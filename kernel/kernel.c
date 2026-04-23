@@ -257,12 +257,6 @@ void kmain(const boot_info *bi)
     kgfx_obj_set_fill(winB, have_font ? gold : red);
     kgfx_obj_set_fill(taskbar, have_cat ? cyan : red);
 
-    demo_window_style.body_fill = dark_gray;
-    demo_window_style.body_outline = blue;
-    demo_window_style.titlebar_fill = dark_slate_gray;
-    demo_window_style.close_button_style.fill = red;
-    demo_window_style.close_button_style.hover_fill = tomato;
-    demo_window_style.close_button_style.pressed_fill = dark_red;
     demo_window = kwindow_create(120, 120, 340, 220, 20,
                                  have_font ? &font : 0,
                                  "Demo Window",
@@ -330,7 +324,7 @@ void kmain(const boot_info *bi)
         terminal_warn("cat not loaded");
     }
 
-    if (kmouse_init("0:/OS/System/Images/Mouse/idle.bmp") != 0)
+    if (kmouse_init() != 0)
     {
         terminal_warn("cursor not loaded");
     }

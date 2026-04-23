@@ -58,6 +58,9 @@ extern "C"
     }
 
     // Optional: text metrics for layout
+    // Scale steps are fine-grained:
+    //   scale 1 -> 1.0x, scale 2 -> 1.1x, scale 3 -> 1.2x, etc.
+    uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale);
     uint32_t ktext_line_height(const kfont *f, uint32_t scale, int line_spacing);
     uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, int char_spacing);
 

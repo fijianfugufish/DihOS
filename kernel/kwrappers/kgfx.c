@@ -620,7 +620,7 @@ static int text_world_bounds(const kgfx_text_data *t, uint16_t outline_width, in
 
     p = t->text;
     line_y = t->y;
-    glyph_h = (int32_t)t->font->h * (int32_t)t->scale;
+    glyph_h = (int32_t)ktext_scale_mul_px(t->font->h, t->scale);
 
     do
     {

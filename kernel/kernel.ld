@@ -8,7 +8,7 @@ SECTIONS
 {
   . = 0;
 
-  .text : { *(.text .text.*) }
+  .text : { *(.text .text.*) *(.plt .iplt) }
 
   .rodata : { *(.rodata .rodata.*) }
 
@@ -16,15 +16,25 @@ SECTIONS
   .rela.dyn : { *(.rela.dyn) }
   .rela.plt : { *(.rela.plt) }
 
-  .data.rel.ro : { *(.data.rel.ro .data.rel.ro.*) }
+  /*
+   * Keep all RELRO sections contiguous for ld.lld when linking as PIE.
+   */
+  .relro : ALIGN(16) {
+    *(.data.rel.ro .data.rel.ro.*)
+    *(.init_array .init_array.*)
+    *(.fini_array .fini_array.*)
+  }
+
+  .dynamic : { *(.dynamic) }
+
+  .got : {
+    *(.got .got.*)
+    *(.got.plt)
+  }
+
   .data : { *(.data .data.*) }
 
   .bss : { *(.bss .bss.* COMMON) }
-
-  /* useful tables */
-  .got : { *(.got .got.*) }
-  .got.plt : { *(.got.plt) }
-  .plt : { *(.plt .iplt) }
 
   /DISCARD/ : { *(.comment*) }
 }

@@ -314,7 +314,10 @@ void kbutton_update_all(void)
     }
 
     if (hovered_idx >= 0)
+    {
         G_buttons[hovered_idx].hovered = 1;
+        (void)kmouse_set_cursor(KMOUSE_CURSOR_LINK);
+    }
 
     if (left_pressed)
     {

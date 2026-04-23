@@ -142,7 +142,7 @@ static int bd_write(void *ctx, uint64_t lba, uint32_t cnt, const void *buf)
     if (ensure_dma_buf(g_sec) != 0)
         return -1;
 
-    uint8_t *in = (const uint8_t *)buf;
+    const uint8_t *in = (const uint8_t *)buf;
 
     while (cnt)
     {
@@ -163,6 +163,7 @@ static int bd_write(void *ctx, uint64_t lba, uint32_t cnt, const void *buf)
 
         for (;;)
         {
+            memcpy(g_dma, in, try_chunk * g_sec);
             r = usb_msc_write(&g_msc, g_lba_base + lba, try_chunk, g_dma);
             if (r == 0)
                 break;
@@ -180,7 +181,6 @@ static int bd_write(void *ctx, uint64_t lba, uint32_t cnt, const void *buf)
         }
 
         // success path uses try_chunk (not chunk)
-        memcpy(in, g_dma, try_chunk * g_sec);
         in += try_chunk * g_sec;
         lba += try_chunk;
         cnt -= try_chunk;

@@ -26,13 +26,18 @@ extern "C"
         kcolor titlebar_fill;
         kcolor title_color;
         kcolor close_text_color;
+        kcolor fullscreen_text_color;
         kbutton_style close_button_style;
+        kbutton_style fullscreen_button_style;
         uint16_t body_outline_width;
         uint32_t titlebar_height;
         uint32_t close_button_width;
         uint32_t close_button_height;
+        uint32_t fullscreen_button_width;
+        uint32_t fullscreen_button_height;
         uint32_t title_scale;
         uint32_t close_glyph_scale;
+        uint32_t fullscreen_glyph_scale;
     } kwindow_style;
 
     static inline kwindow_style kwindow_style_default(void)
@@ -43,18 +48,28 @@ extern "C"
         s.titlebar_fill = dark_slate_gray;
         s.title_color = white;
         s.close_text_color = white;
+        s.fullscreen_text_color = black;
         s.close_button_style = kbutton_style_default();
+        s.fullscreen_button_style = kbutton_style_default();
         s.close_button_style.fill = red;
         s.close_button_style.hover_fill = tomato;
         s.close_button_style.pressed_fill = dark_red;
         s.close_button_style.outline = white;
         s.close_button_style.outline_width = 1;
+        s.fullscreen_button_style.fill = yellow;
+        s.fullscreen_button_style.hover_fill = gold;
+        s.fullscreen_button_style.pressed_fill = goldenrod;
+        s.fullscreen_button_style.outline = white;
+        s.fullscreen_button_style.outline_width = 1;
         s.body_outline_width = 2;
-        s.titlebar_height = 28;
-        s.close_button_width = 22;
-        s.close_button_height = 20;
-        s.title_scale = 1;
-        s.close_glyph_scale = 1;
+        s.titlebar_height = 42;
+        s.close_button_width = 34;
+        s.close_button_height = 30;
+        s.fullscreen_button_width = 34;
+        s.fullscreen_button_height = 30;
+        s.title_scale = 3;
+        s.close_glyph_scale = 3;
+        s.fullscreen_glyph_scale = 3;
         return s;
     }
 

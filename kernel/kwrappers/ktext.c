@@ -33,6 +33,27 @@ typedef struct
 #define PSF1_MODE512 0x01
 #define PSF1_MODEHASTAB 0x02
 
+#define KTEXT_SCALE_BASE 10u
+
+static inline uint32_t ktext_scale_to_tenths(uint32_t scale)
+{
+    if (scale == 0)
+        return 0;
+    return KTEXT_SCALE_BASE + (scale - 1u);
+}
+
+uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale)
+{
+    uint64_t scaled = 0;
+    uint32_t tenths = ktext_scale_to_tenths(scale);
+
+    if (px == 0 || tenths == 0)
+        return 0;
+
+    scaled = (uint64_t)px * (uint64_t)tenths;
+    return (uint32_t)((scaled + (KTEXT_SCALE_BASE / 2u)) / KTEXT_SCALE_BASE);
+}
+
 /* ------------ file -> pmem -------------- */
 static int read_all_file(const char *path, void **out, uint32_t *out_sz)
 {
@@ -134,6 +155,8 @@ static void draw_glyph_tight_scaled(
     int x, int y, uint32_t scale,
     kcolor col, uint8_t alpha)
 {
+    const uint32_t scale_tenths = ktext_scale_to_tenths(scale);
+
     if (!f || gi >= f->glyph_count || scale == 0)
         return;
     uint8_t left = f->tight_left[gi];
@@ -146,6 +169,12 @@ static void draw_glyph_tight_scaled(
 
     for (uint32_t row = 0; row < f->h; ++row)
     {
+        int py0 = y + (int)(((uint64_t)row * scale_tenths) / KTEXT_SCALE_BASE);
+        int py1 = y + (int)((((uint64_t)row + 1u) * scale_tenths) / KTEXT_SCALE_BASE);
+
+        if (py1 <= py0)
+            py1 = py0 + 1;
+
         const uint8_t *rowbits = g + row * row_bytes;
         for (uint32_t bit = 0; bit < tw; ++bit)
         {
@@ -154,11 +183,14 @@ static void draw_glyph_tight_scaled(
             uint8_t m = (uint8_t)(1u << (7 - (xcol & 7)));
             if (b & m)
             {
-                int px = x + (int)bit * (int)scale;
-                int py = y + (int)row * (int)scale;
-                for (uint32_t sy = 0; sy < scale; ++sy)
-                    for (uint32_t sx = 0; sx < scale; ++sx)
-                        plot(px + (int)sx, py + (int)sy, col, alpha);
+                int px0 = x + (int)(((uint64_t)bit * scale_tenths) / KTEXT_SCALE_BASE);
+                int px1 = x + (int)((((uint64_t)bit + 1u) * scale_tenths) / KTEXT_SCALE_BASE);
+                if (px1 <= px0)
+                    px1 = px0 + 1;
+
+                for (int py = py0; py < py1; ++py)
+                    for (int px = px0; px < px1; ++px)
+                        plot(px, py, col, alpha);
             }
         }
     }
@@ -308,9 +340,12 @@ int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t 
 
 uint32_t ktext_line_height(const kfont *f, uint32_t scale, int line_spacing)
 {
+    uint32_t glyph_h = 0;
+
     if (!f || scale == 0)
         return 0;
-    int lh = (int)(f->h * scale) + line_spacing;
+    glyph_h = ktext_scale_mul_px(f->h, scale);
+    int lh = (int)glyph_h + line_spacing;
     return (lh > 0) ? (uint32_t)lh : 0;
 }
 
@@ -343,7 +378,7 @@ uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, in
             // fallback to full cell width
             adv = f->w;
         }
-        adv_sum += adv * scale;
+        adv_sum += ktext_scale_mul_px(adv, scale);
         if (!first)
         {
             // apply spacing between characters (for N chars, we add N-1 spacings)
@@ -358,10 +393,11 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
                        kcolor col, uint8_t alpha, uint32_t scale,
                        int char_spacing, int line_spacing)
 {
+    uint32_t font_h_scaled = 0;
+
     if (!f || !s || !f->glyphs || f->w == 0 || f->h == 0 || scale == 0)
         return;
-
-    const uint32_t row_bytes = (f->w + 7) >> 3;
+    font_h_scaled = ktext_scale_mul_px(f->h, scale);
     const int start_x = x;
 
     for (const unsigned char *p = (const unsigned char *)s; *p; ++p)
@@ -370,7 +406,7 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
         {
             // newline: move to next baseline
             x = start_x;
-            y += (int)(f->h * scale) + line_spacing;
+            y += (int)font_h_scaled + line_spacing;
             continue;
         }
 
@@ -386,13 +422,12 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
 
         // choose advance and draw range
         uint32_t adv;
-        uint32_t draw_left = 0, draw_cols = 0;
+        uint32_t draw_cols = 0;
 
         if (tw != 0 && left < f->w)
         {
             // normal glyph: draw only [left, left+tw)
             adv = tw;
-            draw_left = left;
             draw_cols = tw;
         }
         else if (gi == ' ')
@@ -405,37 +440,17 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
         {
             // empty/unknown: use full cell width
             adv = f->w;
-            draw_left = 0;
             draw_cols = 0; // draw nothing; you can choose to draw full box by setting = f->w;
         }
 
         // draw bitmap columns in the tight range
         if (draw_cols)
         {
-            const uint8_t *g = f->glyphs + (uint64_t)gi * f->bytes_per_glyph;
-            for (uint32_t row = 0; row < f->h; ++row)
-            {
-                const uint8_t *rowbits = g + row * row_bytes;
-
-                for (uint32_t bit = 0; bit < draw_cols; ++bit)
-                {
-                    uint32_t xcol = draw_left + bit;
-                    uint8_t b = rowbits[xcol >> 3];
-                    uint8_t m = (uint8_t)(1u << (7 - (xcol & 7)));
-                    if (b & m)
-                    {
-                        int px = x + (int)bit * (int)scale;
-                        int py = y + (int)row * (int)scale;
-                        for (uint32_t sy = 0; sy < scale; ++sy)
-                            for (uint32_t sx = 0; sx < scale; ++sx)
-                                plot(px + (int)sx, py + (int)sy, col, alpha);
-                    }
-                }
-            }
+            draw_glyph_tight_scaled(f, gi, x, y, scale, col, alpha);
         }
 
         // advance pen
-        x += (int)(adv * scale);
+        x += (int)ktext_scale_mul_px(adv, scale);
         // inter-character spacing (between rendered chars)
         x += char_spacing;
     }
@@ -445,10 +460,11 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
                           kcolor col, uint8_t alpha, uint32_t scale,
                           int char_spacing, int line_spacing, ktext_align align)
 {
+    uint32_t font_h_scaled = 0;
+
     if (!f || !s || !f->glyphs || f->w == 0 || f->h == 0 || scale == 0)
         return;
-
-    const uint32_t row_bytes = (f->w + 7) >> 3;
+    font_h_scaled = ktext_scale_mul_px(f->h, scale);
 
     const unsigned char *p = (const unsigned char *)s;
     while (*p)
@@ -485,12 +501,11 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
             }
 
             uint32_t adv;
-            uint32_t draw_left = 0, draw_cols = 0;
+            uint32_t draw_cols = 0;
 
             if (tw != 0 && left < f->w)
             {
                 adv = tw;
-                draw_left = left;
                 draw_cols = tw;
             }
             else if (gi == ' ')
@@ -506,28 +521,10 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
 
             if (draw_cols)
             {
-                const uint8_t *g = f->glyphs + (uint64_t)gi * f->bytes_per_glyph;
-                for (uint32_t row = 0; row < f->h; ++row)
-                {
-                    const uint8_t *rowbits = g + row * row_bytes;
-                    for (uint32_t bit = 0; bit < draw_cols; ++bit)
-                    {
-                        uint32_t xcol = draw_left + bit;
-                        uint8_t b = rowbits[xcol >> 3];
-                        uint8_t m = (uint8_t)(1u << (7 - (xcol & 7)));
-                        if (b & m)
-                        {
-                            int px = x + (int)bit * (int)scale;
-                            int py = y + (int)row * (int)scale;
-                            for (uint32_t sy = 0; sy < scale; ++sy)
-                                for (uint32_t sx = 0; sx < scale; ++sx)
-                                    kgfx_put_px_blend(px + (int)sx, py + (int)sy, col, alpha);
-                        }
-                    }
-                }
+                draw_glyph_tight_scaled(f, gi, x, y, scale, col, alpha);
             }
 
-            x += (int)(adv * scale);
+            x += (int)ktext_scale_mul_px(adv, scale);
             x += char_spacing;
         }
 
@@ -535,7 +532,7 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
         if (*p == '\n')
         {
             ++p; // skip '\n'
-            y += (int)(f->h * scale) + line_spacing;
+            y += (int)font_h_scaled + line_spacing;
         }
     }
 }
@@ -569,6 +566,7 @@ void ktext_draw_str_align_outline(
     if (!f || !s || !f->glyphs || f->w == 0 || f->h == 0 || scale == 0)
         return;
 
+    uint32_t font_h_scaled = ktext_scale_mul_px(f->h, scale);
     const unsigned char *p = (const unsigned char *)s;
 
     while (*p)
@@ -633,7 +631,7 @@ void ktext_draw_str_align_outline(
             // spaces/empty just advance
 
             // advance pen
-            x += (int)(adv * scale);
+            x += (int)ktext_scale_mul_px(adv, scale);
             x += char_spacing;
         }
 
@@ -641,7 +639,7 @@ void ktext_draw_str_align_outline(
         if (*p == '\n')
         {
             ++p;
-            y += (int)(f->h * scale) + line_spacing;
+            y += (int)font_h_scaled + line_spacing;
         }
     }
 }

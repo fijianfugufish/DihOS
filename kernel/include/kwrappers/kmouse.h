@@ -10,6 +10,23 @@ extern "C"
 {
 #endif
 
+    typedef enum kmouse_cursor
+    {
+        KMOUSE_CURSOR_ARROW = 0,
+        KMOUSE_CURSOR_BEAM,
+        KMOUSE_CURSOR_WAIT,
+        KMOUSE_CURSOR_SIZE3,
+        KMOUSE_CURSOR_SIZE1,
+        KMOUSE_CURSOR_SIZE2,
+        KMOUSE_CURSOR_SIZE4,
+        KMOUSE_CURSOR_NO,
+        KMOUSE_CURSOR_CROSS,
+        KMOUSE_CURSOR_BUSY,
+        KMOUSE_CURSOR_MOVE,
+        KMOUSE_CURSOR_LINK,
+        KMOUSE_CURSOR_COUNT
+    } kmouse_cursor;
+
     typedef struct kmouse_state
     {
         int32_t x;
@@ -21,7 +38,10 @@ extern "C"
         uint8_t visible;
     } kmouse_state;
 
-    int kmouse_init(const char *cursor_path);
+    int kmouse_init(void);
+    int kmouse_set_cursor(kmouse_cursor cursor);
+    int kmouse_switch_cursor(kmouse_cursor cursor);
+    kmouse_cursor kmouse_current_cursor(void);
     void kmouse_set_sensitivity_pct(uint32_t pct);
     uint32_t kmouse_sensitivity_pct(void);
     void kmouse_update(void);
