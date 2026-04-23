@@ -6,6 +6,8 @@
 static uint8_t g_keys_now[256];
 static uint8_t g_keys_prev[256];
 static kinput_mouse_state g_mouse;
+static uint8_t g_tpd_buttons = 0;
+static uint8_t g_usb_mouse_buttons = 0;
 static int16_t g_tpd_last_x = 0;
 static int16_t g_tpd_last_y = 0;
 static uint8_t g_tpd_have_last = 0;
@@ -135,7 +137,7 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
 
         if (dx > -2048 && dx < 2048 && dy > -2048 && dy < 2048)
         {
-            g_mouse.buttons = (g_mouse.buttons | (r->data[base + 0] & 0x07u));
+            g_tpd_buttons = (uint8_t)(r->data[base + 0] & 0x07u);
             g_mouse.dx += dx;
             g_mouse.dy += dy;
             if ((base + 5) < r->len)
@@ -149,7 +151,7 @@ static void parse_touchpad_report(const hidi2c_raw_report *r)
         int16_t x = rd16s(&r->data[base + 1]);
         int16_t y = rd16s(&r->data[base + 3]);
 
-        g_mouse.buttons = (g_mouse.buttons | (r->data[base + 0] & 0x07u));
+        g_tpd_buttons = (uint8_t)(r->data[base + 0] & 0x07u);
 
         if (g_tpd_have_last)
         {
@@ -199,7 +201,7 @@ static void parse_usb_mouse_report(const usbh_dev_t *dev, const uint8_t *data, u
         if (dev->hid_mouse_wheel_size)
             wheel = usb_hid_extract_signed_bits(payload, payload_len, dev->hid_mouse_wheel_bits, dev->hid_mouse_wheel_size);
 
-        g_mouse.buttons = (g_mouse.buttons | buttons);
+        g_usb_mouse_buttons = buttons;
         g_mouse.dx += dx;
         g_mouse.dy += dy;
         g_mouse.wheel += wheel;
@@ -209,7 +211,7 @@ static void parse_usb_mouse_report(const usbh_dev_t *dev, const uint8_t *data, u
     if (len < 3)
         return;
 
-    g_mouse.buttons = (g_mouse.buttons | (data[0] & 0x07u));
+    g_usb_mouse_buttons = (uint8_t)(data[0] & 0x07u);
     g_mouse.dx += (int8_t)data[1];
     g_mouse.dy += (int8_t)data[2];
 
@@ -228,6 +230,8 @@ void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
     g_mouse.buttons = 0;
+    g_tpd_buttons = 0;
+    g_usb_mouse_buttons = 0;
 
     g_tpd_last_x = 0;
     g_tpd_last_y = 0;
@@ -260,7 +264,6 @@ void kinput_poll(void)
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
-    g_mouse.buttons = 0;
 
     /* Poll ACPI/I2C HID devices */
     i2c1_hidi2c_poll();
@@ -285,6 +288,8 @@ void kinput_poll(void)
         if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, mouse_report, &got) == 0 && got >= 1)
             parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
     }
+
+    g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_usb_mouse_buttons);
 }
 
 int kinput_key_down(uint8_t usage)

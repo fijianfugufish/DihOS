@@ -63,15 +63,26 @@ extern "C"
         int32_t y;
         uint32_t w;
         uint32_t h;
+        uint32_t src_w;
+        uint32_t src_h;
         const uint32_t *argb;
         uint32_t stride_px;
+        uint8_t sample_mode;
     } kgfx_image_data;
+
+    typedef enum
+    {
+        KGFX_IMAGE_SAMPLE_NEAREST = 0,
+        KGFX_IMAGE_SAMPLE_BILINEAR = 1,
+    } kgfx_image_sample_mode;
 
     typedef struct
     {
         kgfx_obj_kind kind;
         int32_t z;
         uint8_t visible;
+        int16_t parent_idx;
+        uint8_t clip_to_parent;
 
         kcolor fill;
         uint8_t alpha;
@@ -180,6 +191,58 @@ extern "C"
         kgfx_obj *o = kgfx_obj_ref(h);
         if (o && o->kind == KGFX_OBJ_TEXT)
             o->u.text.scale = s;
+    }
+
+    static inline void kgfx_image_set_size(kgfx_obj_handle h, uint32_t w, uint32_t h_px)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o && o->kind == KGFX_OBJ_IMAGE)
+        {
+            o->u.image.w = w;
+            o->u.image.h = h_px;
+        }
+    }
+
+    static inline void kgfx_image_set_scale(kgfx_obj_handle h, uint32_t scale_pct)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o && o->kind == KGFX_OBJ_IMAGE && scale_pct > 0)
+        {
+            o->u.image.w = (o->u.image.src_w * scale_pct) / 100u;
+            o->u.image.h = (o->u.image.src_h * scale_pct) / 100u;
+            if (o->u.image.w == 0)
+                o->u.image.w = 1;
+            if (o->u.image.h == 0)
+                o->u.image.h = 1;
+        }
+    }
+
+    static inline void kgfx_image_set_sample_mode(kgfx_obj_handle h, kgfx_image_sample_mode mode)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o && o->kind == KGFX_OBJ_IMAGE)
+            o->u.image.sample_mode = (uint8_t)mode;
+    }
+
+    static inline void kgfx_obj_set_parent(kgfx_obj_handle child, kgfx_obj_handle parent)
+    {
+        kgfx_obj *o = kgfx_obj_ref(child);
+        if (o)
+            o->parent_idx = (int16_t)parent.idx;
+    }
+
+    static inline void kgfx_obj_clear_parent(kgfx_obj_handle child)
+    {
+        kgfx_obj *o = kgfx_obj_ref(child);
+        if (o)
+            o->parent_idx = -1;
+    }
+
+    static inline void kgfx_obj_set_clip_to_parent(kgfx_obj_handle h, uint8_t enabled)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o)
+            o->clip_to_parent = enabled ? 1u : 0u;
     }
 
     char *kgfx_pmem_strdup(const char *s);

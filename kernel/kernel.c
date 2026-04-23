@@ -9,6 +9,8 @@
 #include "kwrappers/string.h"
 #include "kwrappers/kinput.h"
 #include "kwrappers/kmouse.h"
+#include "kwrappers/kbutton.h"
+#include "kwrappers/kwindow.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 
 #include "terminal/terminal_api.h"
@@ -234,9 +236,14 @@ void kmain(const boot_info *bi)
     */
 
     // Scene
+    kwindow_style demo_window_style = kwindow_style_default();
     kgfx_obj_handle taskbar = kgfx_obj_add_rect(0, 0, (uint32_t)kgfx_info()->width, 28, 0, dark_gray, 1);
     kgfx_obj_handle winA = kgfx_obj_add_rect(40, 60, 320, 180, 1, yellow_green, 1);
     kgfx_obj_handle winB = kgfx_obj_add_circle(260, 180, 60, 2, dark_turquoise, 1);
+    kwindow_handle demo_window = {-1};
+
+    kbutton_init();
+    kwindow_init();
 
     kgfx_obj_ref(taskbar)->outline_width = 2;
     kgfx_obj_ref(taskbar)->outline = black;
@@ -249,6 +256,18 @@ void kmain(const boot_info *bi)
     kgfx_obj_set_fill(winA, mounted ? yellow_green : red);
     kgfx_obj_set_fill(winB, have_font ? gold : red);
     kgfx_obj_set_fill(taskbar, have_cat ? cyan : red);
+
+    demo_window_style.body_fill = dark_gray;
+    demo_window_style.body_outline = blue;
+    demo_window_style.titlebar_fill = dark_slate_gray;
+    demo_window_style.close_button_style.fill = red;
+    demo_window_style.close_button_style.hover_fill = tomato;
+    demo_window_style.close_button_style.pressed_fill = dark_red;
+    demo_window = kwindow_create(120, 120, 340, 220, 20,
+                                 have_font ? &font : 0,
+                                 "Demo Window",
+                                 &demo_window_style);
+    (void)demo_window;
 
     if (have_font)
     {
@@ -300,6 +319,9 @@ void kmain(const boot_info *bi)
         co->outline_alpha = 255;
         co->z = 5;
 
+        kgfx_image_set_sample_mode(cat, KGFX_IMAGE_SAMPLE_BILINEAR);
+        kgfx_image_set_scale(cat, 500);
+
         terminal_success("wowo we have cat");
         terminal_print("how cool");
     }
@@ -326,6 +348,8 @@ void kmain(const boot_info *bi)
     {
         kinput_poll();
         kmouse_update();
+        kwindow_update_all();
+        kbutton_update_all();
 
         /* keyboard edge tests */
         if (kinput_key_pressed(KEY_A))  /* HID usage 0x04 = 'A' */
