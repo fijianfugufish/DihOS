@@ -319,7 +319,7 @@ void kmain(const boot_info *bi)
         co->outline_alpha = 255;
         co->z = 5;
 
-        kgfx_image_set_sample_mode(cat, KGFX_IMAGE_SAMPLE_BILINEAR);
+        kgfx_image_set_sample_mode(cat, KGFX_IMAGE_SAMPLE_NEAREST);
         kgfx_image_set_scale(cat, 500);
 
         terminal_success("wowo we have cat");

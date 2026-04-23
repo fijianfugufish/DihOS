@@ -169,6 +169,19 @@ static uint32_t BB_stride = 0;
 static uint64_t BB_bytes = 0;
 static kgfx_clip_rect g_bb_clip = {0, 0, 0, 0, 0};
 
+typedef struct
+{
+    uint8_t in_use;
+    uint8_t renderable;
+    kgfx_clip_rect bounds;
+    uint64_t visual_hash;
+} kgfx_obj_snapshot;
+
+static kgfx_obj_snapshot g_prev_snapshot[KGFX_MAX_OBJS];
+static uint16_t g_prev_snapshot_count = 0;
+static kcolor g_prev_clear_color = {0, 0, 0};
+static uint8_t g_have_prev_frame = 0;
+
 /* ---------- creation ---------- */
 
 kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t height,
@@ -348,6 +361,108 @@ static int clip_intersect(kgfx_clip_rect *dst, const kgfx_clip_rect *other)
     return dst->x0 < dst->x1 && dst->y0 < dst->y1;
 }
 
+static int clip_equal(const kgfx_clip_rect *a, const kgfx_clip_rect *b)
+{
+    if (!a || !b)
+        return 0;
+    return a->enabled == b->enabled &&
+           a->x0 == b->x0 && a->y0 == b->y0 &&
+           a->x1 == b->x1 && a->y1 == b->y1;
+}
+
+static int clip_intersects(const kgfx_clip_rect *a, const kgfx_clip_rect *b)
+{
+    if (!a || !b || !a->enabled || !b->enabled)
+        return 0;
+    return a->x0 < b->x1 && a->y0 < b->y1 && b->x0 < a->x1 && b->y0 < a->y1;
+}
+
+static void clip_union(kgfx_clip_rect *dst, const kgfx_clip_rect *src)
+{
+    if (!dst || !src || !src->enabled)
+        return;
+
+    if (!dst->enabled)
+    {
+        *dst = *src;
+        return;
+    }
+
+    if (src->x0 < dst->x0)
+        dst->x0 = src->x0;
+    if (src->y0 < dst->y0)
+        dst->y0 = src->y0;
+    if (src->x1 > dst->x1)
+        dst->x1 = src->x1;
+    if (src->y1 > dst->y1)
+        dst->y1 = src->y1;
+}
+
+static int color_equal(kcolor a, kcolor b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+static kgfx_clip_rect fb_clip_rect(void)
+{
+    kgfx_clip_rect clip;
+    clip.x0 = 0;
+    clip.y0 = 0;
+    clip.x1 = (int32_t)FB.width;
+    clip.y1 = (int32_t)FB.height;
+    clip.enabled = 1;
+    return clip;
+}
+
+static inline void hash_mix_u8(uint64_t *h, uint8_t v)
+{
+    *h ^= (uint64_t)v;
+    *h *= 1099511628211ull;
+}
+
+static inline void hash_mix_u16(uint64_t *h, uint16_t v)
+{
+    hash_mix_u8(h, (uint8_t)(v & 0xFFu));
+    hash_mix_u8(h, (uint8_t)(v >> 8));
+}
+
+static inline void hash_mix_u32(uint64_t *h, uint32_t v)
+{
+    hash_mix_u16(h, (uint16_t)(v & 0xFFFFu));
+    hash_mix_u16(h, (uint16_t)(v >> 16));
+}
+
+static inline void hash_mix_i32(uint64_t *h, int32_t v)
+{
+    hash_mix_u32(h, (uint32_t)v);
+}
+
+static inline void hash_mix_u64(uint64_t *h, uint64_t v)
+{
+    hash_mix_u32(h, (uint32_t)(v & 0xFFFFFFFFu));
+    hash_mix_u32(h, (uint32_t)(v >> 32));
+}
+
+static uint64_t hash_cstr(const char *s)
+{
+    uint64_t h = 1469598103934665603ull;
+    uint32_t i = 0;
+
+    if (!s)
+    {
+        hash_mix_u8(&h, 0xFFu);
+        return h;
+    }
+
+    while (s[i])
+    {
+        hash_mix_u8(&h, (uint8_t)s[i]);
+        ++i;
+    }
+    hash_mix_u8(&h, 0);
+    return h;
+}
+
 static void obj_local_origin(const kgfx_obj *o, int32_t *x, int32_t *y)
 {
     if (!o || !x || !y)
@@ -481,6 +596,329 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
     r->ready = 1;
     r->visiting = 0;
     return 1;
+}
+
+static int text_world_bounds(const kgfx_text_data *t, uint16_t outline_width, int32_t *x0, int32_t *y0, int32_t *x1, int32_t *y1)
+{
+    const char *p = 0;
+    int32_t line_y = 0;
+    int32_t min_x = 0;
+    int32_t min_y = 0;
+    int32_t max_x = 0;
+    int32_t max_y = 0;
+    uint8_t have_bounds = 0;
+    int32_t glyph_h = 0;
+
+    if (!t || !t->font || !t->text || !t->scale || !x0 || !y0 || !x1 || !y1)
+        return 0;
+
+    p = t->text;
+    line_y = t->y;
+    glyph_h = (int32_t)t->font->h * (int32_t)t->scale;
+
+    do
+    {
+        uint32_t line_w = ktext_measure_line_px(t->font, p, t->scale, t->char_spacing);
+        int32_t line_x = t->x;
+
+        if (t->align == KTEXT_ALIGN_CENTER)
+            line_x -= (int32_t)(line_w / 2u);
+        else if (t->align == KTEXT_ALIGN_RIGHT)
+            line_x -= (int32_t)line_w;
+
+        if (line_w != 0 && glyph_h > 0)
+        {
+            if (!have_bounds)
+            {
+                min_x = line_x;
+                min_y = line_y;
+                max_x = line_x + (int32_t)line_w;
+                max_y = line_y + glyph_h;
+                have_bounds = 1;
+            }
+            else
+            {
+                if (line_x < min_x)
+                    min_x = line_x;
+                if (line_y < min_y)
+                    min_y = line_y;
+                if (line_x + (int32_t)line_w > max_x)
+                    max_x = line_x + (int32_t)line_w;
+                if (line_y + glyph_h > max_y)
+                    max_y = line_y + glyph_h;
+            }
+        }
+
+        while (*p && *p != '\n')
+            ++p;
+        if (*p == '\n')
+        {
+            ++p;
+            line_y += glyph_h + t->line_spacing;
+        }
+    } while (*p);
+
+    if (!have_bounds)
+        return 0;
+
+    min_x -= (int32_t)outline_width;
+    min_y -= (int32_t)outline_width;
+    max_x += (int32_t)outline_width;
+    max_y += (int32_t)outline_width;
+
+    *x0 = min_x;
+    *y0 = min_y;
+    *x1 = max_x;
+    *y1 = max_y;
+    return min_x < max_x && min_y < max_y;
+}
+
+static int obj_draw_bounds(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_clip_rect *bounds)
+{
+    int32_t pad = 0;
+    kgfx_clip_rect raw = {0, 0, 0, 0, 1};
+    kgfx_clip_rect screen = fb_clip_rect();
+    uint8_t outline_visible = 0;
+
+    if (!o || !r || !bounds)
+        return 0;
+
+    outline_visible = (o->outline_width != 0 && o->outline_alpha != 0) ? 1u : 0u;
+    pad = outline_visible ? (int32_t)o->outline_width : 0;
+
+    switch (o->kind)
+    {
+    case KGFX_OBJ_RECT:
+        if (!o->u.rect.w || !o->u.rect.h)
+            return 0;
+        if (o->alpha == 0 && !outline_visible)
+            return 0;
+        raw.x0 = r->origin_x - pad;
+        raw.y0 = r->origin_y - pad;
+        raw.x1 = r->origin_x + (int32_t)o->u.rect.w + pad;
+        raw.y1 = r->origin_y + (int32_t)o->u.rect.h + pad;
+        break;
+    case KGFX_OBJ_CIRCLE: {
+        int32_t radius = 0;
+        if (!o->u.circle.r)
+            return 0;
+        if (o->alpha == 0 && !outline_visible)
+            return 0;
+        radius = (int32_t)o->u.circle.r + pad;
+        raw.x0 = r->origin_x - radius;
+        raw.y0 = r->origin_y - radius;
+        raw.x1 = r->origin_x + radius + 1;
+        raw.y1 = r->origin_y + radius + 1;
+        break;
+    }
+    case KGFX_OBJ_TEXT:
+        if (o->alpha == 0 && !outline_visible)
+            return 0;
+        if (!text_world_bounds(&o->u.text, outline_visible ? o->outline_width : 0, &raw.x0, &raw.y0, &raw.x1, &raw.y1))
+            return 0;
+        raw.x0 += r->origin_x - o->u.text.x;
+        raw.y0 += r->origin_y - o->u.text.y;
+        raw.x1 += r->origin_x - o->u.text.x;
+        raw.y1 += r->origin_y - o->u.text.y;
+        break;
+    case KGFX_OBJ_IMAGE:
+        if (!o->u.image.argb || !o->u.image.w || !o->u.image.h)
+            return 0;
+        if (o->alpha == 0 && !outline_visible)
+            return 0;
+        raw.x0 = r->origin_x - pad;
+        raw.y0 = r->origin_y - pad;
+        raw.x1 = r->origin_x + (int32_t)o->u.image.w + pad;
+        raw.y1 = r->origin_y + (int32_t)o->u.image.h + pad;
+        break;
+    default:
+        return 0;
+    }
+
+    *bounds = raw;
+    if (!clip_intersect(bounds, &r->clip))
+        return 0;
+    if (!clip_intersect(bounds, &screen))
+        return 0;
+    return bounds->x0 < bounds->x1 && bounds->y0 < bounds->y1;
+}
+
+static uint64_t obj_visual_hash(const kgfx_obj *o, const kgfx_resolved_obj *r)
+{
+    uint64_t h = 1469598103934665603ull;
+
+    if (!o || !r)
+        return 0;
+
+    hash_mix_u32(&h, (uint32_t)o->kind);
+    hash_mix_i32(&h, r->origin_x);
+    hash_mix_i32(&h, r->origin_y);
+    hash_mix_i32(&h, r->z);
+    hash_mix_u8(&h, r->clip.enabled);
+    hash_mix_i32(&h, r->clip.x0);
+    hash_mix_i32(&h, r->clip.y0);
+    hash_mix_i32(&h, r->clip.x1);
+    hash_mix_i32(&h, r->clip.y1);
+    hash_mix_u8(&h, o->visible);
+    hash_mix_u8(&h, o->clip_to_parent);
+    hash_mix_u8(&h, o->fill.r);
+    hash_mix_u8(&h, o->fill.g);
+    hash_mix_u8(&h, o->fill.b);
+    hash_mix_u8(&h, o->alpha);
+    hash_mix_u16(&h, o->outline_width);
+    hash_mix_u8(&h, o->outline.r);
+    hash_mix_u8(&h, o->outline.g);
+    hash_mix_u8(&h, o->outline.b);
+    hash_mix_u8(&h, o->outline_alpha);
+
+    switch (o->kind)
+    {
+    case KGFX_OBJ_RECT:
+        hash_mix_i32(&h, o->u.rect.x);
+        hash_mix_i32(&h, o->u.rect.y);
+        hash_mix_u32(&h, o->u.rect.w);
+        hash_mix_u32(&h, o->u.rect.h);
+        break;
+    case KGFX_OBJ_CIRCLE:
+        hash_mix_i32(&h, o->u.circle.cx);
+        hash_mix_i32(&h, o->u.circle.cy);
+        hash_mix_u32(&h, o->u.circle.r);
+        break;
+    case KGFX_OBJ_TEXT:
+        hash_mix_u64(&h, (uint64_t)(uintptr_t)o->u.text.font);
+        hash_mix_i32(&h, o->u.text.x);
+        hash_mix_i32(&h, o->u.text.y);
+        hash_mix_u32(&h, o->u.text.scale);
+        hash_mix_i32(&h, o->u.text.char_spacing);
+        hash_mix_i32(&h, o->u.text.line_spacing);
+        hash_mix_u32(&h, (uint32_t)o->u.text.align);
+        hash_mix_u64(&h, (uint64_t)(uintptr_t)o->u.text.text);
+        hash_mix_u64(&h, hash_cstr(o->u.text.text));
+        break;
+    case KGFX_OBJ_IMAGE:
+        hash_mix_i32(&h, o->u.image.x);
+        hash_mix_i32(&h, o->u.image.y);
+        hash_mix_u32(&h, o->u.image.w);
+        hash_mix_u32(&h, o->u.image.h);
+        hash_mix_u32(&h, o->u.image.src_w);
+        hash_mix_u32(&h, o->u.image.src_h);
+        hash_mix_u64(&h, (uint64_t)(uintptr_t)o->u.image.argb);
+        hash_mix_u32(&h, o->u.image.stride_px);
+        hash_mix_u8(&h, o->u.image.sample_mode);
+        break;
+    default:
+        break;
+    }
+
+    return h;
+}
+
+static int snapshot_build(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_obj_snapshot *snap)
+{
+    if (!snap)
+        return 0;
+
+    snap->in_use = 1;
+    snap->renderable = 0;
+    snap->visual_hash = 0;
+    snap->bounds = (kgfx_clip_rect){0, 0, 0, 0, 0};
+
+    if (!o || !r)
+        return 0;
+
+    if (!obj_draw_bounds(o, r, &snap->bounds))
+        return 0;
+
+    snap->renderable = 1;
+    snap->visual_hash = obj_visual_hash(o, r);
+    return 1;
+}
+
+static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgfx_obj_snapshot *curr, kgfx_clip_rect *dirty)
+{
+    if (!dirty)
+        return 0;
+
+    if ((!prev || !prev->in_use) && (!curr || !curr->in_use))
+        return 0;
+
+    if (!prev || !prev->in_use)
+    {
+        if (curr->renderable)
+            clip_union(dirty, &curr->bounds);
+        return 1;
+    }
+
+    if (!curr || !curr->in_use)
+    {
+        if (prev->renderable)
+            clip_union(dirty, &prev->bounds);
+        return 1;
+    }
+
+    if (prev->renderable != curr->renderable)
+    {
+        if (prev->renderable)
+            clip_union(dirty, &prev->bounds);
+        if (curr->renderable)
+            clip_union(dirty, &curr->bounds);
+        return 1;
+    }
+
+    if (!curr->renderable)
+        return 0;
+
+    if (prev->visual_hash != curr->visual_hash || !clip_equal(&prev->bounds, &curr->bounds))
+    {
+        clip_union(dirty, &prev->bounds);
+        clip_union(dirty, &curr->bounds);
+        return 1;
+    }
+
+    return 0;
+}
+
+static void bb_rect_clip(int32_t x, int32_t y, uint32_t w, uint32_t h, kcolor c, uint8_t a);
+
+static void bb_clear_region(const kgfx_clip_rect *clip, kcolor c)
+{
+    if (!clip || !clip->enabled)
+        return;
+    bb_rect_clip(clip->x0, clip->y0,
+                 (uint32_t)(clip->x1 - clip->x0),
+                 (uint32_t)(clip->y1 - clip->y0),
+                 c, 255);
+}
+
+static void present_full(void)
+{
+    for (uint32_t y = 0; y < FB.height; ++y)
+    {
+        void *dst = (void *)(FB.base + y * FB.pitch);
+        void *src = (void *)(BB_ptr + y * BB_stride);
+        kmemcpy64(dst, src, FB.pitch);
+    }
+    kgfx_flush();
+}
+
+static void present_region(const kgfx_clip_rect *clip)
+{
+    if (!clip || !clip->enabled)
+        return;
+
+    for (int32_t y = clip->y0; y < clip->y1; ++y)
+    {
+        volatile uint32_t *dst = (volatile uint32_t *)(FB.base + (uint32_t)y * FB.pitch + (uint32_t)clip->x0 * 4u);
+        const uint32_t *src = (const uint32_t *)(BB_ptr + (uint32_t)y * BB_stride + (uint32_t)clip->x0 * 4u);
+        uint32_t count = (uint32_t)(clip->x1 - clip->x0);
+        uintptr_t start = (uintptr_t)dst;
+        uintptr_t end = start + (uintptr_t)count * 4u;
+
+        for (uint32_t x = 0; x < count; ++x)
+            dst[x] = src[x];
+
+        kgfx_flush_range(start, end);
+    }
 }
 
 // blend a solid src color (sr,sg,sb,sa) over an existing packed dst pixel
@@ -1154,6 +1592,12 @@ int kgfx_scene_init(void)
     BB_stride = FB.pitch;
     BB_bytes = pages * 4096ull;
     g_obj_count = 0;
+    g_prev_snapshot_count = 0;
+    g_prev_clear_color = (kcolor){0, 0, 0};
+    g_have_prev_frame = 0;
+    g_bb_clip = (kgfx_clip_rect){0, 0, 0, 0, 0};
+    for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
+        g_prev_snapshot[i] = (kgfx_obj_snapshot){0};
     return 0;
 }
 
@@ -1161,47 +1605,104 @@ void kgfx_render_all(kcolor clear_color)
 {
     kgfx_resolved_obj resolved[KGFX_MAX_OBJS] = {0};
     kgfx_render_entry entries[KGFX_MAX_OBJS];
+    kgfx_obj_snapshot current[KGFX_MAX_OBJS] = {0};
+    kgfx_clip_rect dirty = {0, 0, 0, 0, 0};
+    kgfx_clip_rect full = fb_clip_rect();
+    uint8_t full_redraw = 0;
 
     if (!BB_ptr)
         return;
 
-    // 1) clear backbuffer
-    bb_clear(clear_color);
-
-    // 2) collect visible objects
+    // 1) collect visible objects and build visual snapshots
     uint16_t n = 0;
     for (uint16_t i = 0; i < g_obj_count; ++i)
     {
+        current[i].in_use = 1;
+
         if (!g_objs[i].visible)
             continue;
         if (!resolve_obj(i, resolved))
             continue;
 
-        entries[n].idx = i;
-        entries[n].z = resolved[i].z;
-        ++n;
+        if (snapshot_build(&g_objs[i], &resolved[i], &current[i]))
+        {
+            entries[n].idx = i;
+            entries[n].z = resolved[i].z;
+            ++n;
+        }
     }
 
-    // 3) stable z-sort
+    // 2) stable z-sort
     sort_render_entries(entries, n);
 
-    // 4) draw by kind
+    // 3) decide which pixels need to be refreshed
+    if (!g_have_prev_frame || !color_equal(g_prev_clear_color, clear_color))
+    {
+        dirty = full;
+        full_redraw = 1;
+    }
+    else
+    {
+        uint16_t max_count = (g_obj_count > g_prev_snapshot_count) ? g_obj_count : g_prev_snapshot_count;
+        for (uint16_t i = 0; i < max_count; ++i)
+        {
+            kgfx_obj_snapshot *prev = (i < g_prev_snapshot_count) ? &g_prev_snapshot[i] : 0;
+            kgfx_obj_snapshot *curr = (i < g_obj_count) ? &current[i] : 0;
+            dirty_compare_and_accumulate(prev, curr, &dirty);
+        }
+    }
+
+    if (!dirty.enabled)
+    {
+        for (uint16_t i = 0; i < g_obj_count; ++i)
+            g_prev_snapshot[i] = current[i];
+        g_prev_snapshot_count = g_obj_count;
+        g_prev_clear_color = clear_color;
+        g_have_prev_frame = 1;
+        return;
+    }
+
+    if (clip_equal(&dirty, &full))
+        full_redraw = 1;
+
+    // 4) refresh the dirty part of the backbuffer
+    if (full_redraw)
+    {
+        g_bb_clip = (kgfx_clip_rect){0, 0, 0, 0, 0};
+        bb_clear(clear_color);
+    }
+    else
+    {
+        g_bb_clip = dirty;
+        bb_clear_region(&dirty, clear_color);
+    }
+
+    // 5) draw by kind, clipped to the dirty region when partial
     for (uint16_t i = 0; i < n; ++i)
     {
         kgfx_clip_rect prev_clip = g_bb_clip;
         const kgfx_obj *o = &g_objs[entries[i].idx];
         const kgfx_resolved_obj *r = &resolved[entries[i].idx];
+
+        if (!full_redraw && !clip_intersects(&current[entries[i].idx].bounds, &dirty))
+            continue;
+
+        g_bb_clip = r->clip;
+        if (prev_clip.enabled && !clip_intersect(&g_bb_clip, &prev_clip))
+        {
+            g_bb_clip = prev_clip;
+            continue;
+        }
+
         switch (o->kind)
         {
         case KGFX_OBJ_RECT:
-            g_bb_clip = r->clip;
             bb_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h, o->fill, o->alpha);
             if (o->outline_width)
                 bb_rect_outline_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
                                      o->outline_width, o->outline, o->outline_alpha);
             break;
         case KGFX_OBJ_CIRCLE:
-            g_bb_clip = r->clip;
             // fill first
             bb_circle_fill_clip(r->origin_x, r->origin_y, o->u.circle.r, o->fill, o->alpha);
             // outside outline second
@@ -1212,7 +1713,6 @@ void kgfx_render_all(kcolor clear_color)
             break;
         case KGFX_OBJ_TEXT: {
             const kgfx_text_data *t = &o->u.text;
-            g_bb_clip = r->clip;
             if (t->font && t->text && t->scale)
             {
                 // text uses fill/alpha as the glyph color, and outline_* for border
@@ -1230,7 +1730,6 @@ void kgfx_render_all(kcolor clear_color)
         }
         case KGFX_OBJ_IMAGE: {
             const kgfx_image_data *im = &o->u.image;
-            g_bb_clip = r->clip;
 
             // draw image first
             if (im->src_w == im->w && im->src_h == im->h)
