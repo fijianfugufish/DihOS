@@ -258,7 +258,7 @@ static void tpd_add_scroll_delta(int32_t dy, int32_t step)
     if (step <= 0)
         return;
 
-    g_tpd_scroll_accum_y = dy;
+    g_tpd_scroll_accum_y += dy;
 
     while (g_tpd_scroll_accum_y >= step)
     {
