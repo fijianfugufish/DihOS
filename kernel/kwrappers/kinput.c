@@ -6,12 +6,16 @@
 
 static uint8_t g_keys_now[256];
 static uint8_t g_keys_prev[256];
+static uint8_t g_i2c_kbd_keys[256];
+static uint8_t g_usb_kbd_keys[256];
 static kinput_mouse_state g_mouse;
 static uint8_t g_tpd_buttons = 0;
 static uint8_t g_usb_mouse_buttons = 0;
 static int32_t g_tpd_last_x = 0;
 static int32_t g_tpd_last_y = 0;
 static uint8_t g_tpd_have_last = 0;
+static int32_t g_tpd_motion_accum_x = 0;
+static int32_t g_tpd_motion_accum_y = 0;
 
 static usb_hid_t g_usb;
 static uint8_t g_usb_ok = 0;
@@ -22,6 +26,9 @@ static uint8_t g_usb_ok = 0;
 #define KINPUT_TPD_MODE_SCROLL 2u
 #define KINPUT_TPD_SCROLL_STEP 96
 #define KINPUT_TPD_MOTION_PCT 35u
+#define KINPUT_TPD_MOTION_PCT_MID 30u
+#define KINPUT_TPD_MOTION_PCT_LOW 24u
+#define KINPUT_TPD_MOTION_PCT_SLOW 18u
 #define KINPUT_TPD_REL_SCROLL_START_DY 5
 #define KINPUT_TPD_REL_SCROLL_MAX_DX 1
 #define KINPUT_TPD_REL_SCROLL_STEP 6
@@ -119,10 +126,22 @@ static void keys_copy(uint8_t *dst, const uint8_t *src)
         dst[i] = src[i];
 }
 
-static void set_key(uint8_t usage)
+static void set_key_in(uint8_t *dst, uint8_t usage)
 {
-    if (usage)
-        g_keys_now[usage] = 1;
+    if (dst && usage)
+        dst[usage] = 1;
+}
+
+static void merge_key_bitmap(const uint8_t *src)
+{
+    if (!src)
+        return;
+
+    for (uint32_t i = 0; i < 256u; ++i)
+    {
+        if (src[i] != 0u)
+            g_keys_now[i] = 1u;
+    }
 }
 
 static int16_t rd16s(const uint8_t *p)
@@ -174,20 +193,33 @@ static int32_t kinput_abs_i32(int32_t v)
     return (v < 0) ? -v : v;
 }
 
-static int32_t kinput_scale_pct_i32(int32_t raw, uint32_t pct)
+static int32_t tpd_scale_axis_with_accum(int32_t raw, int32_t *accum, uint32_t pct)
 {
-    uint32_t mag = 0;
-    uint32_t scaled = 0;
+    int32_t emit = 0;
 
-    if (raw == 0)
+    if (!accum || raw == 0)
         return 0;
 
-    mag = (raw < 0) ? (uint32_t)(-raw) : (uint32_t)raw;
-    scaled = (mag * pct + 50u) / 100u;
-    if (scaled == 0u)
-        scaled = 1u;
+    *accum += raw * (int32_t)pct;
+    emit = *accum / 100;
+    *accum -= emit * 100;
+    return emit;
+}
 
-    return (raw < 0) ? -(int32_t)scaled : (int32_t)scaled;
+static uint32_t tpd_motion_curve_pct(int32_t dx, int32_t dy)
+{
+    uint32_t mag_x = (uint32_t)kinput_abs_i32(dx);
+    uint32_t mag_y = (uint32_t)kinput_abs_i32(dy);
+    uint32_t mag = (mag_x > mag_y) ? mag_x : mag_y;
+
+    if (mag <= 1u)
+        return KINPUT_TPD_MOTION_PCT_SLOW;
+    if (mag <= 3u)
+        return KINPUT_TPD_MOTION_PCT_LOW;
+    if (mag <= 6u)
+        return KINPUT_TPD_MOTION_PCT_MID;
+
+    return KINPUT_TPD_MOTION_PCT;
 }
 
 static uint32_t hid_item_u32(const uint8_t *p, uint8_t nbytes)
@@ -249,8 +281,10 @@ static void tpd_clear_layouts(void)
 
 static void tpd_add_cursor_motion(int32_t dx, int32_t dy)
 {
-    g_mouse.dx += kinput_scale_pct_i32(dx, KINPUT_TPD_MOTION_PCT);
-    g_mouse.dy += kinput_scale_pct_i32(dy, KINPUT_TPD_MOTION_PCT);
+    uint32_t pct = tpd_motion_curve_pct(dx, dy);
+
+    g_mouse.dx += tpd_scale_axis_with_accum(dx, &g_tpd_motion_accum_x, pct);
+    g_mouse.dy += tpd_scale_axis_with_accum(dy, &g_tpd_motion_accum_y, pct);
 }
 
 static void tpd_add_scroll_delta(int32_t dy, int32_t step)
@@ -1008,43 +1042,49 @@ static void maybe_configure_touchpad_layouts(const hidi2c_device *tpd)
 
 /* -------------------- keyboard parsers -------------------- */
 
-static void merge_keyboard_boot_report(const uint8_t *data, uint32_t len)
+static void decode_keyboard_boot_report(uint8_t *dst, const uint8_t *data, uint32_t len)
 {
     uint8_t mods = 0;
 
-    if (!data || len < 8)
+    if (!dst)
+        return;
+
+    keys_clear(dst);
+
+    if (!data || len < 8u)
         return;
 
     mods = data[0];
 
-    if (mods & 0x01) set_key(0xE0);
-    if (mods & 0x02) set_key(0xE1);
-    if (mods & 0x04) set_key(0xE2);
-    if (mods & 0x08) set_key(0xE3);
-    if (mods & 0x10) set_key(0xE4);
-    if (mods & 0x20) set_key(0xE5);
-    if (mods & 0x40) set_key(0xE6);
-    if (mods & 0x80) set_key(0xE7);
+    if (mods & 0x01u) set_key_in(dst, 0xE0u);
+    if (mods & 0x02u) set_key_in(dst, 0xE1u);
+    if (mods & 0x04u) set_key_in(dst, 0xE2u);
+    if (mods & 0x08u) set_key_in(dst, 0xE3u);
+    if (mods & 0x10u) set_key_in(dst, 0xE4u);
+    if (mods & 0x20u) set_key_in(dst, 0xE5u);
+    if (mods & 0x40u) set_key_in(dst, 0xE6u);
+    if (mods & 0x80u) set_key_in(dst, 0xE7u);
 
-    for (uint32_t i = 2; i < 8; ++i)
+    for (uint32_t i = 2u; i < 8u; ++i)
     {
         uint8_t usage = data[i];
-        if (usage != 0 && usage != 1)
-            set_key(usage);
+        if (usage != 0u && usage != 1u)
+            set_key_in(dst, usage);
     }
 }
 
-static void merge_i2c_keyboard_report(const hidi2c_raw_report *r)
+static uint8_t decode_i2c_keyboard_report_into(uint8_t *dst, const hidi2c_raw_report *r)
 {
-    uint32_t base = 0;
+    uint32_t base = 0u;
 
-    if (!r || !r->available || r->len < 8)
-        return;
+    if (!dst || !r || !r->available || r->len < 8u)
+        return 0u;
 
-    if (r->len >= 9)
-        base = 1;
+    if (r->len >= 9u)
+        base = 1u;
 
-    merge_keyboard_boot_report(&r->data[base], r->len - base);
+    decode_keyboard_boot_report(dst, &r->data[base], r->len - base);
+    return 1u;
 }
 
 /* -------------------- mouse parsers -------------------- */
@@ -1476,6 +1516,8 @@ void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
 {
     keys_clear(g_keys_now);
     keys_clear(g_keys_prev);
+    keys_clear(g_i2c_kbd_keys);
+    keys_clear(g_usb_kbd_keys);
 
     g_mouse.dx = 0;
     g_mouse.dy = 0;
@@ -1483,6 +1525,8 @@ void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
     g_mouse.buttons = 0;
     g_tpd_buttons = 0;
     g_usb_mouse_buttons = 0;
+    g_tpd_motion_accum_x = 0;
+    g_tpd_motion_accum_y = 0;
 
     tpd_reset_tracking();
     tpd_clear_layouts();
@@ -1524,7 +1568,10 @@ void kinput_poll(void)
     tpd = i2c1_hidi2c_touchpad();
 
     if (kbd)
-        merge_i2c_keyboard_report(&kbd->last_report);
+    {
+        (void)decode_i2c_keyboard_report_into(g_i2c_kbd_keys, &kbd->last_report);
+        merge_key_bitmap(g_i2c_kbd_keys);
+    }
 
     if (tpd)
     {
@@ -1545,7 +1592,9 @@ void kinput_poll(void)
     {
         got = 0;
         if (g_usb.has_keyboard && usb_hid_kbd_read(&g_usb, kbd_report, &got) == 0 && got >= 8)
-            merge_keyboard_boot_report(kbd_report, got);
+            decode_keyboard_boot_report(g_usb_kbd_keys, kbd_report, got);
+        if (g_usb.has_keyboard)
+            merge_key_bitmap(g_usb_kbd_keys);
 
         got = 0;
         if (g_usb.has_mouse && usb_hid_mouse_read(&g_usb, mouse_report, &got) == 0 && got >= 1)

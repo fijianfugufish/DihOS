@@ -347,18 +347,18 @@ void kmain(const boot_info *bi)
         kbutton_update_all();
 
         /* keyboard edge tests */
-        if (kinput_key_pressed(KEY_A))  /* HID usage 0x04 = 'A' */
-            terminal_print("A pressed\n");
+        if (kinput_key_pressed(KEY_A)) 
+            terminal_print("A pressed");
 
         if (kinput_key_released(KEY_A))
-            terminal_print("A released\n");
+            terminal_print("A released");
 
         /* optional extra sanity checks */
-        if (kinput_key_pressed(KEY_LSHIFT))  /* Left Shift */
-            terminal_print("LShift pressed\n");
+        if (kinput_key_pressed(KEY_LSHIFT))  
+            terminal_print("LShift pressed");
 
         if (kinput_key_released(KEY_LSHIFT))
-            terminal_print("LShift released\n");
+            terminal_print("LShift released");
 
         kgfx_render_all(black);
         frame++;

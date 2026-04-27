@@ -387,6 +387,6 @@ void Terminal::UpdateInput()
         mouse.y >= root->u.rect.y + (int32_t)root->u.rect.h)
         return;
 
-    scroll_y += mouse.wheel * 24;
+    scroll_y += mouse.wheel * 48;
     text_ptr->u.text.y = text_base_y + scroll_y;
 }
