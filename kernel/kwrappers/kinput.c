@@ -1554,11 +1554,13 @@ void kinput_poll(void)
 
     g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_usb_mouse_buttons);
 
+    /* debug stuff
     if (g_keys_now[KINPUT_KEY_A] != 0u && g_keys_prev[KINPUT_KEY_A] == 0u)
         tpd_debug_dump_recent();
 
     if (g_keys_now[KINPUT_KEY_P] != 0u && g_keys_prev[KINPUT_KEY_P] == 0u)
         terminal_flush_log();
+    */
 }
 
 int kinput_key_down(uint8_t usage)
