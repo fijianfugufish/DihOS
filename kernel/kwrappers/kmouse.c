@@ -68,6 +68,7 @@ static uint8_t kmouse_cursor_needs_bw_invert(kmouse_cursor cursor)
     case KMOUSE_CURSOR_SIZE2:
     case KMOUSE_CURSOR_SIZE3:
     case KMOUSE_CURSOR_SIZE4:
+    case KMOUSE_CURSOR_BEAM:
         return 1u;
     default:
         return 0u;

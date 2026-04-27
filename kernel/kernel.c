@@ -10,6 +10,7 @@
 #include "kwrappers/kinput.h"
 #include "kwrappers/kmouse.h"
 #include "kwrappers/kbutton.h"
+#include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 
@@ -43,6 +44,7 @@ void kmain(const boot_info *bi)
     pmem_init(bi);
 
     kbutton_init();
+    ktextbox_init();
     kwindow_init();
 
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
@@ -332,8 +334,6 @@ void kmain(const boot_info *bi)
 
     kgfx_render_all(black);
 
-    terminal_clear_no_flush();
-
     uint32_t frame = 0;
 
     static uint32_t dbg_tick = 0;
@@ -345,20 +345,7 @@ void kmain(const boot_info *bi)
         terminal_update_input();
         kwindow_update_all();
         kbutton_update_all();
-
-        /* keyboard edge tests */
-        if (kinput_key_pressed(KEY_A)) 
-            terminal_print("A pressed");
-
-        if (kinput_key_released(KEY_A))
-            terminal_print("A released");
-
-        /* optional extra sanity checks */
-        if (kinput_key_pressed(KEY_LSHIFT))  
-            terminal_print("LShift pressed");
-
-        if (kinput_key_released(KEY_LSHIFT))
-            terminal_print("LShift released");
+        ktextbox_update_all();
 
         kgfx_render_all(black);
         frame++;

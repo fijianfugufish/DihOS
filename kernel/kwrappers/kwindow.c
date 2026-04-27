@@ -8,6 +8,7 @@
 #define KWINDOW_MOUSE_LEFT 0x01u
 #define KWINDOW_MIN_CLIENT_HEIGHT 20u
 #define KWINDOW_RESIZE_BORDER 6
+#define KWINDOW_RESIZE_INSIDE_EXTRA 3
 #define KWINDOW_RESIZE_LEFT 0x01u
 #define KWINDOW_RESIZE_RIGHT 0x02u
 #define KWINDOW_RESIZE_TOP 0x04u
@@ -379,31 +380,37 @@ static int kwindow_point_in_bounds(int32_t x, int32_t y, const kwindow_resolved_
     return x >= r->clip.x0 && y >= r->clip.y0 && x < r->clip.x1 && y < r->clip.y1;
 }
 
-static uint8_t kwindow_hit_resize_edges(const kwindow_resolved_rect *r, int32_t x, int32_t y)
+static uint8_t kwindow_hit_resize_edges(const kwindow_resolved_rect *r, int32_t x, int32_t y, uint16_t outline_width)
 {
     uint8_t edges = 0;
     int32_t x0 = 0;
     int32_t y0 = 0;
     int32_t x1 = 0;
     int32_t y1 = 0;
+    int32_t outside = 0;
+    int32_t inside = 0;
 
     if (!r || !r->valid)
         return 0;
-    if (!kwindow_point_in_bounds(x, y, r))
-        return 0;
-
+    
     x0 = r->clip.x0;
     y0 = r->clip.y0;
     x1 = r->clip.x1 - 1;
     y1 = r->clip.y1 - 1;
+    outside = (int32_t)outline_width;
+    inside = KWINDOW_RESIZE_BORDER + KWINDOW_RESIZE_INSIDE_EXTRA;
 
-    if (x - x0 < KWINDOW_RESIZE_BORDER)
+    if (x < (x0 - outside) || x > (x1 + outside) ||
+        y < (y0 - outside) || y > (y1 + outside))
+        return 0;
+
+    if (x >= (x0 - outside) && x < (x0 + inside))
         edges |= KWINDOW_RESIZE_LEFT;
-    if (x1 - x < KWINDOW_RESIZE_BORDER)
+    if (x <= (x1 + outside) && x > (x1 - inside))
         edges |= KWINDOW_RESIZE_RIGHT;
-    if (y - y0 < KWINDOW_RESIZE_BORDER)
+    if (y >= (y0 - outside) && y < (y0 + inside))
         edges |= KWINDOW_RESIZE_TOP;
-    if (y1 - y < KWINDOW_RESIZE_BORDER)
+    if (y <= (y1 + outside) && y > (y1 - inside))
         edges |= KWINDOW_RESIZE_BOTTOM;
 
     return edges;
@@ -927,7 +934,8 @@ void kwindow_update_all(void)
 
             if (!G_windows[i].fullscreen && !over_close && !over_fullscreen)
             {
-                resize_edges = kwindow_hit_resize_edges(&root_bounds, mouse.x, mouse.y);
+                resize_edges = kwindow_hit_resize_edges(&root_bounds, mouse.x, mouse.y,
+                                                        G_windows[i].style.body_outline_width);
                 if (resize_edges && (resize_candidate_idx < 0 || root_bounds.z >= resize_candidate_z))
                 {
                     resize_candidate_idx = (int)i;
@@ -996,7 +1004,8 @@ void kwindow_update_all(void)
             if (over_close || over_fullscreen)
                 continue;
 
-            edges = kwindow_hit_resize_edges(&root_bounds, mouse.x, mouse.y);
+            edges = kwindow_hit_resize_edges(&root_bounds, mouse.x, mouse.y,
+                                             G_windows[i].style.body_outline_width);
             if (!edges)
                 continue;
 
