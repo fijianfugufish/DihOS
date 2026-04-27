@@ -82,6 +82,7 @@ extern "C"
 
     void kwindow_set_visible(kwindow_handle h, uint8_t visible);
     int kwindow_visible(kwindow_handle h);
+    int kwindow_raise(kwindow_handle h);
     kgfx_obj_handle kwindow_root(kwindow_handle h);
 
 #ifdef __cplusplus

@@ -364,6 +364,15 @@ void kbutton_set_callback(kbutton_handle h, kbutton_on_click_fn on_click, void *
     G_buttons[h.idx].user = user;
 }
 
+void kbutton_set_style(kbutton_handle h, const kbutton_style *style)
+{
+    if (h.idx < 0 || h.idx >= KBUTTON_MAX || !G_buttons[h.idx].used || !style)
+        return;
+
+    G_buttons[h.idx].style = *style;
+    kbutton_apply_visual(&G_buttons[h.idx]);
+}
+
 void kbutton_set_enabled(kbutton_handle h, uint8_t enabled)
 {
     if (h.idx < 0 || h.idx >= KBUTTON_MAX || !G_buttons[h.idx].used)

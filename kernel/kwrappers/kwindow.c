@@ -1064,6 +1064,13 @@ int kwindow_visible(kwindow_handle h)
     return G_windows[h.idx].visible != 0;
 }
 
+int kwindow_raise(kwindow_handle h)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return 0;
+    return kwindow_raise_to_front(h.idx);
+}
+
 kgfx_obj_handle kwindow_root(kwindow_handle h)
 {
     if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)

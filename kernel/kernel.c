@@ -12,6 +12,8 @@
 #include "kwrappers/kbutton.h"
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
+#include "apps/desktop_shell_api.h"
+#include "apps/file_explorer_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 
 #include "terminal/terminal_api.h"
@@ -95,14 +97,6 @@ void kmain(const boot_info *bi)
 
     terminal_clear();
     kgfx_render_all(black);
-
-    // Load images (BMP -> ARGB32) only if mounted
-    kimg cat_img = (kimg){0};
-    int have_cat = 0;
-    if (mounted && kimg_load_bmp(&cat_img, "0:/OS/System/Images/cat.bmp") == 0)
-    {
-        have_cat = 1;
-    }
 
     /*
 
@@ -240,91 +234,18 @@ void kmain(const boot_info *bi)
     }
     */
 
-    // Scene
-    kwindow_style demo_window_style = kwindow_style_default();
-    kgfx_obj_handle taskbar = kgfx_obj_add_rect(0, 0, (uint32_t)kgfx_info()->width, 28, 0, dark_gray, 1);
-    kgfx_obj_handle winA = kgfx_obj_add_rect(40, 60, 320, 180, 1, yellow_green, 1);
-    kgfx_obj_handle winB = kgfx_obj_add_circle(260, 180, 60, 2, dark_turquoise, 1);
-    kwindow_handle demo_window = {-1};
-
-    kgfx_obj_ref(taskbar)->outline_width = 2;
-    kgfx_obj_ref(taskbar)->outline = black;
-    kgfx_obj_ref(winA)->outline_width = 3;
-    kgfx_obj_ref(winA)->outline = gold;
-    kgfx_obj_ref(winB)->outline_width = 4;
-    kgfx_obj_ref(winB)->outline = white;
-
-    // Show status via fills
-    kgfx_obj_set_fill(winA, mounted ? yellow_green : red);
-    kgfx_obj_set_fill(winB, have_font ? gold : red);
-    kgfx_obj_set_fill(taskbar, have_cat ? cyan : red);
-
-    demo_window = kwindow_create(120, 120, 340, 220, 20,
-                                 have_font ? &font : 0,
-                                 "Demo Window",
-                                 &demo_window_style);
-    (void)demo_window;
-
     if (have_font)
     {
-        int cx = (int)kgfx_info()->width / 2;
-        kgfx_obj_add_text(&font, "left aligned\nsecond line", 20, 40, 10, white, 255, 2, 1, 4, KTEXT_ALIGN_LEFT, 1);
-        kgfx_obj_handle tCenter = kgfx_obj_add_text(&font, "center title", cx, 120, 11, yellow_green, 255, 3, 2, 6, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj *tc = kgfx_obj_ref(tCenter);
-        tc->outline_width = 3;
-        tc->outline = red;
-        tc->outline_alpha = 255;
-        kgfx_obj_add_text(&font, "right edge", (int)kgfx_info()->width - 20, 180, 12, cyan, 255, 2, 1, 4, KTEXT_ALIGN_RIGHT, 1);
-
-        /*
-        kcolor ok_col = (kcolor){80, 255, 80};
-        kcolor bad_col = (kcolor){255, 80, 80};
-        kcolor info_col = (kcolor){240, 240, 240};
-
-        kcolor c = have_cat ? ok_col : bad_col;
-
-        kgfx_obj_handle t1 = kgfx_obj_add_text(&font, line1, cx, 220, 11, c, 255, 3, 2, 6, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t2 = kgfx_obj_add_text(&font, line2, cx, 320, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t3 = kgfx_obj_add_text(&font, line3, cx, 420, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t4 = kgfx_obj_add_text(&font, line4, cx, 520, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t5 = kgfx_obj_add_text(&font, line5, cx, 620, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t6 = kgfx_obj_add_text(&font, line6, cx, 720, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-        kgfx_obj_handle t7 = kgfx_obj_add_text(&font, line7, cx, 820, 11, info_col, 255, 2, 1, 4, KTEXT_ALIGN_CENTER, 1);
-
-        kgfx_obj_ref(t1)->outline_width = 3;
-        kgfx_obj_ref(t2)->outline_width = 2;
-        kgfx_obj_ref(t3)->outline_width = 2;
-        kgfx_obj_ref(t4)->outline_width = 2;
-        kgfx_obj_ref(t5)->outline_width = 2;
-        kgfx_obj_ref(t6)->outline_width = 2;
-        kgfx_obj_ref(t7)->outline_width = 2;
-        */
-    }
-
-    if (have_cat)
-    {
-        int cat_x = 500;
-        int cat_y = 400;
-
-        kgfx_obj_handle cat = kgfx_obj_add_image(cat_img.px, cat_img.w, cat_img.h, cat_x, cat_y, cat_img.w);
-
-        kgfx_obj *co = kgfx_obj_ref(cat);
-        co->alpha = 255;
-        co->outline_width = 3;
-        co->outline = white;
-        co->outline_alpha = 255;
-        co->z = 5;
-
-        kgfx_image_set_sample_mode(cat, KGFX_IMAGE_SAMPLE_NEAREST);
-        kgfx_image_set_scale(cat, 500);
-
-        terminal_success("wowo we have cat");
-        terminal_print("how cool");
+        file_explorer_init(&font);
+        terminal_success("file explorer online");
     }
     else
     {
-        terminal_warn("cat not loaded");
+        terminal_warn("font unavailable; explorer skipped");
     }
+
+    desktop_shell_init(have_font ? &font : 0);
+    terminal_success("desktop shell online");
 
     if (kmouse_init() != 0)
     {
@@ -344,6 +265,8 @@ void kmain(const boot_info *bi)
         kmouse_update();
         terminal_update_input();
         kwindow_update_all();
+        file_explorer_update();
+        desktop_shell_update();
         kbutton_update_all();
         ktextbox_update_all();
 

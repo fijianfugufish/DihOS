@@ -110,6 +110,16 @@ extern "C" void terminal_set_loud()
     g_terminal.SetLoud();
 }
 
+extern "C" void terminal_activate(void)
+{
+    g_terminal.Activate();
+}
+
+extern "C" int terminal_visible(void)
+{
+    return g_terminal.Visible();
+}
+
 extern "C" void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user)
 {
     g_capture_mirror = mirror_to_terminal ? 1u : 0u;

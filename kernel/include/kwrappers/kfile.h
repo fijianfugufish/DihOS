@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include "usb/ff.h" // ok to expose; your kernel already depends on FatFs
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
 typedef struct
 {
     FIL fil;
@@ -47,3 +52,7 @@ int kfile_mkdir(const char *p);
 int kdir_open(KDir *d, const char *path);
 int kdir_next(KDir *d, kdirent *out); // 1=entry, 0=end, -1=err
 void kdir_close(KDir *d);
+
+#ifdef __cplusplus
+}
+#endif

@@ -32,6 +32,8 @@ extern "C"
     void terminal_toggle_quiet();
     void terminal_set_quiet();
     void terminal_set_loud();
+    void terminal_activate(void);
+    int terminal_visible(void);
     void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
     void terminal_capture_end(void);
 

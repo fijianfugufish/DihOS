@@ -52,6 +52,7 @@ extern "C"
 
     kgfx_obj_handle kbutton_root(kbutton_handle h);
     void kbutton_set_callback(kbutton_handle h, kbutton_on_click_fn on_click, void *user);
+    void kbutton_set_style(kbutton_handle h, const kbutton_style *style);
     void kbutton_set_enabled(kbutton_handle h, uint8_t enabled);
     int kbutton_enabled(kbutton_handle h);
     int kbutton_hovered(kbutton_handle h);

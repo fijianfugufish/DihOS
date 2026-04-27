@@ -713,6 +713,28 @@ void Terminal::SetQuiet() { terminal_quiet = 1; }
 
 void Terminal::SetLoud() { terminal_quiet = 0; }
 
+void Terminal::Activate()
+{
+    if (window.idx < 0)
+        return;
+
+    kwindow_set_visible(window, 1);
+    (void)kwindow_raise(window);
+
+    if (input_box.idx >= 0)
+        ktextbox_set_focus(input_box, 1);
+
+    if (SyncLayoutFromWindow())
+        RefreshVisibleLines();
+}
+
+int Terminal::Visible() const
+{
+    if (window.idx < 0)
+        return 0;
+    return kwindow_visible(window);
+}
+
 void Terminal::UpdateInput()
 {
     kmouse_state mouse = {0};
@@ -741,6 +763,8 @@ void Terminal::UpdateInput()
     root = kgfx_obj_ref(kwindow_root(window));
     if (!root || root->kind != KGFX_OBJ_RECT || !root->visible)
     {
+        if (input_box.idx >= 0 && ktextbox_focused(input_box))
+            ktextbox_set_focus(input_box, 0);
         prev_mouse_buttons = mouse.buttons;
         return;
     }

@@ -29,6 +29,8 @@ public:
     void ToggleQuiet();
     void SetQuiet();
     void SetLoud();
+    void Activate();
+    int Visible() const;
 
 private:
     static const int LINE_TEXT_CAP = 512;
