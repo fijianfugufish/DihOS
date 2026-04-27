@@ -1242,6 +1242,15 @@ static uint8_t scope_has_any_tcpd_power_methods(uint8_t has_ps0,
     return (uint8_t)((has_ps0 || has_ps3 || has_sta || has_ini) ? 1u : 0u);
 }
 
+static uint8_t scope_has_any_eckb_setup_methods(uint8_t has_ps0,
+                                                uint8_t has_on,
+                                                uint8_t has_rst,
+                                                uint8_t has_sta,
+                                                uint8_t has_ini)
+{
+    return (uint8_t)((has_ps0 || has_on || has_rst || has_sta || has_ini) ? 1u : 0u);
+}
+
 static void maybe_export_tcpd_methods(const uint8_t *aml,
                                       const hidi2c_acpi_summary_t *s)
 {
@@ -1422,6 +1431,328 @@ static void maybe_export_tcpd_methods(const uint8_t *aml,
                            g_hidi2c_regs.tcpd_ini_body,
                            HIDI2C_ACPI_MAX_METHOD_BODY,
                            "ACPI TCPD _INI bytes captured");
+    }
+}
+
+static void maybe_export_eckb_methods(const uint8_t *aml,
+                                      const hidi2c_acpi_summary_t *s,
+                                      uint32_t dev_body_start,
+                                      uint32_t dev_body_end)
+{
+    uint8_t dev_has_on = 0;
+    uint8_t any_setup = 0;
+
+    if (!aml || !s)
+        return;
+
+    if (dev_body_end > dev_body_start)
+        dev_has_on = has_name_or_method(aml, dev_body_start, dev_body_end, "_ON_");
+
+    if (dev_body_end > dev_body_start && s->has_sta)
+    {
+        terminal_print("ACPI ECKB _STA source: device\n");
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_STA",
+                           &g_hidi2c_regs.eckb_sta_valid,
+                           &g_hidi2c_regs.eckb_sta_len,
+                           g_hidi2c_regs.eckb_sta_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _STA bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->parent_body_end > s->parent_body_start && s->parent_has_sta)
+    {
+        terminal_print("ACPI ECKB _STA source: parent\n");
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_STA",
+                           &g_hidi2c_regs.eckb_sta_valid,
+                           &g_hidi2c_regs.eckb_sta_len,
+                           g_hidi2c_regs.eckb_sta_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _STA bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start && s->grandparent_has_sta)
+    {
+        terminal_print("ACPI ECKB _STA source: grandparent\n");
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_STA",
+                           &g_hidi2c_regs.eckb_sta_valid,
+                           &g_hidi2c_regs.eckb_sta_len,
+                           g_hidi2c_regs.eckb_sta_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _STA bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start && s->ggparent_has_sta)
+    {
+        terminal_print("ACPI ECKB _STA source: ggparent\n");
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_STA",
+                           &g_hidi2c_regs.eckb_sta_valid,
+                           &g_hidi2c_regs.eckb_sta_len,
+                           g_hidi2c_regs.eckb_sta_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _STA bytes captured");
+        any_setup = 1u;
+    }
+
+    if (dev_body_end > dev_body_start && dev_has_on)
+    {
+        terminal_print("ACPI ECKB _ON_ source: device\n");
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_ON_",
+                           &g_hidi2c_regs.eckb_on_valid,
+                           &g_hidi2c_regs.eckb_on_len,
+                           g_hidi2c_regs.eckb_on_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _ON_ bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->parent_body_end > s->parent_body_start && s->parent_has_on)
+    {
+        terminal_print("ACPI ECKB _ON_ source: parent\n");
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_ON_",
+                           &g_hidi2c_regs.eckb_on_valid,
+                           &g_hidi2c_regs.eckb_on_len,
+                           g_hidi2c_regs.eckb_on_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _ON_ bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start && s->grandparent_has_on)
+    {
+        terminal_print("ACPI ECKB _ON_ source: grandparent\n");
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_ON_",
+                           &g_hidi2c_regs.eckb_on_valid,
+                           &g_hidi2c_regs.eckb_on_len,
+                           g_hidi2c_regs.eckb_on_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _ON_ bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start && s->ggparent_has_on)
+    {
+        terminal_print("ACPI ECKB _ON_ source: ggparent\n");
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_ON_",
+                           &g_hidi2c_regs.eckb_on_valid,
+                           &g_hidi2c_regs.eckb_on_len,
+                           g_hidi2c_regs.eckb_on_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _ON_ bytes captured");
+        any_setup = 1u;
+    }
+
+    if (dev_body_end > dev_body_start && s->has_ps0)
+    {
+        terminal_print("ACPI ECKB _PS0 source: device\n");
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_PS0",
+                           &g_hidi2c_regs.eckb_ps0_valid,
+                           &g_hidi2c_regs.eckb_ps0_len,
+                           g_hidi2c_regs.eckb_ps0_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _PS0 bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->parent_body_end > s->parent_body_start && s->parent_has_ps0)
+    {
+        terminal_print("ACPI ECKB _PS0 source: parent\n");
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_PS0",
+                           &g_hidi2c_regs.eckb_ps0_valid,
+                           &g_hidi2c_regs.eckb_ps0_len,
+                           g_hidi2c_regs.eckb_ps0_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _PS0 bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start && s->grandparent_has_ps0)
+    {
+        terminal_print("ACPI ECKB _PS0 source: grandparent\n");
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_PS0",
+                           &g_hidi2c_regs.eckb_ps0_valid,
+                           &g_hidi2c_regs.eckb_ps0_len,
+                           g_hidi2c_regs.eckb_ps0_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _PS0 bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start && s->ggparent_has_ps0)
+    {
+        terminal_print("ACPI ECKB _PS0 source: ggparent\n");
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_PS0",
+                           &g_hidi2c_regs.eckb_ps0_valid,
+                           &g_hidi2c_regs.eckb_ps0_len,
+                           g_hidi2c_regs.eckb_ps0_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _PS0 bytes captured");
+        any_setup = 1u;
+    }
+
+    if (dev_body_end > dev_body_start && s->has_rst)
+    {
+        terminal_print("ACPI ECKB _RST source: device\n");
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_RST",
+                           &g_hidi2c_regs.eckb_rst_valid,
+                           &g_hidi2c_regs.eckb_rst_len,
+                           g_hidi2c_regs.eckb_rst_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _RST bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->parent_body_end > s->parent_body_start && s->parent_has_rst)
+    {
+        terminal_print("ACPI ECKB _RST source: parent\n");
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_RST",
+                           &g_hidi2c_regs.eckb_rst_valid,
+                           &g_hidi2c_regs.eckb_rst_len,
+                           g_hidi2c_regs.eckb_rst_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _RST bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start && s->grandparent_has_rst)
+    {
+        terminal_print("ACPI ECKB _RST source: grandparent\n");
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_RST",
+                           &g_hidi2c_regs.eckb_rst_valid,
+                           &g_hidi2c_regs.eckb_rst_len,
+                           g_hidi2c_regs.eckb_rst_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _RST bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start && s->ggparent_has_rst)
+    {
+        terminal_print("ACPI ECKB _RST source: ggparent\n");
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_RST",
+                           &g_hidi2c_regs.eckb_rst_valid,
+                           &g_hidi2c_regs.eckb_rst_len,
+                           g_hidi2c_regs.eckb_rst_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _RST bytes captured");
+        any_setup = 1u;
+    }
+
+    if (dev_body_end > dev_body_start && s->has_ini)
+    {
+        terminal_print("ACPI ECKB _INI source: device\n");
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_INI",
+                           &g_hidi2c_regs.eckb_ini_valid,
+                           &g_hidi2c_regs.eckb_ini_len,
+                           g_hidi2c_regs.eckb_ini_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _INI bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->parent_body_end > s->parent_body_start && s->parent_has_ini)
+    {
+        terminal_print("ACPI ECKB _INI source: parent\n");
+        export_method_body(aml,
+                           s->parent_body_start,
+                           s->parent_body_end,
+                           "_INI",
+                           &g_hidi2c_regs.eckb_ini_valid,
+                           &g_hidi2c_regs.eckb_ini_len,
+                           g_hidi2c_regs.eckb_ini_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _INI bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->grandparent_body_end > s->grandparent_body_start && s->grandparent_has_ini)
+    {
+        terminal_print("ACPI ECKB _INI source: grandparent\n");
+        export_method_body(aml,
+                           s->grandparent_body_start,
+                           s->grandparent_body_end,
+                           "_INI",
+                           &g_hidi2c_regs.eckb_ini_valid,
+                           &g_hidi2c_regs.eckb_ini_len,
+                           g_hidi2c_regs.eckb_ini_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _INI bytes captured");
+        any_setup = 1u;
+    }
+    else if (s->ggparent_body_end > s->ggparent_body_start && s->ggparent_has_ini)
+    {
+        terminal_print("ACPI ECKB _INI source: ggparent\n");
+        export_method_body(aml,
+                           s->ggparent_body_start,
+                           s->ggparent_body_end,
+                           "_INI",
+                           &g_hidi2c_regs.eckb_ini_valid,
+                           &g_hidi2c_regs.eckb_ini_len,
+                           g_hidi2c_regs.eckb_ini_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _INI bytes captured");
+        any_setup = 1u;
+    }
+
+    if (!any_setup &&
+        !scope_has_any_eckb_setup_methods(s->has_ps0, dev_has_on, s->has_rst, s->has_sta, s->has_ini) &&
+        !scope_has_any_eckb_setup_methods(s->parent_has_ps0, s->parent_has_on, s->parent_has_rst, s->parent_has_sta, s->parent_has_ini) &&
+        !scope_has_any_eckb_setup_methods(s->grandparent_has_ps0, s->grandparent_has_on, s->grandparent_has_rst, s->grandparent_has_sta, s->grandparent_has_ini) &&
+        !scope_has_any_eckb_setup_methods(s->ggparent_has_ps0, s->ggparent_has_on, s->ggparent_has_rst, s->ggparent_has_sta, s->ggparent_has_ini))
+    {
+        terminal_print("ACPI ECKB scope: no exportable setup scope found\n");
+    }
+
+    if (s->has_dsm && dev_body_end > dev_body_start)
+    {
+        export_method_body(aml,
+                           dev_body_start,
+                           dev_body_end,
+                           "_DSM",
+                           &g_hidi2c_regs.eckb_dsm_valid,
+                           &g_hidi2c_regs.eckb_dsm_len,
+                           g_hidi2c_regs.eckb_dsm_body,
+                           HIDI2C_ACPI_MAX_METHOD_BODY,
+                           "ACPI ECKB _DSM bytes captured");
     }
 }
 
@@ -2194,9 +2525,20 @@ static int classify_and_export_device(const uint8_t *aml,
         {
             uint32_t i;
 
-            g_hidi2c_regs.eckb_gpio_valid = 0u;
+            g_hidi2c_regs.eckb_gpio_valid = (s->gpio_first_pin != 0u) ? 1u : 0u;
             g_hidi2c_regs.eckb_gpio_pin = s->gpio_first_pin;
             g_hidi2c_regs.eckb_gpio_flags = s->gpio_flags;
+            g_hidi2c_regs.eckb_gpio_conn_type = s->gpio_conn_type;
+            g_hidi2c_regs.eckb_gpio_pin_cfg = s->gpio_pin_cfg;
+            g_hidi2c_regs.eckb_gpio_pin_guessed = s->gpio_pin_guessed;
+            g_hidi2c_regs.eckb_gpio_from_legacy = s->gpio_from_legacy;
+            g_hidi2c_regs.eckb_gpio_desc_len = s->gpio_desc_len;
+            g_hidi2c_regs.eckb_gpio_count = 1u;
+            g_hidi2c_regs.eckb_gpio_pin1 = s->gpio_first_pin;
+            g_hidi2c_regs.eckb_gpio_flags1 = s->gpio_flags;
+            g_hidi2c_regs.eckb_gpio_conn_type1 = s->gpio_conn_type;
+            g_hidi2c_regs.eckb_gpio_pin_cfg1 = s->gpio_pin_cfg;
+            g_hidi2c_regs.eckb_gpio_pin_guessed1 = s->gpio_pin_guessed;
 
             for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_source); ++i)
             {
@@ -2207,6 +2549,16 @@ static int classify_and_export_device(const uint8_t *aml,
 
             if (i == sizeof(g_hidi2c_regs.eckb_gpio_source))
                 g_hidi2c_regs.eckb_gpio_source[sizeof(g_hidi2c_regs.eckb_gpio_source) - 1] = 0;
+
+            for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_source1); ++i)
+            {
+                g_hidi2c_regs.eckb_gpio_source1[i] = s->gpio_source[i];
+                if (!s->gpio_source[i])
+                    break;
+            }
+
+            for (i = 0; i < sizeof(g_hidi2c_regs.eckb_gpio_desc_raw); ++i)
+                g_hidi2c_regs.eckb_gpio_desc_raw[i] = s->gpio_desc_raw[i];
         }
 
         if (s->gpio_found)
@@ -3676,6 +4028,9 @@ static void summarise_target_device(const uint8_t *aml, uint32_t aml_len, uint32
     if (hits_out)
         (*hits_out)++;
 
+    if (memeq_n(s.name, "ECKB", 4))
+        maybe_export_eckb_methods(aml, &s, body_start, body_end);
+
     terminal_print("dev:");
     terminal_print(s.name);
     terminal_print(" hid:");
@@ -4065,6 +4420,18 @@ int acpi_hidi2c_get_regs_from_rsdp(uint64_t rsdp_phys, hidi2c_acpi_regs *out)
     g_hidi2c_regs.eckb_gpio_pin = 0u;
     g_hidi2c_regs.eckb_gpio_flags = 0u;
     g_hidi2c_regs.eckb_gpio_source[0] = 0;
+    g_hidi2c_regs.eckb_ps0_valid = 0u;
+    g_hidi2c_regs.eckb_ps0_len = 0u;
+    g_hidi2c_regs.eckb_on_valid = 0u;
+    g_hidi2c_regs.eckb_on_len = 0u;
+    g_hidi2c_regs.eckb_rst_valid = 0u;
+    g_hidi2c_regs.eckb_rst_len = 0u;
+    g_hidi2c_regs.eckb_sta_valid = 0u;
+    g_hidi2c_regs.eckb_sta_len = 0u;
+    g_hidi2c_regs.eckb_ini_valid = 0u;
+    g_hidi2c_regs.eckb_ini_len = 0u;
+    g_hidi2c_regs.eckb_dsm_valid = 0u;
+    g_hidi2c_regs.eckb_dsm_len = 0u;
 
     g_hidi2c_regs.tcpd_gpio_valid = 0u;
     g_hidi2c_regs.tcpd_gpio_pin = 0u;
@@ -4090,7 +4457,21 @@ int acpi_hidi2c_get_regs_from_rsdp(uint64_t rsdp_phys, hidi2c_acpi_regs *out)
     g_hidi2c_regs.tcpd_gio0_reg_len = 0u;
 
     for (uint32_t i = 0; i < HIDI2C_ACPI_MAX_METHOD_BODY; ++i)
+    {
+        g_hidi2c_regs.eckb_ps0_body[i] = 0u;
+        g_hidi2c_regs.eckb_on_body[i] = 0u;
+        g_hidi2c_regs.eckb_rst_body[i] = 0u;
+        g_hidi2c_regs.eckb_sta_body[i] = 0u;
+        g_hidi2c_regs.eckb_ini_body[i] = 0u;
+        g_hidi2c_regs.eckb_dsm_body[i] = 0u;
         g_hidi2c_regs.tcpd_ps0_body[i] = 0u;
+        g_hidi2c_regs.tcpd_ps3_body[i] = 0u;
+        g_hidi2c_regs.tcpd_sta_body[i] = 0u;
+        g_hidi2c_regs.tcpd_ini_body[i] = 0u;
+        g_hidi2c_regs.tcpd_gio0_reg_body[i] = 0u;
+        g_hidi2c_regs.tcpd_dsm_body[i] = 0u;
+        g_hidi2c_regs.tcpd_gio0_dsm_body[i] = 0u;
+    }
 
     rsdp = (const acpi_rsdp_t *)(uintptr_t)rsdp_phys;
     if (!memeq_n(rsdp->sig, "RSD PTR ", 8))

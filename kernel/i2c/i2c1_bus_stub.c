@@ -91,9 +91,17 @@
 
 #define STOP_STRETCH BIT(2)
 
+/*
+  Matches Linux geni_se_config_packing(se, 8, 4, true, ...):
+  8-bit protocol words, four words packed per FIFO entry, MSB-to-LSB vectors.
+*/
+#define I2C1_PACK_8BIT_CFG0 0x0007F8FEu
+#define I2C1_PACK_8BIT_CFG1 0x000FFEFEu
+
 static uint8_t g_inited = 0;
 
 static uint8_t g_i2c1_quiet = 0;
+static uint32_t g_i2c1_zero_dump_budget = 8u;
 
 void i2c1_bus_set_quiet(uint8_t quiet)
 {
@@ -140,6 +148,59 @@ static uint32_t i2c1_error_bits(void)
            M_ILLEGAL_CMD_EN |
            M_CMD_FAILURE_EN |
            M_CMD_ABORT_EN;
+}
+
+static uint32_t i2c1_rx_word_count(uint32_t rx_st)
+{
+    return (rx_st & RX_FIFO_WC_MSK);
+}
+
+static uint8_t i2c1_buffer_all_zero(const uint8_t *buf, uint32_t len)
+{
+    if (!buf)
+        return 1u;
+
+    for (uint32_t i = 0; i < len; ++i)
+    {
+        if (buf[i] != 0u)
+            return 0u;
+    }
+
+    return 1u;
+}
+
+static void i2c1_log_zero_payload_words(uint32_t first_rx_st,
+                                        const uint32_t *words,
+                                        uint32_t word_count,
+                                        uint32_t want_len)
+{
+    if (g_i2c1_quiet)
+        return;
+
+    if (g_i2c1_zero_dump_budget == 0u)
+        return;
+
+    /* Keep the forensic dump available in code, but disabled by default. */
+    return;
+
+    g_i2c1_zero_dump_budget--;
+
+    terminal_print("i2c rx zero payload st:");
+    terminal_print_hex32(first_rx_st);
+    terminal_print(" want:");
+    terminal_print_hex32(want_len);
+    terminal_print(" words:");
+    terminal_print_hex32(word_count);
+    terminal_print("\n");
+
+    for (uint32_t i = 0; i < word_count; ++i)
+    {
+        terminal_print("i2c rx w");
+        terminal_print_hex32(i);
+        terminal_print(":");
+        terminal_print_hex32(words[i]);
+        terminal_print("\n");
+    }
 }
 
 static void i2c1_drain_rx_junk(void);
@@ -258,7 +319,7 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
         uint32_t irq   = rd32(SE_GENI_M_IRQ_STATUS);
         uint32_t st    = rd32(SE_GENI_STATUS);
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = i2c1_rx_word_count(rx_st);
 
         last_irq = irq;
 
@@ -270,9 +331,26 @@ static int i2c1_wait_read_ready(uint32_t wanted_len, uint32_t *irq_out)
         }
 
         /*
-          RX_FIFO_STATUS occupancy is FIFO words, not bytes.
+          With the proper 4x8 packing enabled, the low field tracks FIFO
+          words. A 30-byte HID descriptor shows up as 8 FIFO words plus a
+          short final-word indication in RX_LAST_BYTE_VALID.
         */
         if (fifo_words >= wanted_words)
+        {
+            if (irq_out)
+                *irq_out = irq;
+            return 0;
+        }
+
+        /*
+          Large HID descriptor reads can be longer than the RX FIFO can hold
+          at once. If we wait for the whole transfer to appear before starting
+          to drain, the controller can stall right around the FIFO ceiling.
+          Start streaming as soon as any FIFO words are present for those
+          longer reads and let fifo_read_bytes() keep draining as more data
+          arrives.
+        */
+        if (wanted_words > 24u && fifo_words != 0u)
         {
             if (irq_out)
                 *irq_out = irq;
@@ -372,17 +450,21 @@ static int i2c1_wait_tx_watermark(uint32_t *irq_out)
 
 static void fifo_write_bytes_now(const uint8_t *buf, uint32_t len)
 {
-    /*
-      Revert to the empirically working mode for this platform:
-      one byte value per FIFO write.
+    uint32_t i = 0;
 
-      Yes, this looks less elegant than packed FIFO words, but the log proves
-      the packed-word version makes every TCPD pointer write time out on the
-      current controller configuration.
-    */
-    for (uint32_t i = 0; i < len; ++i)
+    while (i < len)
     {
-        wr32(SE_GENI_TX_FIFOn, (uint32_t)buf[i]);
+        uint32_t word = 0u;
+        uint32_t take = 0u;
+
+        while (take < 4u && i < len)
+        {
+            word |= ((uint32_t)buf[i]) << (take * 8u);
+            take++;
+            i++;
+        }
+
+        wr32(SE_GENI_TX_FIFOn, word);
         io_barrier();
     }
 }
@@ -450,27 +532,24 @@ static int i2c1_run_write_phase(uint8_t addr7,
 static void i2c1_dump_rx_words_once(uint32_t expected_len)
 {
     uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-    uint32_t bytes_avail = (rx_st & RX_FIFO_WC_MSK);
+    uint32_t fifo_words = i2c1_rx_word_count(rx_st);
     uint32_t is_last = (rx_st & RX_LAST) ? 1u : 0u;
-    uint32_t last_valid = ((rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT) + 1u;
-    uint32_t words;
+    uint32_t last_valid = ((rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT);
     uint32_t i;
 
     terminal_print("RXDBG st:");
     terminal_print_inline_hex32(rx_st);
     terminal_print_inline(" expected:");
     terminal_print_inline_hex32(expected_len);
-    terminal_print_inline(" bytes:");
-    terminal_print_inline_hex32(bytes_avail);
+    terminal_print_inline(" words:");
+    terminal_print_inline_hex32(fifo_words);
     terminal_print_inline(" last:");
     terminal_print_inline_hex32(is_last);
     terminal_print_inline(" last_valid:");
     terminal_print_inline_hex32(last_valid);
     terminal_print("\n");
 
-    words = (bytes_avail + 3u) >> 2;
-
-    for (i = 0; i < words; ++i)
+    for (i = 0; i < fifo_words; ++i)
     {
         uint32_t w = rd32(SE_GENI_RX_FIFOn);
         io_barrier();
@@ -487,6 +566,9 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
 {
     uint32_t got = 0;
     uint32_t spins = 0;
+    uint32_t first_rx_st = 0u;
+    uint32_t sample_words[8];
+    uint32_t sample_word_count = 0u;
 
     if (!buf || len == 0u)
         return -1;
@@ -494,7 +576,7 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
     while (got < len && spins++ < I2C1_SPIN_LIMIT)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = i2c1_rx_word_count(rx_st);
         uint32_t is_last = (rx_st & RX_LAST) ? 1u : 0u;
         uint32_t last_valid_field =
             (rx_st & RX_LAST_BYTE_VALID_MSK) >> RX_LAST_BYTE_VALID_SHFT;
@@ -502,10 +584,12 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
         if (fifo_words == 0u)
             continue;
 
+        if (first_rx_st == 0u)
+            first_rx_st = rx_st;
+
         /*
-          GENI reports FIFO occupancy in FIFO words, not raw bytes.
-          In your current packing setup we are using 8-bit packing with
-          4 bytes per FIFO word.
+          RX_FIFO_STATUS reports FIFO words. Each FIFO pop yields up to four
+          packed bytes, and the final word may be short.
         */
         while (fifo_words != 0u && got < len)
         {
@@ -514,11 +598,9 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
 
             io_barrier();
 
-            /*
-              On the final FIFO word, RX_LAST_BYTE_VALID tells us how many
-              bytes in that last word are valid. Linux treats values 1..3
-              specially; otherwise a full 4 bytes are valid.
-            */
+            if (sample_word_count < (sizeof(sample_words) / sizeof(sample_words[0])))
+                sample_words[sample_word_count++] = word;
+
             if (is_last && fifo_words == 1u)
             {
                 if (last_valid_field != 0u && last_valid_field < 4u)
@@ -537,13 +619,23 @@ static int fifo_read_bytes(uint8_t *buf, uint32_t len)
         }
 
         if (got >= len)
-            return 0;
+            break;
 
         if (is_last)
             break;
     }
 
-    return (got == len) ? 0 : -1;
+    if (got == len)
+    {
+        if (i2c1_buffer_all_zero(buf, len))
+            i2c1_log_zero_payload_words(first_rx_st,
+                                        sample_words,
+                                        sample_word_count,
+                                        len);
+        return 0;
+    }
+
+    return -1;
 }
 
 static void i2c1_drain_rx_junk(void)
@@ -553,7 +645,7 @@ static void i2c1_drain_rx_junk(void)
     while (spins++ < 256u)
     {
         uint32_t rx_st = rd32(SE_GENI_RX_FIFO_STATUS);
-        uint32_t fifo_words = (rx_st & RX_FIFO_WC_MSK);
+        uint32_t fifo_words = i2c1_rx_word_count(rx_st);
 
         if (fifo_words == 0u)
         {
@@ -572,7 +664,7 @@ static void i2c1_drain_rx_junk(void)
         wr32(SE_GENI_M_IRQ_CLEAR, M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
         io_barrier();
 
-        if ((rd32(SE_GENI_RX_FIFO_STATUS) & RX_FIFO_WC_MSK) == 0u)
+        if (i2c1_rx_word_count(rd32(SE_GENI_RX_FIFO_STATUS)) == 0u)
             break;
     }
 }
@@ -613,11 +705,11 @@ int i2c1_bus_init(void)
     wr32(SE_GENI_TX_WATERMARK_REG, 0u);
     wr32(SE_GENI_RX_WATERMARK_REG, 0u);
 
-    /* 8-bit packing */
-    wr32(SE_GENI_TX_PACKING_CFG0, 0x0000001Fu);
-    wr32(SE_GENI_TX_PACKING_CFG1, 0u);
-    wr32(SE_GENI_RX_PACKING_CFG0, 0x0000001Fu);
-    wr32(SE_GENI_RX_PACKING_CFG1, 0u);
+    /* 8-bit 4x8 packing, same vector layout used by Linux on GENI I2C */
+    wr32(SE_GENI_TX_PACKING_CFG0, I2C1_PACK_8BIT_CFG0);
+    wr32(SE_GENI_TX_PACKING_CFG1, I2C1_PACK_8BIT_CFG1);
+    wr32(SE_GENI_RX_PACKING_CFG0, I2C1_PACK_8BIT_CFG0);
+    wr32(SE_GENI_RX_PACKING_CFG1, I2C1_PACK_8BIT_CFG1);
 
     terminal_print("i2c1 cfg ok\n");
 
@@ -737,7 +829,7 @@ int i2c1_bus_write_read(uint8_t addr7,
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_read_ready(rx_len, &irq);
 
     if (!g_i2c1_quiet)
     {
@@ -807,7 +899,7 @@ int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len)
     wr32(SE_GENI_M_CMD0, build_cmd(I2C_READ, addr7, 0u));
     io_barrier();
 
-    rc = i2c1_wait_done(&irq);
+    rc = i2c1_wait_read_ready(rx_len, &irq);
 
     if (!g_i2c1_quiet)
     {

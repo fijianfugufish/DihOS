@@ -60,6 +60,44 @@ static const char *kmouse_cursor_file_name(kmouse_cursor cursor)
     }
 }
 
+static uint8_t kmouse_cursor_needs_bw_invert(kmouse_cursor cursor)
+{
+    switch (cursor)
+    {
+    case KMOUSE_CURSOR_SIZE1:
+    case KMOUSE_CURSOR_SIZE2:
+    case KMOUSE_CURSOR_SIZE3:
+    case KMOUSE_CURSOR_SIZE4:
+        return 1u;
+    default:
+        return 0u;
+    }
+}
+
+static void kmouse_invert_bw_cursor(kmouse_cursor_asset_t *asset)
+{
+    uint32_t count = 0;
+
+    if (!asset || !asset->img.px || asset->img.w == 0u || asset->img.h == 0u)
+        return;
+
+    count = asset->img.w * asset->img.h;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uint32_t px = asset->img.px[i];
+        uint32_t a = px & 0xFF000000u;
+        uint32_t rgb = px & 0x00FFFFFFu;
+
+        if (a == 0u)
+            continue;
+
+        if (rgb == 0x000000u)
+            asset->img.px[i] = a | 0x00FFFFFFu;
+        else if (rgb == 0x00FFFFFFu)
+            asset->img.px[i] = a;
+    }
+}
+
 static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
 {
     if (v < lo)
@@ -709,9 +747,14 @@ int kmouse_init(void)
         if (!file_name)
             continue;
         kmouse_build_cursor_path(path_buf, (uint32_t)sizeof(path_buf), file_name);
-        if (kmouse_load_cursor_file(&G.cursors[i], path_buf) == 0 &&
-            first_loaded == KMOUSE_CURSOR_COUNT)
-            first_loaded = (kmouse_cursor)i;
+        if (kmouse_load_cursor_file(&G.cursors[i], path_buf) == 0)
+        {
+            if (kmouse_cursor_needs_bw_invert((kmouse_cursor)i))
+                kmouse_invert_bw_cursor(&G.cursors[i]);
+
+            if (first_loaded == KMOUSE_CURSOR_COUNT)
+                first_loaded = (kmouse_cursor)i;
+        }
     }
 
     if (first_loaded == KMOUSE_CURSOR_COUNT)

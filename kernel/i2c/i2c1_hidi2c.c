@@ -11,17 +11,49 @@
 #define HIDI2C_DESC_REG_FALLBACK 0x0000u
 
 #define I2C_HID_OPCODE_RESET 0x01u
+#define I2C_HID_OPCODE_GET_REPORT 0x02u
+#define I2C_HID_OPCODE_SET_REPORT 0x03u
 #define I2C_HID_OPCODE_SET_POWER 0x08u
 #define I2C_HID_PWR_ON 0x00u
+#define I2C_HID_REPORT_TYPE_OUTPUT 0x02u
+#define I2C_HID_REPORT_TYPE_FEATURE 0x03u
+#define TCPD_PTP_INPUT_MODE_MOUSE 0x00u
+#define TCPD_PTP_INPUT_MODE_TOUCHPAD 0x03u
 
 #define TCPD_GPIO_TEST_ENABLE 0u
 
 static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
 static uint8_t g_bus_ready = 0;
+static uint32_t g_aml_gpio_pin = 0u;
 
 static uint8_t g_hidi2c_debug = 0;
 static uint16_t g_tcpd_desc_reg_hint = 0u;
+
+typedef struct
+{
+    uint8_t valid;
+    uint8_t has_report_id;
+    uint8_t report_id;
+    uint16_t value_bits;
+    uint8_t value_size;
+    uint16_t report_bits;
+} tcpd_feature_value_layout;
+
+typedef struct
+{
+    uint8_t valid;
+    uint8_t has_report_id;
+    uint8_t report_id;
+    uint16_t surface_bits;
+    uint8_t surface_size;
+    uint16_t button_bits;
+    uint8_t button_size;
+    uint16_t report_bits;
+} tcpd_selective_layout;
+
+static tcpd_feature_value_layout g_tcpd_input_mode = {0};
+static tcpd_selective_layout g_tcpd_selective = {0};
 
 extern int i2c1_bus_init(void);
 extern int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len);
@@ -67,6 +99,69 @@ static void delay_ms_approx(uint32_t ms)
         delay_us_approx(1000u);
 }
 
+static uint32_t hid_item_u32(const uint8_t *p, uint8_t nbytes)
+{
+    uint32_t v = 0u;
+
+    if (!p)
+        return 0u;
+
+    if (nbytes > 0u)
+        v |= (uint32_t)p[0];
+    if (nbytes > 1u)
+        v |= (uint32_t)p[1] << 8;
+    if (nbytes > 2u)
+        v |= (uint32_t)p[2] << 16;
+    if (nbytes > 3u)
+        v |= (uint32_t)p[3] << 24;
+
+    return v;
+}
+
+static uint32_t hid_usage_for_index(const uint32_t *usages, uint8_t usage_count,
+                                    uint8_t have_usage_range, uint32_t usage_min, uint32_t usage_max,
+                                    uint32_t index)
+{
+    if (index < usage_count)
+        return usages[index];
+
+    if (have_usage_range && usage_max >= usage_min)
+    {
+        uint32_t range_count = usage_max - usage_min + 1u;
+        if (index < range_count)
+            return usage_min + index;
+    }
+
+    return 0u;
+}
+
+static void hid_write_bits(uint8_t *data, uint32_t len, uint16_t bit_off, uint8_t bit_size, uint32_t value)
+{
+    if (!data || bit_size == 0u || bit_size > 32u)
+        return;
+
+    for (uint32_t i = 0; i < bit_size; ++i)
+    {
+        uint32_t abs_bit = (uint32_t)bit_off + i;
+        uint32_t byte_idx = abs_bit >> 3;
+        uint32_t bit_idx = abs_bit & 7u;
+
+        if (byte_idx >= len)
+            break;
+
+        if ((value >> i) & 1u)
+            data[byte_idx] |= (uint8_t)(1u << bit_idx);
+        else
+            data[byte_idx] &= (uint8_t)~(1u << bit_idx);
+    }
+}
+
+static void tcpd_clear_feature_layouts(void)
+{
+    g_tcpd_input_mode = (tcpd_feature_value_layout){0};
+    g_tcpd_selective = (tcpd_selective_layout){0};
+}
+
 static uint8_t tcpd_desc_hint_plausible(uint64_t v)
 {
     if (v == 0u)
@@ -80,6 +175,17 @@ static uint8_t tcpd_desc_hint_plausible(uint64_t v)
         return 0u;
 
     if ((v & 1u) != 0u)
+        return 0u;
+
+    return 1u;
+}
+
+static uint8_t eckb_desc_hint_plausible(uint64_t v)
+{
+    if (v == 0u || v == 0xFFFFFFFFu)
+        return 0u;
+
+    if (v > 0xFFFFu)
         return 0u;
 
     return 1u;
@@ -123,8 +229,9 @@ static uint64_t g_aml_t1 = 0;
 static void tcpd_drive_gpio_wake_edge(uint64_t value)
 {
     int rc;
+    uint32_t gpio_pin = g_aml_gpio_pin ? g_aml_gpio_pin : g_tpd.gpio_pin;
 
-    if (!g_aml_gabl || g_tpd.gpio_pin == 0u)
+    if (!g_aml_gabl || gpio_pin == 0u)
         return;
 
     rc = gpio_init();
@@ -136,35 +243,35 @@ static void tcpd_drive_gpio_wake_edge(uint64_t value)
         return;
     }
 
-    rc = gpio_set_output(g_tpd.gpio_pin);
+    rc = gpio_set_output(gpio_pin);
     if (rc != 0)
     {
         terminal_print("AML GPIO gpio_set_output rc:");
         terminal_print_hex32((uint32_t)rc);
         terminal_print(" pin:");
-        terminal_print_hex32(g_tpd.gpio_pin);
+        terminal_print_hex32(gpio_pin);
         terminal_print("\n");
         return;
     }
 
     if (value)
     {
-        (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_LOW);
+        (void)gpio_write(gpio_pin, GPIO_VALUE_LOW);
         delay_us_approx(1000u);
-        (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_HIGH);
+        (void)gpio_write(gpio_pin, GPIO_VALUE_HIGH);
         delay_ms_approx(10u);
 
         terminal_print("AML kick GPIO pin:");
-        terminal_print_hex32(g_tpd.gpio_pin);
+        terminal_print_hex32(gpio_pin);
         terminal_print("\n");
         return;
     }
 
-    (void)gpio_write(g_tpd.gpio_pin, GPIO_VALUE_LOW);
+    (void)gpio_write(gpio_pin, GPIO_VALUE_LOW);
     delay_us_approx(1000u);
 
     terminal_print("AML drive GPIO low pin:");
-    terminal_print_hex32(g_tpd.gpio_pin);
+    terminal_print_hex32(gpio_pin);
     terminal_print("\n");
 }
 
@@ -653,6 +760,110 @@ static uint8_t aml_body_present(const uint8_t *body, uint16_t len, uint8_t valid
     return 0;
 }
 
+static void eckb_try_ps0_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    if (!regs)
+        return;
+    tcpd_try_method_from_acpi("_PS0",
+                              "\\_SB.D0?_",
+                              regs->eckb_ps0_body,
+                              regs->eckb_ps0_len,
+                              aml_body_present(regs->eckb_ps0_body,
+                                               regs->eckb_ps0_len,
+                                               regs->eckb_ps0_valid));
+}
+
+static void eckb_try_on_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    if (!regs)
+        return;
+    tcpd_try_method_from_acpi("_ON_",
+                              "\\_SB.D0?_",
+                              regs->eckb_on_body,
+                              regs->eckb_on_len,
+                              aml_body_present(regs->eckb_on_body,
+                                               regs->eckb_on_len,
+                                               regs->eckb_on_valid));
+}
+
+static void eckb_try_rst_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    if (!regs)
+        return;
+    tcpd_try_method_from_acpi("_RST",
+                              "\\_SB.D0?_",
+                              regs->eckb_rst_body,
+                              regs->eckb_rst_len,
+                              aml_body_present(regs->eckb_rst_body,
+                                               regs->eckb_rst_len,
+                                               regs->eckb_rst_valid));
+}
+
+static void eckb_try_sta_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    if (!regs)
+        return;
+    tcpd_try_method_from_acpi("_STA",
+                              "\\_SB.D0?_",
+                              regs->eckb_sta_body,
+                              regs->eckb_sta_len,
+                              aml_body_present(regs->eckb_sta_body,
+                                               regs->eckb_sta_len,
+                                               regs->eckb_sta_valid));
+}
+
+static void eckb_try_ini_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    if (!regs)
+        return;
+    tcpd_try_method_from_acpi("_INI",
+                              "\\_SB.D0?_",
+                              regs->eckb_ini_body,
+                              regs->eckb_ini_len,
+                              aml_body_present(regs->eckb_ini_body,
+                                               regs->eckb_ini_len,
+                                               regs->eckb_ini_valid));
+}
+
+static void eckb_try_dsm_from_acpi(const hidi2c_acpi_regs *regs)
+{
+    static const uint8_t guid_acpi_raw[16] = {
+        0xF7, 0xF6, 0xDF, 0x3C,
+        0x67, 0x42,
+        0x55, 0x45,
+        0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+    };
+    static const uint32_t arg3_modes[] = { 2u, 0u, 1u, 4u, 3u };
+    uint64_t ret = 0;
+
+    if (!regs)
+        return;
+
+    for (uint32_t i = 0; i < sizeof(arg3_modes) / sizeof(arg3_modes[0]); ++i)
+    {
+        ret = 0;
+
+        (void)tcpd_run_dsm_typed_guid("ECKB._DSM",
+                                      "\\_SB.D0?_",
+                                      regs->eckb_dsm_body,
+                                      regs->eckb_dsm_len,
+                                      aml_body_present(regs->eckb_dsm_body,
+                                                       regs->eckb_dsm_len,
+                                                       regs->eckb_dsm_valid),
+                                      guid_acpi_raw,
+                                      1u, 1u, arg3_modes[i], &ret);
+
+        if (!eckb_desc_hint_plausible(ret))
+            continue;
+
+        g_kbd.hid_desc_reg = (uint16_t)ret;
+        terminal_print("ECKB _DSM hint reg:");
+        terminal_print_hex32((uint32_t)g_kbd.hid_desc_reg);
+        terminal_print("\n");
+        return;
+    }
+}
+
 static void tcpd_try_ps3_from_acpi(const hidi2c_acpi_regs *regs)
 {
     if (!regs)
@@ -873,6 +1084,39 @@ static void hidi2c_touchpad_wake_probe(hidi2c_device *dev)
     delay_us_approx(1000u);
 
     /* 2) write descriptor register pointer */
+    wr16(reg0, reg);
+    (void)i2c1_bus_write(dev->i2c_addr_7bit, reg0, 2);
+    delay_ms_approx(20u);
+
+    i2c1_bus_set_quiet(0);
+}
+
+static void hidi2c_keyboard_wake_probe(hidi2c_device *dev)
+{
+    uint8_t reg0[2];
+    uint16_t reg;
+
+    if (!dev)
+        return;
+
+    reg = dev->hid_desc_reg ? dev->hid_desc_reg : 0x0001u;
+
+    terminal_print("ECKB: minimal wake probe reg:");
+    terminal_print_hex32((uint32_t)reg);
+    terminal_print("\n");
+
+    if (g_kbd.gpio_pin != 0u && g_aml_gabl)
+    {
+        terminal_print("ECKB: pre-probe GPIO wake edge\n");
+        tcpd_drive_gpio_wake_edge(1u);
+        delay_ms_approx(40u);
+    }
+
+    i2c1_bus_set_quiet(1);
+
+    (void)i2c1_bus_addr_only(dev->i2c_addr_7bit);
+    delay_us_approx(1000u);
+
     wr16(reg0, reg);
     (void)i2c1_bus_write(dev->i2c_addr_7bit, reg0, 2);
     delay_ms_approx(20u);
@@ -1111,6 +1355,453 @@ static uint32_t hidi2c_encode_command(uint8_t *buf, uint8_t opcode, uint8_t repo
     }
 
     return length;
+}
+
+static uint32_t hidi2c_format_report(uint8_t *buf, uint8_t report_id, const uint8_t *data, uint32_t size)
+{
+    uint32_t length = 2u;
+
+    if (!buf)
+        return 0u;
+
+    if (report_id != 0u)
+        buf[length++] = report_id;
+
+    if (data && size != 0u)
+    {
+        for (uint32_t i = 0; i < size; ++i)
+            buf[length + i] = data[i];
+        length += size;
+    }
+
+    wr16(buf, (uint16_t)length);
+    return length;
+}
+
+static int hidi2c_set_report(hidi2c_device *dev,
+                             uint8_t report_type,
+                             uint8_t report_id,
+                             const uint8_t *payload,
+                             uint32_t payload_len)
+{
+    uint8_t cmd[96];
+    uint32_t len = 0u;
+
+    if (!dev || !dev->desc.valid || !payload || payload_len == 0u)
+        return -1;
+
+    if ((payload_len + 8u) > sizeof(cmd))
+        return -1;
+
+    wr16(cmd + len, dev->desc.wCommandRegister);
+    len += 2u;
+    len += hidi2c_encode_command(cmd + len, I2C_HID_OPCODE_SET_REPORT, report_type, report_id);
+    wr16(cmd + len, dev->desc.wDataRegister);
+    len += 2u;
+    len += hidi2c_format_report(cmd + len, report_id, payload, payload_len);
+
+    i2c1_bus_set_quiet(1);
+    if (i2c1_bus_write(dev->i2c_addr_7bit, cmd, len) != 0)
+    {
+        i2c1_bus_set_quiet(0);
+        return -1;
+    }
+    i2c1_bus_set_quiet(0);
+    return 0;
+}
+
+static void tcpd_capture_feature_value(tcpd_feature_value_layout *out,
+                                       const uint8_t *has_report_id,
+                                       const uint8_t *report_id,
+                                       uint32_t report_size,
+                                       uint32_t report_count,
+                                       uint16_t bit_base,
+                                       uint16_t bit_off)
+{
+    uint8_t rid = 0u;
+    uint16_t report_end = 0u;
+
+    if (!out || !has_report_id || !report_id || report_size == 0u || report_count == 0u)
+        return;
+
+    rid = *has_report_id ? *report_id : 0u;
+    report_end = (uint16_t)(bit_base + (uint16_t)(report_size * report_count));
+
+    if (out->valid)
+    {
+        uint8_t out_rid = out->has_report_id ? out->report_id : 0u;
+        if (out_rid != rid)
+            return;
+    }
+    else
+    {
+        out->has_report_id = *has_report_id;
+        out->report_id = rid;
+    }
+
+    if (out->value_size == 0u)
+    {
+        out->value_bits = bit_off;
+        out->value_size = (uint8_t)report_size;
+    }
+
+    if (out->report_bits < report_end)
+        out->report_bits = report_end;
+    out->valid = 1u;
+}
+
+static void tcpd_capture_selective_value(tcpd_selective_layout *out,
+                                         const uint8_t *has_report_id,
+                                         const uint8_t *report_id,
+                                         uint32_t report_size,
+                                         uint32_t report_count,
+                                         uint16_t bit_base,
+                                         uint16_t bit_off,
+                                         uint32_t usage)
+{
+    uint8_t rid = 0u;
+    uint16_t report_end = 0u;
+
+    if (!out || !has_report_id || !report_id || report_size == 0u || report_count == 0u)
+        return;
+
+    rid = *has_report_id ? *report_id : 0u;
+    report_end = (uint16_t)(bit_base + (uint16_t)(report_size * report_count));
+
+    if (out->valid || out->surface_size != 0u || out->button_size != 0u)
+    {
+        uint8_t out_rid = out->has_report_id ? out->report_id : 0u;
+        if (out_rid != rid)
+            return;
+    }
+    else
+    {
+        out->has_report_id = *has_report_id;
+        out->report_id = rid;
+    }
+
+    if (usage == 0x57u && out->surface_size == 0u)
+    {
+        out->surface_bits = bit_off;
+        out->surface_size = (uint8_t)report_size;
+    }
+    else if (usage == 0x58u && out->button_size == 0u)
+    {
+        out->button_bits = bit_off;
+        out->button_size = (uint8_t)report_size;
+    }
+
+    if (out->report_bits < report_end)
+        out->report_bits = report_end;
+    if (out->surface_size != 0u || out->button_size != 0u)
+        out->valid = 1u;
+}
+
+static int tcpd_parse_ptp_feature_reports(const uint8_t *desc, uint16_t len)
+{
+    struct
+    {
+        uint8_t usage_page;
+        uint32_t report_size;
+        uint32_t report_count;
+        uint8_t report_id;
+        uint8_t has_report_id;
+    } g, g_stack[4];
+    uint16_t bit_cursor[256];
+    uint32_t usages[16];
+    uint8_t collection_config[16];
+    uint8_t usage_count = 0u;
+    uint8_t have_usage_range = 0u;
+    uint32_t usage_min = 0u;
+    uint32_t usage_max = 0u;
+    uint8_t collection_depth = 0u;
+    uint8_t stack_depth = 0u;
+    uint16_t i = 0u;
+
+    if (!desc)
+        return -1;
+
+    tcpd_clear_feature_layouts();
+    g.usage_page = 0u;
+    g.report_size = 0u;
+    g.report_count = 0u;
+    g.report_id = 0u;
+    g.has_report_id = 0u;
+
+    for (uint32_t k = 0; k < 256u; ++k)
+        bit_cursor[k] = 0u;
+    for (uint32_t k = 0; k < 16u; ++k)
+        collection_config[k] = 0u;
+
+    while (i < len)
+    {
+        uint8_t b = desc[i++];
+        uint8_t size_code;
+        uint8_t size;
+        uint8_t type;
+        uint8_t tag;
+        uint32_t val;
+        uint8_t current_config = (collection_depth > 0u) ? collection_config[collection_depth - 1u] : 0u;
+
+        if (b == 0xFEu)
+        {
+            uint8_t long_size;
+            if (i + 1u >= len)
+                break;
+            long_size = desc[i];
+            i += 2u;
+            if ((uint32_t)i + long_size > len)
+                break;
+            i = (uint16_t)(i + long_size);
+            continue;
+        }
+
+        size_code = b & 0x03u;
+        size = (size_code == 3u) ? 4u : size_code;
+        type = (b >> 2) & 0x03u;
+        tag = (b >> 4) & 0x0Fu;
+
+        if ((uint32_t)i + size > len)
+            break;
+
+        val = hid_item_u32(&desc[i], size);
+
+        if (type == 0u)
+        {
+            if (tag == 8u || tag == 9u || tag == 11u)
+            {
+                if (tag == 11u && current_config && (val & 0x01u) == 0u)
+                {
+                    uint16_t bit_base = bit_cursor[g.report_id];
+
+                    for (uint32_t field = 0; field < g.report_count; ++field)
+                    {
+                        uint32_t usage = hid_usage_for_index(usages, usage_count,
+                                                             have_usage_range, usage_min, usage_max, field);
+                        uint16_t bit_off = (uint16_t)(bit_base + (uint16_t)(field * g.report_size));
+
+                        if (g.usage_page == 0x0Du)
+                        {
+                            if (usage == 0x52u)
+                                tcpd_capture_feature_value(&g_tcpd_input_mode,
+                                                           &g.has_report_id,
+                                                           &g.report_id,
+                                                           g.report_size,
+                                                           g.report_count,
+                                                           bit_base,
+                                                           bit_off);
+                            else if (usage == 0x57u || usage == 0x58u)
+                                tcpd_capture_selective_value(&g_tcpd_selective,
+                                                             &g.has_report_id,
+                                                             &g.report_id,
+                                                             g.report_size,
+                                                             g.report_count,
+                                                             bit_base,
+                                                             bit_off,
+                                                             usage);
+                        }
+                    }
+                }
+
+                bit_cursor[g.report_id] =
+                    (uint16_t)(bit_cursor[g.report_id] + (uint16_t)(g.report_size * g.report_count));
+            }
+            else if (tag == 10u)
+            {
+                uint32_t usage = 0u;
+                uint8_t is_config = current_config;
+
+                if (usage_count > 0u)
+                    usage = usages[usage_count - 1u];
+                else if (have_usage_range)
+                    usage = usage_min;
+
+                if ((val & 0xFFu) == 1u && g.usage_page == 0x0Du && usage == 0x0Eu)
+                    is_config = 1u;
+
+                if (collection_depth < 16u)
+                    collection_config[collection_depth++] = is_config;
+            }
+            else if (tag == 12u)
+            {
+                if (collection_depth > 0u)
+                    collection_depth--;
+            }
+
+            usage_count = 0u;
+            have_usage_range = 0u;
+        }
+        else if (type == 1u)
+        {
+            if (tag == 0u)
+                g.usage_page = (uint8_t)val;
+            else if (tag == 7u)
+                g.report_size = val;
+            else if (tag == 8u)
+            {
+                g.report_id = (uint8_t)val;
+                g.has_report_id = 1u;
+            }
+            else if (tag == 9u)
+                g.report_count = val;
+            else if (tag == 10u)
+            {
+                if (stack_depth < 4u)
+                    g_stack[stack_depth++] = g;
+            }
+            else if (tag == 11u)
+            {
+                if (stack_depth > 0u)
+                    g = g_stack[--stack_depth];
+            }
+        }
+        else if (type == 2u)
+        {
+            if (tag == 0u)
+            {
+                if (usage_count < 16u)
+                    usages[usage_count++] = val;
+            }
+            else if (tag == 1u)
+            {
+                usage_min = val;
+                have_usage_range = 1u;
+            }
+            else if (tag == 2u)
+            {
+                usage_max = val;
+                have_usage_range = 1u;
+            }
+        }
+
+        i = (uint16_t)(i + size);
+    }
+
+    if (g_tcpd_input_mode.valid || g_tcpd_selective.valid)
+        return 0;
+
+    return -1;
+}
+
+static int tcpd_send_ptp_feature_report(hidi2c_device *dev,
+                                        uint8_t has_report_id,
+                                        uint8_t report_id,
+                                        uint16_t report_bits,
+                                        const tcpd_feature_value_layout *input_mode,
+                                        const tcpd_selective_layout *selective)
+{
+    uint8_t payload[64];
+    uint32_t report_bytes = (report_bits + 7u) >> 3;
+
+    if (!dev || report_bits == 0u || report_bytes == 0u || report_bytes > sizeof(payload))
+        return -1;
+
+    for (uint32_t i = 0; i < report_bytes; ++i)
+        payload[i] = 0u;
+
+    if (input_mode && input_mode->value_size != 0u)
+        hid_write_bits(payload, report_bytes,
+                       input_mode->value_bits,
+                       input_mode->value_size,
+                       TCPD_PTP_INPUT_MODE_TOUCHPAD);
+
+    if (selective)
+    {
+        if (selective->surface_size != 0u)
+            hid_write_bits(payload, report_bytes,
+                           selective->surface_bits,
+                           selective->surface_size,
+                           1u);
+        if (selective->button_size != 0u)
+            hid_write_bits(payload, report_bytes,
+                           selective->button_bits,
+                           selective->button_size,
+                           1u);
+    }
+
+    if (hidi2c_set_report(dev,
+                          I2C_HID_REPORT_TYPE_FEATURE,
+                          has_report_id ? report_id : 0u,
+                          payload,
+                          report_bytes) != 0)
+        return -1;
+
+    delay_ms_approx(20u);
+    return 0;
+}
+
+static int tcpd_try_enable_ptp_mode(hidi2c_device *dev)
+{
+    int rc = -1;
+
+    if (!dev || !dev->report_desc_valid || dev->report_desc_len == 0u)
+        return -1;
+
+    if (tcpd_parse_ptp_feature_reports(dev->report_desc, dev->report_desc_len) != 0)
+    {
+        terminal_warn("TCPD PTP feature reports not found");
+        return -1;
+    }
+
+    terminal_print("TCPD PTP feature input id:");
+    terminal_print_hex8(g_tcpd_input_mode.report_id);
+    terminal_print(" bits:");
+    terminal_print_hex32(g_tcpd_input_mode.report_bits);
+    terminal_print(" selective id:");
+    terminal_print_hex8(g_tcpd_selective.report_id);
+    terminal_print(" bits:");
+    terminal_print_hex32(g_tcpd_selective.report_bits);
+    terminal_print("\n");
+
+    if (g_tcpd_input_mode.valid &&
+        g_tcpd_selective.valid &&
+        g_tcpd_input_mode.has_report_id == g_tcpd_selective.has_report_id &&
+        g_tcpd_input_mode.report_id == g_tcpd_selective.report_id)
+    {
+        uint16_t report_bits = g_tcpd_input_mode.report_bits;
+
+        if (report_bits < g_tcpd_selective.report_bits)
+            report_bits = g_tcpd_selective.report_bits;
+
+        rc = tcpd_send_ptp_feature_report(dev,
+                                          g_tcpd_input_mode.has_report_id,
+                                          g_tcpd_input_mode.report_id,
+                                          report_bits,
+                                          &g_tcpd_input_mode,
+                                          &g_tcpd_selective);
+    }
+    else
+    {
+        rc = 0;
+
+        if (g_tcpd_input_mode.valid &&
+            tcpd_send_ptp_feature_report(dev,
+                                         g_tcpd_input_mode.has_report_id,
+                                         g_tcpd_input_mode.report_id,
+                                         g_tcpd_input_mode.report_bits,
+                                         &g_tcpd_input_mode,
+                                         0) != 0)
+            rc = -1;
+
+        if (rc == 0 &&
+            g_tcpd_selective.valid &&
+            tcpd_send_ptp_feature_report(dev,
+                                         g_tcpd_selective.has_report_id,
+                                         g_tcpd_selective.report_id,
+                                         g_tcpd_selective.report_bits,
+                                         0,
+                                         &g_tcpd_selective) != 0)
+            rc = -1;
+    }
+
+    if (rc == 0)
+    {
+        terminal_success("TCPD PTP feature mode applied");
+        return 0;
+    }
+
+    terminal_warn("TCPD PTP feature mode failed");
+    return -1;
 }
 
 static int hidi2c_try_desc_reg_split(hidi2c_device *dev, uint16_t reg)
@@ -1495,33 +2186,90 @@ static int tcpd_try_desc_after_wake(hidi2c_device *dev, const char *tag)
     return -1;
 }
 
+static void hidi2c_push_unique_reg(uint16_t *tried,
+                                   uint32_t *tried_count,
+                                   uint32_t tried_cap,
+                                   uint16_t reg)
+{
+    if (!tried || !tried_count || *tried_count >= tried_cap)
+        return;
+
+    for (uint32_t i = 0; i < *tried_count; ++i)
+    {
+        if (tried[i] == reg)
+            return;
+    }
+
+    tried[(*tried_count)++] = reg;
+}
+
 static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
 {
+    static const uint16_t fallback_regs[] = {
+        0x0020u, 0x0010u, 0x0001u, 0x0000u,
+        0x0018u, 0x001Au, 0x001Cu, 0x001Eu,
+        0x0022u, 0x0024u
+    };
+    uint16_t tried[12];
+    uint32_t tried_count = 0;
+
     if (!dev)
         return -1;
 
-    /* common Lenovo keyboard locations */
+    (void)i2c1_bus_addr_only(dev->i2c_addr_7bit);
+    delay_us_approx(500u);
 
-    if (hidi2c_try_desc_reg_split(dev, 0x0020u) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_combined(dev, 0x0020u) == 0)
-        return 0;
+    /* Prefer the ACPI hint first, then try a bounded set of common offsets. */
+    if (dev->hid_desc_reg != 0u)
+        hidi2c_push_unique_reg(tried, &tried_count, sizeof(tried) / sizeof(tried[0]), dev->hid_desc_reg);
 
-    if (hidi2c_try_desc_reg_split(dev, 0x0010u) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_combined(dev, 0x0010u) == 0)
-        return 0;
+    for (uint32_t i = 0; i < (sizeof(fallback_regs) / sizeof(fallback_regs[0])); ++i)
+        hidi2c_push_unique_reg(tried, &tried_count, sizeof(tried) / sizeof(tried[0]), fallback_regs[i]);
 
-    if (hidi2c_try_desc_reg_split(dev, 0x0001u) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_combined(dev, 0x0001u) == 0)
-        return 0;
+    terminal_print("ECKB desc probe count:");
+    terminal_print_hex32(tried_count);
+    terminal_print("\n");
 
-    if (hidi2c_try_desc_reg_split(dev, 0x0000u) == 0)
-        return 0;
-    if (hidi2c_try_desc_reg_combined(dev, 0x0000u) == 0)
-        return 0;
+    for (uint32_t i = 0; i < tried_count; ++i)
+    {
+        uint16_t reg = tried[i];
 
+        terminal_print("ECKB trying reg:");
+        terminal_print_hex32(reg);
+        terminal_print("\n");
+
+        if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0) == 0)
+            return 0;
+        if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1) == 0)
+            return 0;
+        if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
+            return 0;
+        if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
+            return 0;
+        if (hidi2c_try_desc_reg_combined(dev, reg) == 0)
+            return 0;
+    }
+
+    return -1;
+}
+
+static int eckb_wake_and_fetch(hidi2c_device *dev, const char *tag, uint32_t settle_ms)
+{
+    terminal_print("ECKB wake+fetch stage: ");
+    terminal_print_inline(tag);
+
+    hidi2c_keyboard_wake_probe(dev);
+    delay_ms_approx(settle_ms);
+
+    if (hidi2c_fetch_desc_keyboard(dev) == 0)
+    {
+        terminal_print("ECKB wake+fetch success: ");
+        terminal_print_inline(tag);
+        return 0;
+    }
+
+    terminal_print("ECKB wake+fetch miss: ");
+    terminal_print_inline(tag);
     return -1;
 }
 
@@ -1580,6 +2328,302 @@ static int hidi2c_post_desc_init(hidi2c_device *dev)
     return 0;
 }
 
+static void hidi2c_clear_report_desc(hidi2c_device *dev)
+{
+    if (!dev)
+        return;
+
+    dev->report_desc_len = 0u;
+    dev->report_desc_valid = 0u;
+
+    for (uint32_t i = 0; i < sizeof(dev->report_desc); ++i)
+        dev->report_desc[i] = 0u;
+}
+
+static int hidi2c_read_blob_split(hidi2c_device *dev,
+                                  uint16_t reg,
+                                  uint8_t *dst,
+                                  uint32_t len,
+                                  int big_endian)
+{
+    uint8_t tx[2];
+    int rc;
+
+    if (!dev || !dst || len == 0u)
+        return -1;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    i2c1_bus_set_quiet(1);
+    rc = i2c1_bus_write_read(dev->i2c_addr_7bit, tx, 2u, dst, len);
+    i2c1_bus_set_quiet(0);
+    return rc;
+}
+
+static int hidi2c_read_blob_combined(hidi2c_device *dev,
+                                     uint16_t reg,
+                                     uint8_t *dst,
+                                     uint32_t len,
+                                     int big_endian)
+{
+    uint8_t tx[2];
+    int rc;
+
+    if (!dev || !dst || len == 0u)
+        return -1;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    i2c1_bus_set_quiet(1);
+    rc = i2c1_bus_write_read_combined(dev->i2c_addr_7bit, tx, 2u, dst, len);
+    i2c1_bus_set_quiet(0);
+    return rc;
+}
+
+static int hidi2c_read_blob_rdonly_after_pointer(hidi2c_device *dev,
+                                                 uint16_t reg,
+                                                 uint8_t *dst,
+                                                 uint32_t len,
+                                                 int big_endian)
+{
+    uint8_t tx[2];
+    int rc;
+
+    if (!dev || !dst || len == 0u)
+        return -1;
+
+    if (big_endian)
+        wr16be(tx, reg);
+    else
+        wr16(tx, reg);
+
+    i2c1_bus_set_quiet(1);
+    rc = i2c1_bus_write(dev->i2c_addr_7bit, tx, 2u);
+    if (rc == 0)
+    {
+        delay_ms_approx(2u);
+        rc = i2c1_bus_read(dev->i2c_addr_7bit, dst, len);
+    }
+    i2c1_bus_set_quiet(0);
+    return rc;
+}
+
+static int hidi2c_read_blob_mode(hidi2c_device *dev,
+                                 uint16_t reg,
+                                 uint8_t *dst,
+                                 uint32_t len,
+                                 int big_endian,
+                                 uint32_t mode)
+{
+    if (mode == 0u)
+        return hidi2c_read_blob_rdonly_after_pointer(dev, reg, dst, len, big_endian);
+    if (mode == 1u)
+        return hidi2c_read_blob_split(dev, reg, dst, len, big_endian);
+    if (mode == 2u)
+        return hidi2c_read_blob_combined(dev, reg, dst, len, big_endian);
+
+    return -1;
+}
+
+static int hidi2c_try_fetch_report_desc_len_chunked(hidi2c_device *dev,
+                                                    uint16_t reg,
+                                                    uint32_t want_len,
+                                                    uint32_t chunk_len,
+                                                    uint32_t mode,
+                                                    int big_endian)
+{
+    uint32_t off = 0u;
+
+    if (!dev || want_len == 0u || want_len > sizeof(dev->report_desc) || chunk_len == 0u)
+        return -1;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+
+    while (off < want_len)
+    {
+        uint32_t piece = want_len - off;
+        uint16_t piece_reg = 0u;
+
+        if (piece > chunk_len)
+            piece = chunk_len;
+
+        if ((uint32_t)reg + off > 0xFFFFu)
+            return -1;
+
+        piece_reg = (uint16_t)((uint32_t)reg + off);
+
+        if (hidi2c_read_blob_mode(dev,
+                                  piece_reg,
+                                  dev->report_desc + off,
+                                  piece,
+                                  big_endian,
+                                  mode) != 0)
+            return -1;
+
+        /*
+          The descriptor stream is item-heavy, so an all-zero chunk is a good
+          signal that this transfer style did not really advance.
+        */
+        if (!buf_any_nonzero(dev->report_desc + off, piece))
+            return -1;
+
+        off += piece;
+        if (off < want_len)
+            delay_ms_approx(1u);
+    }
+
+    return 0;
+}
+
+static int hidi2c_try_fetch_report_desc_len(hidi2c_device *dev,
+                                            uint16_t reg,
+                                            uint32_t want_len)
+{
+    if (!dev || want_len == 0u || want_len > sizeof(dev->report_desc))
+        return -1;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_rdonly_after_pointer(dev, reg, dev->report_desc, want_len, 0) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_split(dev, reg, dev->report_desc, want_len, 0) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_combined(dev, reg, dev->report_desc, want_len, 0) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_rdonly_after_pointer(dev, reg, dev->report_desc, want_len, 1) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_split(dev, reg, dev->report_desc, want_len, 1) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    for (uint32_t i = 0; i < want_len; ++i)
+        dev->report_desc[i] = 0u;
+    if (hidi2c_read_blob_combined(dev, reg, dev->report_desc, want_len, 1) == 0 &&
+        buf_any_nonzero(dev->report_desc, want_len))
+        return 0;
+
+    if (want_len > 96u)
+    {
+        static const uint32_t chunk_sizes[] = {96u, 64u, 32u};
+
+        for (uint32_t chunk_idx = 0; chunk_idx < (sizeof(chunk_sizes) / sizeof(chunk_sizes[0])); ++chunk_idx)
+        {
+            uint32_t chunk_len = chunk_sizes[chunk_idx];
+
+            if (chunk_len >= want_len)
+                continue;
+
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 0u, 0) == 0)
+                return 0;
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 1u, 0) == 0)
+                return 0;
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 2u, 0) == 0)
+                return 0;
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 0u, 1) == 0)
+                return 0;
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 1u, 1) == 0)
+                return 0;
+            if (hidi2c_try_fetch_report_desc_len_chunked(dev, reg, want_len, chunk_len, 2u, 1) == 0)
+                return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int hidi2c_fetch_report_desc(hidi2c_device *dev)
+{
+    uint32_t want = 0;
+    uint32_t tries[8];
+    uint32_t try_count = 0u;
+
+    if (!dev || !dev->desc.valid)
+        return -1;
+
+    if (dev->desc.wReportDescLength == 0u || dev->desc.wReportDescRegister == 0u)
+        return -1;
+
+    hidi2c_clear_report_desc(dev);
+
+    want = dev->desc.wReportDescLength;
+    if (want > sizeof(dev->report_desc))
+        want = sizeof(dev->report_desc);
+
+    if (want == 0u)
+        return -1;
+
+    tries[try_count++] = want;
+    if (want > 256u)
+        tries[try_count++] = 256u;
+    if (want > 192u)
+        tries[try_count++] = 192u;
+    if (want > 160u)
+        tries[try_count++] = 160u;
+    if (want > 128u)
+        tries[try_count++] = 128u;
+    if (want > 96u)
+        tries[try_count++] = 96u;
+    if (want > 64u)
+        tries[try_count++] = 64u;
+
+    for (uint32_t i = 0; i < try_count; ++i)
+    {
+        uint32_t fetch_len = tries[i];
+        uint8_t duplicate = 0u;
+
+        for (uint32_t j = 0; j < i; ++j)
+        {
+            if (tries[j] == fetch_len)
+            {
+                duplicate = 1u;
+                break;
+            }
+        }
+        if (duplicate)
+            continue;
+
+        if (hidi2c_try_fetch_report_desc_len(dev, dev->desc.wReportDescRegister, fetch_len) == 0)
+        {
+            dev->report_desc_len = (uint16_t)fetch_len;
+            dev->report_desc_valid = 1u;
+            terminal_print(dev->name);
+            terminal_print(fetch_len < dev->desc.wReportDescLength ? " rptdesc partial len:" : " rptdesc len:");
+            terminal_print_hex32(fetch_len);
+            terminal_print(" reg:");
+            terminal_print_hex32(dev->desc.wReportDescRegister);
+            terminal_print("\n");
+            return 0;
+        }
+
+        hidi2c_clear_report_desc(dev);
+    }
+
+    return -1;
+}
+
 static int hidi2c_read_input(hidi2c_device *dev)
 {
     uint8_t rx[128];
@@ -1595,16 +2639,20 @@ static int hidi2c_read_input(hidi2c_device *dev)
     if (want > sizeof(rx))
         want = sizeof(rx);
 
+    dev->last_report.available = 0;
+    dev->last_report.len = 0;
+
+    i2c1_bus_set_quiet(1);
     if (i2c1_bus_read(dev->i2c_addr_7bit, rx, want) != 0)
+    {
+        i2c1_bus_set_quiet(0);
         return -1;
+    }
+    i2c1_bus_set_quiet(0);
 
     total = rd16(rx + 0);
     if (total == 0u)
-    {
-        terminal_print(dev->name);
-        terminal_print(" empty pkt\n");
         return 0;
-    }
     if (total < 2u)
         return 1;
     if (total > want)
@@ -1618,16 +2666,6 @@ static int hidi2c_read_input(hidi2c_device *dev)
         dev->last_report.data[i] = rx[2u + i];
 
     dev->last_report.available = (dev->last_report.len != 0u);
-
-    if (dev->last_report.available)
-    {
-        terminal_print(dev->name);
-        terminal_print(" pkt len:");
-        terminal_print_hex32(dev->last_report.len);
-        terminal_print(" b0:");
-        terminal_print_hex8(dev->last_report.data[0]);
-        
-    }
 
     return 0;
 }
@@ -1976,6 +3014,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
     g_kbd.last_report.available = 0;
     g_kbd.last_report.len = 0;
     g_kbd.desc.valid = 0;
+    hidi2c_clear_report_desc(&g_kbd);
 
     g_tpd.name = "TCPD";
     g_tpd.i2c_addr_7bit = TCPD_ADDR_ACPI;
@@ -1985,6 +3024,7 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
     g_tpd.last_report.available = 0;
     g_tpd.last_report.len = 0;
     g_tpd.desc.valid = 0;
+    hidi2c_clear_report_desc(&g_tpd);
     g_tcpd_desc_reg_hint = 0u;
 
     if (i2c1_bus_init() != 0)
@@ -2010,6 +3050,8 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             g_tpd.i2c_addr_7bit = regs.tcpd_addr;
         if (regs.tcpd_desc_reg)
             g_tpd.hid_desc_reg = regs.tcpd_desc_reg;
+        if (regs.eckb_gpio_pin != 0u)
+            g_kbd.gpio_pin = regs.eckb_gpio_pin;
         if (regs.tcpd_gpio_pin != 0u)
             g_tpd.gpio_pin = regs.tcpd_gpio_pin;
 
@@ -2019,6 +3061,26 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print_hex32(regs.eckb_desc_reg);
         terminal_print(" trust:");
         terminal_print_hex8(regs.eckb_desc_trusted);
+        terminal_print(" gpio:");
+        terminal_print_hex32(regs.eckb_gpio_pin);
+        terminal_print(" gpio_valid:");
+        terminal_print_hex8(regs.eckb_gpio_valid);
+        terminal_print(" gpio_flags:");
+        terminal_print_hex32(regs.eckb_gpio_flags);
+        terminal_print("\n");
+        terminal_print("ACPI ECKB methods on:");
+        terminal_print_hex8(regs.eckb_on_valid);
+        terminal_print(" rst:");
+        terminal_print_hex8(regs.eckb_rst_valid);
+        terminal_print(" ps0:");
+        terminal_print_hex8(regs.eckb_ps0_valid);
+        terminal_print(" sta:");
+        terminal_print_hex8(regs.eckb_sta_valid);
+        terminal_print(" ini:");
+        terminal_print_hex8(regs.eckb_ini_valid);
+        terminal_print(" dsm:");
+        terminal_print_hex8(regs.eckb_dsm_valid);
+        terminal_print("\n");
         
 
         terminal_print("ACPI TCPD addr:");
@@ -2071,31 +3133,146 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_set_loud();
     }
 
-    /* Keyboard: only trust ACPI if probe says it is trusted */
-    if (have_regs && regs.have_eckb && regs.eckb_desc_trusted)
+    if (have_regs && regs.have_eckb)
     {
-        if (hidi2c_try_desc_reg_split(&g_kbd, regs.eckb_desc_reg) == 0 ||
-            hidi2c_try_desc_reg_combined(&g_kbd, regs.eckb_desc_reg) == 0)
+        if (regs.eckb_desc_reg != 0u)
+            g_kbd.hid_desc_reg = regs.eckb_desc_reg;
+
+        g_aml_gabl = 0;
+        g_aml_lids = 0;
+        g_aml_lidb = 0;
+        g_aml_lidr = 1;
+        g_aml_t0 = 0;
+        g_aml_t1 = 0;
+        g_aml_gpio_pin = g_kbd.gpio_pin ? g_kbd.gpio_pin : g_tpd.gpio_pin;
+
+        if (regs.tcpd_gio0_reg_valid)
         {
-            if (hidi2c_post_desc_init(&g_kbd) == 0)
+            terminal_print("ECKB ACPI stage begin: GIO0._REG\n");
+            tcpd_try_gio0_reg_from_acpi(&regs);
+        }
+
+        if (aml_body_present(regs.eckb_sta_body,
+                             regs.eckb_sta_len,
+                             regs.eckb_sta_valid))
+        {
+            terminal_print("ECKB ACPI stage begin: _STA\n");
+            eckb_try_sta_from_acpi(&regs);
+        }
+
+        if (aml_body_present(regs.eckb_on_body,
+                             regs.eckb_on_len,
+                             regs.eckb_on_valid))
+        {
+            terminal_print("ECKB ACPI stage begin: _ON_\n");
+            eckb_try_on_from_acpi(&regs);
+            delay_ms_approx(20u);
+        }
+
+        if (aml_body_present(regs.eckb_ps0_body,
+                             regs.eckb_ps0_len,
+                             regs.eckb_ps0_valid))
+        {
+            terminal_print("ECKB ACPI stage begin: _PS0\n");
+            eckb_try_ps0_from_acpi(&regs);
+            delay_ms_approx(20u);
+
+            if (g_aml_gabl && g_aml_gpio_pin != 0u)
             {
-                g_kbd.online = 1;
-                terminal_success("ECKB HID-over-I2C online");
+                terminal_print("ECKB ACPI stage: post-_PS0 GPIO wake edge\n");
+                tcpd_drive_gpio_wake_edge(1u);
+                delay_ms_approx(20u);
             }
         }
-        else
+
+        if (aml_body_present(regs.eckb_rst_body,
+                             regs.eckb_rst_len,
+                             regs.eckb_rst_valid))
         {
-            terminal_warn("ECKB trusted ACPI reg failed");
+            terminal_print("ECKB ACPI stage begin: _RST\n");
+            eckb_try_rst_from_acpi(&regs);
+            delay_ms_approx(20u);
+
+            if (g_aml_gabl && g_aml_gpio_pin != 0u)
+            {
+                terminal_print("ECKB ACPI stage: post-_RST GPIO wake edge\n");
+                tcpd_drive_gpio_wake_edge(1u);
+                delay_ms_approx(20u);
+            }
+        }
+
+        if (aml_body_present(regs.eckb_ini_body,
+                             regs.eckb_ini_len,
+                             regs.eckb_ini_valid))
+        {
+            terminal_print("ECKB ACPI stage begin: _INI\n");
+            eckb_try_ini_from_acpi(&regs);
+            delay_ms_approx(20u);
+        }
+
+        if (aml_body_present(regs.eckb_dsm_body,
+                             regs.eckb_dsm_len,
+                             regs.eckb_dsm_valid))
+        {
+            terminal_print("ECKB ACPI stage begin: _DSM(fn=1)\n");
+            eckb_try_dsm_from_acpi(&regs);
+        }
+
+        if (!regs.eckb_desc_trusted)
+            terminal_warn("ECKB ACPI reg untrusted; trying guarded probe");
+
+        {
+            int ok = 0;
+
+            if (hidi2c_fetch_desc_keyboard(&g_kbd) == 0)
+                ok = 1;
+
+            if (!ok && eckb_wake_and_fetch(&g_kbd, "settle-1", 120u) == 0)
+                ok = 1;
+
+            if (!ok && eckb_wake_and_fetch(&g_kbd, "settle-2", 220u) == 0)
+                ok = 1;
+
+            if (!ok && eckb_wake_and_fetch(&g_kbd, "settle-3", 320u) == 0)
+                ok = 1;
+
+            if (!ok)
+            {
+                delay_ms_approx(420u);
+                if (hidi2c_fetch_desc_keyboard(&g_kbd) == 0)
+                    ok = 1;
+            }
+
+            if (ok)
+            {
+                if (hidi2c_post_desc_init(&g_kbd) == 0)
+                {
+                    (void)hidi2c_fetch_report_desc(&g_kbd);
+                    g_kbd.online = 1;
+                    terminal_success("ECKB HID-over-I2C online");
+                }
+                else
+                {
+                    terminal_warn("ECKB post-desc init failed");
+                }
+            }
+            else
+            {
+                terminal_warn(regs.eckb_desc_trusted ?
+                                  "ECKB trusted ACPI reg failed" :
+                                  "ECKB guarded descriptor probe failed");
+            }
         }
     }
     else
     {
-        terminal_warn("ECKB not trusted HIDI2C path; skipping");
+        terminal_warn("ECKB ACPI path missing; skipping");
     }
 
     if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
         int ok = 0;
+        g_aml_gpio_pin = g_tpd.gpio_pin;
 
         terminal_print("TCPD ACPI quiet init + compat desc probe\n");
 
@@ -2186,6 +3363,10 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         {
             if (hidi2c_post_desc_init(&g_tpd) == 0)
             {
+                (void)hidi2c_fetch_report_desc(&g_tpd);
+                (void)tcpd_try_enable_ptp_mode(&g_tpd);
+                g_tpd.last_report.available = 0u;
+                g_tpd.last_report.len = 0u;
                 g_tpd.online = 1;
                 terminal_success("TCPD HID-over-I2C online");
             }

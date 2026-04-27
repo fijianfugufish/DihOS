@@ -50,6 +50,30 @@ extern "C"
         uint8_t eckb_gpio_pin_guessed2;
         char eckb_gpio_source2[32];
 
+        uint8_t eckb_ps0_valid;
+        uint16_t eckb_ps0_len;
+        uint8_t eckb_ps0_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
+        uint8_t eckb_on_valid;
+        uint16_t eckb_on_len;
+        uint8_t eckb_on_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
+        uint8_t eckb_rst_valid;
+        uint16_t eckb_rst_len;
+        uint8_t eckb_rst_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
+        uint8_t eckb_sta_valid;
+        uint16_t eckb_sta_len;
+        uint8_t eckb_sta_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
+        uint8_t eckb_ini_valid;
+        uint16_t eckb_ini_len;
+        uint8_t eckb_ini_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
+        uint8_t eckb_dsm_valid;
+        uint16_t eckb_dsm_len;
+        uint8_t eckb_dsm_body[HIDI2C_ACPI_MAX_METHOD_BODY];
+
         uint8_t tcpd_gpio_valid;
         uint16_t tcpd_gpio_pin;
         uint16_t tcpd_gpio_flags;

@@ -16,6 +16,7 @@ extern "C"
 #define ECKB_GPIO_PIN 0x0180u
 #define TCPD_I2C_ADDR 0x2Cu
 #define TCPD_GPIO_PIN 0x03C0u
+#define HIDI2C_REPORT_DESC_MAX 1024u
 
 #define HIDI2C_DESC_REG_GUESS 0x0001u
 
@@ -52,6 +53,9 @@ extern "C"
         uint16_t hid_desc_reg;
         hidi2c_desc desc;
         hidi2c_raw_report last_report;
+        uint8_t report_desc[HIDI2C_REPORT_DESC_MAX];
+        uint16_t report_desc_len;
+        uint8_t report_desc_valid;
         uint8_t online;
     } hidi2c_device;
 

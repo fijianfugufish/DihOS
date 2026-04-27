@@ -91,7 +91,7 @@ void kmain(const boot_info *bi)
 
     terminal_print("^^ i sure hope this log is good ^^");
 
-    terminal_flush_log();
+    terminal_clear();
     kgfx_render_all(black);
 
     // Load images (BMP -> ARGB32) only if mounted
@@ -331,6 +331,8 @@ void kmain(const boot_info *bi)
     kmouse_set_sensitivity_pct(500);
 
     kgfx_render_all(black);
+
+    terminal_clear_no_flush();
 
     uint32_t frame = 0;
 
