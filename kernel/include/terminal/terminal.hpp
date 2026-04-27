@@ -23,6 +23,7 @@ public:
     void Warn(const char *text);
     void Error(const char *text);
     void Success(const char *text);
+    void SubmitInput(const char *text);
     void UpdateInput();
 
     void ToggleQuiet();

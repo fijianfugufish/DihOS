@@ -70,6 +70,7 @@ extern "C"
     int ktextbox_focused(ktextbox_handle h);
     void ktextbox_set_bounds(ktextbox_handle h, int32_t x, int32_t y, uint32_t w, uint32_t h_px);
     void ktextbox_set_font(ktextbox_handle h, const kfont *font);
+    void ktextbox_set_text(ktextbox_handle h, const char *text);
     void ktextbox_clear(ktextbox_handle h);
     const char *ktextbox_text(ktextbox_handle h);
 

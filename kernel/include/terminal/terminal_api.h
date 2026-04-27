@@ -5,7 +5,10 @@ extern "C"
 {
 #endif
 
+#include <stdint.h>
 #include "kwrappers/ktext.h"
+
+    typedef void (*terminal_capture_sink_fn)(const char *text, uint32_t len, void *user);
 
     void terminal_initialize(kfont *font);
     void terminal_clear(void);
@@ -29,6 +32,8 @@ extern "C"
     void terminal_toggle_quiet();
     void terminal_set_quiet();
     void terminal_set_loud();
+    void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
+    void terminal_capture_end(void);
 
 #ifdef __cplusplus
 }

@@ -953,6 +953,31 @@ void ktextbox_set_font(ktextbox_handle h, const kfont *font)
     ktextbox_sync_display(&G_boxes[h.idx]);
 }
 
+void ktextbox_set_text(ktextbox_handle h, const char *text)
+{
+    uint16_t len = 0;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return;
+
+    if (!text)
+        text = "";
+
+    while (text[len] && len < KTEXTBOX_TEXT_CAP - 1)
+    {
+        G_boxes[h.idx].text[len] = text[len];
+        len++;
+    }
+
+    G_boxes[h.idx].text[len] = 0;
+    G_boxes[h.idx].len = len;
+    G_boxes[h.idx].caret = len;
+    G_boxes[h.idx].view_start = 0;
+    ktextbox_clear_repeat_state();
+    ktextbox_reset_caret_blink();
+    ktextbox_sync_display(&G_boxes[h.idx]);
+}
+
 void ktextbox_clear(ktextbox_handle h)
 {
     if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)

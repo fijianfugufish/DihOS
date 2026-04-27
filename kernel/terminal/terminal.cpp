@@ -1,4 +1,5 @@
 #include "terminal/terminal.hpp"
+#include "shell/dihos_shell.h"
 
 extern "C"
 {
@@ -6,6 +7,8 @@ extern "C"
 #include "kwrappers/ktext.h"
 #include "kwrappers/colors.h"
 #include "kwrappers/kfile.h"
+#include "kwrappers/kinput.h"
+#include "kwrappers/string.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/kmouse.h"
 }
@@ -122,14 +125,12 @@ static void terminal_log_flush_pending(void)
 static void terminal_input_submit(ktextbox_handle textbox, const char *text, void *user)
 {
     Terminal *terminal = (Terminal *)user;
+    (void)textbox;
 
     if (!terminal)
         return;
 
-    if (text && text[0])
-        terminal->Print(text);
-
-    ktextbox_clear(textbox);
+    terminal->SubmitInput(text);
 }
 
 Terminal::Terminal()
@@ -231,8 +232,11 @@ void Terminal::ScrollToBottom()
 void Terminal::LayoutInputBox(int placeholder_y)
 {
     kgfx_obj *root = 0;
+    const char *prompt = 0;
+    uint32_t prompt_px = 0u;
     uint32_t input_w = 1u;
     uint32_t input_h = 1u;
+    int32_t input_x = content_x;
 
     if (input_box.idx < 0 || !font_ptr)
         return;
@@ -241,12 +245,17 @@ void Terminal::LayoutInputBox(int placeholder_y)
     if (!root || root->kind != KGFX_OBJ_RECT)
         return;
 
-    if (root->u.rect.w > (uint32_t)(padding_x * 2))
-        input_w = root->u.rect.w - (uint32_t)(padding_x * 2);
+    prompt = dihos_shell_prompt();
+    if (prompt && prompt[0])
+        prompt_px = ktext_measure_line_px(font_ptr, prompt, (uint32_t)scale, 1);
+
+    if (root->u.rect.w > (uint32_t)(padding_x * 2) + prompt_px)
+        input_w = root->u.rect.w - (uint32_t)(padding_x * 2) - prompt_px;
     input_h = (line_height_px > 0) ? (uint32_t)line_height_px : 1u;
+    input_x += (int32_t)prompt_px;
 
     ktextbox_set_font(input_box, font_ptr);
-    ktextbox_set_bounds(input_box, content_x, placeholder_y, input_w, input_h);
+    ktextbox_set_bounds(input_box, input_x, placeholder_y, input_w, input_h);
 }
 
 int Terminal::SyncLayoutFromWindow()
@@ -405,6 +414,7 @@ int Terminal::EnsureVisibleHandle(int slot_idx)
 
 void Terminal::RefreshVisibleLines()
 {
+    const char *prompt = 0;
     int total_slots = 0;
     int history_capacity = 0;
     int visible_count = 0;
@@ -417,6 +427,7 @@ void Terminal::RefreshVisibleLines()
         return;
 
     (void)SyncLayoutFromWindow();
+    prompt = dihos_shell_prompt();
 
     if (view_top_line < 0)
         view_top_line = 0;
@@ -479,14 +490,14 @@ void Terminal::RefreshVisibleLines()
         if (obj && obj->kind == KGFX_OBJ_TEXT)
         {
             obj->u.text.font = font_ptr;
-            obj->u.text.text = "";
+            obj->u.text.text = prompt ? prompt : "";
             obj->u.text.x = content_x;
             obj->u.text.y = base_y + (placeholder_slot * line_height_px);
             obj->u.text.scale = (uint32_t)scale;
             obj->u.text.char_spacing = 1;
             obj->u.text.line_spacing = 0;
             obj->u.text.align = KTEXT_ALIGN_LEFT;
-            obj->fill = white;
+            obj->fill = yellow_green;
             obj->alpha = 255;
             obj->visible = active ? 1u : 0u;
             obj->clip_to_parent = 1;
@@ -499,6 +510,7 @@ void Terminal::RefreshVisibleLines()
 void Terminal::Initialize(kfont *font)
 {
     ResetState();
+    dihos_shell_init();
     font_ptr = font;
     window_style = kwindow_style_default();
     window = kwindow_create(x, y, width, height, z, font_ptr, "Terminal", &window_style);
@@ -556,6 +568,41 @@ void Terminal::ClearNoFlush()
     view_top_line = 0;
     if (input_box.idx >= 0)
         ktextbox_clear(input_box);
+    RefreshVisibleLines();
+}
+
+void Terminal::SubmitInput(const char *text)
+{
+    const char *prompt = dihos_shell_prompt();
+    char echoed[DIHOS_SHELL_PROMPT_CAP + DIHOS_SHELL_LINE_CAP];
+    char submitted[DIHOS_SHELL_LINE_CAP];
+
+    echoed[0] = 0;
+    submitted[0] = 0;
+    if (text)
+        strncpy(submitted, text, sizeof(submitted) - 1u);
+    submitted[sizeof(submitted) - 1u] = 0;
+
+    if (input_box.idx >= 0)
+        ktextbox_clear(input_box);
+
+    if (!submitted[0])
+    {
+        RefreshVisibleLines();
+        return;
+    }
+
+    {
+        ksb builder;
+        ksb_init(&builder, echoed, sizeof(echoed));
+        if (prompt && prompt[0])
+            ksb_puts(&builder, prompt);
+        ksb_puts(&builder, submitted);
+    }
+
+    Print(echoed);
+
+    (void)dihos_shell_execute_line(submitted);
     RefreshVisibleLines();
 }
 
@@ -708,6 +755,22 @@ void Terminal::UpdateInput()
         mouse.x < right && mouse.y < client_bottom)
     {
         ktextbox_set_focus(input_box, 1);
+    }
+
+    if (input_box.idx >= 0 && ktextbox_focused(input_box))
+    {
+        char recalled[DIHOS_SHELL_LINE_CAP];
+
+        if (kinput_key_pressed(KEY_UP) &&
+            dihos_shell_history_prev(ktextbox_text(input_box), recalled, sizeof(recalled)))
+        {
+            ktextbox_set_text(input_box, recalled);
+        }
+        else if (kinput_key_pressed(KEY_DOWN) &&
+                 dihos_shell_history_next(ktextbox_text(input_box), recalled, sizeof(recalled)))
+        {
+            ktextbox_set_text(input_box, recalled);
+        }
     }
 
     if (mouse.wheel == 0)
