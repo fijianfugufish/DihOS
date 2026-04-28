@@ -242,8 +242,29 @@ void *pmem_alloc_pages(uint64_t n_pages)
 
 void pmem_free_pages(void *p, uint64_t n)
 {
-    // Optional: coalesce into pool. For now, just add back as a range.
+    uint64_t base = 0;
+    uint64_t len = 0;
+    const uint64_t LIM4G = 0x100000000ULL;
+
     if (!p || !n)
         return;
-    range_add((uint64_t)(uintptr_t)p, n * PAGE_SIZE);
+
+    base = (uint64_t)(uintptr_t)p;
+    if (g_pa2va_delta && base >= g_pa2va_delta)
+        base -= g_pa2va_delta;
+
+    len = n * PAGE_SIZE;
+    range_add(base, len);
+
+    if (base < LIM4G)
+    {
+        uint64_t lo_len = (base + len > LIM4G) ? (LIM4G - base) : len;
+        range_add_to(pool_lo, &pool_lo_count, base, lo_len);
+        if (lo_len < len)
+            range_add_to(pool_hi, &pool_hi_count, LIM4G, len - lo_len);
+    }
+    else
+    {
+        range_add_to(pool_hi, &pool_hi_count, base, len);
+    }
 }

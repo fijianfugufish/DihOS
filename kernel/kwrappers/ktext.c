@@ -34,6 +34,7 @@ typedef struct
 #define PSF1_MODEHASTAB 0x02
 
 #define KTEXT_SCALE_BASE 10u
+#define KTEXT_FILE_READ_CHUNK_BYTES (64u * 1024u)
 
 static inline uint32_t ktext_scale_to_tenths(uint32_t scale)
 {
@@ -80,7 +81,7 @@ static int read_all_file(const char *path, void **out, uint32_t *out_sz)
     uint32_t left = (uint32_t)sz;
     while (left)
     {
-        uint32_t chunk = left > 4096 ? 4096 : left;
+        uint32_t chunk = left > KTEXT_FILE_READ_CHUNK_BYTES ? KTEXT_FILE_READ_CHUNK_BYTES : left;
         uint32_t got = 0;
         if (kfile_read(&f, p, chunk, &got) != 0 || got != chunk)
         {

@@ -16,6 +16,9 @@ static uint64_t g_lba_base = 0;
 static uint8_t *g_dma = 0;
 static uint32_t g_dma_bytes = 0;
 
+#define USBMSC_DMA_DEFAULT_BYTES (64u * 1024u)
+#define USBMSC_MAX_CMD_SECTORS 128u
+
 static uint32_t min_u32(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
 static int ensure_dma_buf(uint32_t want_bytes)
@@ -23,10 +26,10 @@ static int ensure_dma_buf(uint32_t want_bytes)
     if (g_dma && g_dma_bytes >= want_bytes)
         return 0;
 
-    // allocate e.g. 64KB by default, rounded to pages
+    // Keep enough bounce space for a full 128-sector transfer on 512-byte media.
     uint32_t bytes = want_bytes;
-    if (bytes < (64u * 1024u))
-        bytes = (64u * 1024u);
+    if (bytes < USBMSC_DMA_DEFAULT_BYTES)
+        bytes = USBMSC_DMA_DEFAULT_BYTES;
 
     uint32_t pages = (bytes + 4095u) / 4096u;
     g_dma = (uint8_t *)alloc_dma(pages);
@@ -96,10 +99,8 @@ static int bd_read(void *ctx, uint64_t lba, uint32_t cnt, void *buf)
 
         uint32_t chunk = min_u32(cnt, max_sectors);
 
-        // Proper performance-safe cap (prevents huge READ(10)/WRITE(10) that can timeout)
-        const uint32_t MAX_CMD_SECTORS = 32; // 32 * 512 = 16384 bytes (fast & safe)
-        if (chunk > MAX_CMD_SECTORS)
-            chunk = MAX_CMD_SECTORS;
+        if (chunk > USBMSC_MAX_CMD_SECTORS)
+            chunk = USBMSC_MAX_CMD_SECTORS;
 
         // Read into DMA-safe memory
         uint32_t try_chunk = chunk;
@@ -120,7 +121,7 @@ static int bd_read(void *ctx, uint64_t lba, uint32_t cnt, void *buf)
                 return r;
             }
 
-            try_chunk >>= 1; // 32 -> 16 -> 8 -> 4 -> 2 -> 1
+            try_chunk >>= 1; // Fall back until the device accepts the transfer.
         }
 
         // success path uses try_chunk (not chunk)
@@ -152,10 +153,8 @@ static int bd_write(void *ctx, uint64_t lba, uint32_t cnt, const void *buf)
 
         uint32_t chunk = min_u32(cnt, max_sectors);
 
-        // Proper performance-safe cap (prevents huge READ(10)/WRITE(10) that can timeout)
-        const uint32_t MAX_CMD_SECTORS = 32; // 32 * 512 = 16384 bytes (fast & safe)
-        if (chunk > MAX_CMD_SECTORS)
-            chunk = MAX_CMD_SECTORS;
+        if (chunk > USBMSC_MAX_CMD_SECTORS)
+            chunk = USBMSC_MAX_CMD_SECTORS;
 
         // Copy from caller buffer into DMA-safe memory
         uint32_t try_chunk = chunk;
@@ -177,7 +176,7 @@ static int bd_write(void *ctx, uint64_t lba, uint32_t cnt, const void *buf)
                 return r;
             }
 
-            try_chunk >>= 1; // 32 -> 16 -> 8 -> 4 -> 2 -> 1
+            try_chunk >>= 1; // Fall back until the device accepts the transfer.
         }
 
         // success path uses try_chunk (not chunk)
@@ -200,7 +199,7 @@ int usbmsc_try_bind_global(blockdev_t *out)
     g_sec = g_msc.block_size ? g_msc.block_size : 512;
 
     // Prepare a reasonably sized DMA bounce buffer up-front
-    if (ensure_dma_buf(64u * 1024u) != 0)
+    if (ensure_dma_buf(USBMSC_DMA_DEFAULT_BYTES) != 0)
         return -1;
 
     // Default: no partition offset

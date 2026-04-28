@@ -26,6 +26,7 @@ static kmouse_ctx_t G;
 
 #define KMOUSE_CURSOR_BASE_PATH "0:/OS/System/Images/Mouse/"
 #define KMOUSE_CURSOR_SCALE_PCT 150u
+#define KMOUSE_FILE_READ_CHUNK_BYTES (64u * 1024u)
 
 static const char *kmouse_cursor_file_name(kmouse_cursor cursor)
 {
@@ -331,8 +332,8 @@ static int kmouse_read_all_file(const char *path, uint8_t **out_buf, uint32_t *o
         uint32_t got = 0;
         uint32_t want = size - total;
 
-        if (want > 4096u)
-            want = 4096u;
+        if (want > KMOUSE_FILE_READ_CHUNK_BYTES)
+            want = KMOUSE_FILE_READ_CHUNK_BYTES;
 
         if (kfile_read(&f, buf + total, want, &got) != 0 || got == 0)
         {

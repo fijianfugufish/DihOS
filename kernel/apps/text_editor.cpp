@@ -196,6 +196,15 @@ namespace
         uint8_t CaretVisible() const;
         uint8_t KeyRepeatTrigger(uint8_t usage);
         uint32_t MeasureCharPx(char ch) const;
+        uint32_t TextAreaAvailablePx() const;
+        uint32_t WrappedSegmentEnd(uint32_t start, uint32_t end, uint32_t available_px) const;
+        uint32_t WrappedLineCount(uint32_t line_idx) const;
+        uint32_t TotalVisualLines() const;
+        uint32_t CursorVisualLine() const;
+        uint32_t CursorVisualX() const;
+        int VisualSegmentForLine(uint32_t visual_idx, uint32_t *line_idx,
+                                 uint32_t *segment_start, uint32_t *segment_end) const;
+        void UpdatePreferredFromCursor();
         kgfx_obj *RootObject();
         int RootVisible() const;
         void ClearDocument();
@@ -212,6 +221,9 @@ namespace
         void ClampScroll();
         void EnsureCursorVisible();
         void SyncVisibleLines();
+        void SetCursorFromVisualLineX(uint32_t visual_idx, int32_t x);
+        void RefreshWrapButton();
+        void ToggleWrap();
         void MarkTextChanged();
         void InsertChar(char ch);
         void InsertText(const char *text);
@@ -232,12 +244,14 @@ namespace
         static void OpenClickThunk(kbutton_handle button, void *user);
         static void SaveClickThunk(kbutton_handle button, void *user);
         static void SaveAsClickThunk(kbutton_handle button, void *user);
+        static void WrapClickThunk(kbutton_handle button, void *user);
         static void ExplorerDialogThunk(int accepted, const char *raw_path, const char *friendly_path, void *user);
 
     private:
         uint8_t initialized_;
         uint8_t focused_;
         uint8_t dirty_;
+        uint8_t wrap_enabled_;
         uint8_t caps_lock_;
         uint8_t prev_mouse_buttons_;
         uint8_t repeat_usage_;
@@ -251,6 +265,7 @@ namespace
         LabeledButton open_button_;
         LabeledButton save_button_;
         LabeledButton save_as_button_;
+        LabeledButton wrap_button_;
         kgfx_obj_handle path_strip_;
         kgfx_obj_handle path_text_;
         kgfx_obj_handle viewport_;
@@ -265,6 +280,7 @@ namespace
         uint32_t line_count_;
         uint32_t cursor_;
         uint32_t preferred_column_;
+        uint32_t preferred_visual_x_px_;
         uint32_t scroll_top_line_;
         uint32_t view_column_;
         uint32_t visible_line_count_;
@@ -314,6 +330,7 @@ namespace
         initialized_ = 0u;
         focused_ = 0u;
         dirty_ = 0u;
+        wrap_enabled_ = 0u;
         caps_lock_ = 0u;
         prev_mouse_buttons_ = 0u;
         repeat_usage_ = 0u;
@@ -331,6 +348,8 @@ namespace
         save_button_.label.idx = -1;
         save_as_button_.button.idx = -1;
         save_as_button_.label.idx = -1;
+        wrap_button_.button.idx = -1;
+        wrap_button_.label.idx = -1;
         path_strip_.idx = -1;
         path_text_.idx = -1;
         viewport_.idx = -1;
@@ -340,6 +359,7 @@ namespace
         line_count_ = 1u;
         cursor_ = 0u;
         preferred_column_ = 0u;
+        preferred_visual_x_px_ = 0u;
         scroll_top_line_ = 0u;
         view_column_ = 0u;
         visible_line_count_ = 1u;
@@ -455,13 +475,15 @@ namespace
         open_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, OpenClickThunk, this);
         save_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, SaveClickThunk, this);
         save_as_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, SaveAsClickThunk, this);
+        wrap_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, WrapClickThunk, this);
 
         new_button_.label = kgfx_obj_add_text(font_, "New", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         open_button_.label = kgfx_obj_add_text(font_, "Open", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         save_button_.label = kgfx_obj_add_text(font_, "Save", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         save_as_button_.label = kgfx_obj_add_text(font_, "Save As", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        wrap_button_.label = kgfx_obj_add_text(font_, "Wrap Off", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
-        LabeledButton *buttons[] = {&new_button_, &open_button_, &save_button_, &save_as_button_};
+        LabeledButton *buttons[] = {&new_button_, &open_button_, &save_button_, &save_as_button_, &wrap_button_};
         for (uint32_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i)
         {
             kgfx_obj_set_parent(kbutton_root(buttons[i]->button), root);
@@ -574,7 +596,7 @@ namespace
         if (viewport_h < 24)
             viewport_h = 24;
 
-        button_w = (client_w > button_gap * 3u) ? (client_w - button_gap * 3u) / 4u : client_w;
+        button_w = (client_w > button_gap * 4u) ? (client_w - button_gap * 4u) / 5u : client_w;
         if (button_w == 0u)
             button_w = 1u;
 
@@ -582,6 +604,7 @@ namespace
         LayoutButton(open_button_, pad + (int32_t)(button_w + button_gap), buttons_y, button_w, action_h);
         LayoutButton(save_button_, pad + (int32_t)(button_w + button_gap) * 2, buttons_y, button_w, action_h);
         LayoutButton(save_as_button_, pad + (int32_t)(button_w + button_gap) * 3, buttons_y, button_w, action_h);
+        LayoutButton(wrap_button_, pad + (int32_t)(button_w + button_gap) * 4, buttons_y, button_w, action_h);
 
         if (kgfx_obj_ref(path_strip_) && kgfx_obj_ref(path_strip_)->kind == KGFX_OBJ_RECT)
         {
@@ -644,7 +667,9 @@ namespace
                 ++visible_columns;
             if (visible_columns == 0u)
                 visible_columns = 1u;
-            if (view_column_ > visible_columns)
+            if (wrap_enabled_)
+                view_column_ = 0u;
+            else if (view_column_ > visible_columns)
                 view_column_ = visible_columns;
         }
 
@@ -758,12 +783,215 @@ namespace
         return ktext_measure_line_px(font_, text, 1u, 1);
     }
 
+    uint32_t TextEditor::TextAreaAvailablePx() const
+    {
+        kgfx_obj *viewport = kgfx_obj_ref(viewport_);
+        uint32_t pad_x = 6u;
+
+        if (!viewport || viewport->kind != KGFX_OBJ_RECT)
+            return 0u;
+        if (viewport->u.rect.w <= pad_x * 2u)
+            return viewport->u.rect.w;
+        return viewport->u.rect.w - pad_x * 2u;
+    }
+
+    uint32_t TextEditor::WrappedSegmentEnd(uint32_t start, uint32_t end, uint32_t available_px) const
+    {
+        uint32_t pos = start;
+        uint32_t used_px = 0u;
+
+        if (!wrap_enabled_ || start >= end || available_px == 0u)
+            return end;
+
+        while (pos < end)
+        {
+            uint32_t ch_px = MeasureCharPx(buffer_[pos]) + 1u;
+            if (pos > start && used_px + ch_px > available_px)
+                break;
+            used_px += ch_px;
+            ++pos;
+        }
+
+        return pos > start ? pos : start + 1u;
+    }
+
+    uint32_t TextEditor::WrappedLineCount(uint32_t line_idx) const
+    {
+        uint32_t start = LineStart(line_idx);
+        uint32_t end = LineEnd(line_idx);
+        uint32_t available_px = TextAreaAvailablePx();
+        uint32_t count = 0u;
+        uint32_t pos = start;
+
+        if (!wrap_enabled_ || start >= end)
+            return 1u;
+
+        while (pos < end && count < MAX_LINES)
+        {
+            uint32_t next = WrappedSegmentEnd(pos, end, available_px);
+            if (next <= pos)
+                next = pos + 1u;
+            pos = next;
+            ++count;
+        }
+
+        return count ? count : 1u;
+    }
+
+    uint32_t TextEditor::TotalVisualLines() const
+    {
+        uint32_t total = 0u;
+
+        if (!wrap_enabled_)
+            return line_count_ ? line_count_ : 1u;
+
+        for (uint32_t i = 0u; i < line_count_ && total < MAX_LINES; ++i)
+        {
+            uint32_t count = WrappedLineCount(i);
+            if (count > MAX_LINES - total)
+                return MAX_LINES;
+            total += count;
+        }
+
+        return total ? total : 1u;
+    }
+
+    int TextEditor::VisualSegmentForLine(uint32_t visual_idx, uint32_t *line_idx,
+                                         uint32_t *segment_start, uint32_t *segment_end) const
+    {
+        uint32_t remaining = visual_idx;
+        uint32_t fallback_line = line_count_ ? line_count_ - 1u : 0u;
+
+        if (!wrap_enabled_)
+        {
+            if (remaining >= line_count_)
+                remaining = fallback_line;
+            if (line_idx)
+                *line_idx = remaining;
+            if (segment_start)
+                *segment_start = LineStart(remaining);
+            if (segment_end)
+                *segment_end = LineEnd(remaining);
+            return line_count_ > 0u ? 1 : 0;
+        }
+
+        for (uint32_t i = 0u; i < line_count_; ++i)
+        {
+            uint32_t start = LineStart(i);
+            uint32_t end = LineEnd(i);
+            uint32_t count = WrappedLineCount(i);
+
+            if (remaining >= count)
+            {
+                remaining -= count;
+                continue;
+            }
+
+            if (start >= end)
+            {
+                if (line_idx)
+                    *line_idx = i;
+                if (segment_start)
+                    *segment_start = start;
+                if (segment_end)
+                    *segment_end = end;
+                return 1;
+            }
+
+            for (uint32_t seg = 0u; seg < remaining; ++seg)
+            {
+                uint32_t next = WrappedSegmentEnd(start, end, TextAreaAvailablePx());
+                if (next <= start)
+                    next = start + 1u;
+                start = next;
+            }
+
+            if (line_idx)
+                *line_idx = i;
+            if (segment_start)
+                *segment_start = start;
+            if (segment_end)
+                *segment_end = WrappedSegmentEnd(start, end, TextAreaAvailablePx());
+            return 1;
+        }
+
+        if (line_idx)
+            *line_idx = fallback_line;
+        if (segment_start)
+            *segment_start = LineStart(fallback_line);
+        if (segment_end)
+            *segment_end = LineEnd(fallback_line);
+        return line_count_ > 0u ? 1 : 0;
+    }
+
+    uint32_t TextEditor::CursorVisualLine() const
+    {
+        uint32_t cursor_line = CursorLine();
+        uint32_t visual = 0u;
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+
+        if (!wrap_enabled_)
+            return cursor_line;
+
+        for (uint32_t i = 0u; i < cursor_line && i < line_count_; ++i)
+            visual += WrappedLineCount(i);
+
+        start = LineStart(cursor_line);
+        end = LineEnd(cursor_line);
+        if (start >= end)
+            return visual;
+
+        while (start < end)
+        {
+            uint32_t next = WrappedSegmentEnd(start, end, TextAreaAvailablePx());
+            if (next <= start)
+                next = start + 1u;
+            if (cursor_ < next || next >= end)
+                return visual;
+            start = next;
+            ++visual;
+        }
+
+        return visual;
+    }
+
+    uint32_t TextEditor::CursorVisualX() const
+    {
+        uint32_t visual = CursorVisualLine();
+        uint32_t line_idx = 0u;
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+        uint32_t x = 0u;
+        uint32_t pos = 0u;
+
+        if (!VisualSegmentForLine(visual, &line_idx, &start, &end))
+            return 0u;
+
+        (void)line_idx;
+        pos = start;
+        while (pos < cursor_ && pos < end)
+        {
+            x += MeasureCharPx(buffer_[pos]) + 1u;
+            ++pos;
+        }
+
+        return x;
+    }
+
+    void TextEditor::UpdatePreferredFromCursor()
+    {
+        preferred_column_ = CursorColumn();
+        preferred_visual_x_px_ = CursorVisualX();
+    }
+
     void TextEditor::ClearDocument()
     {
         len_ = 0u;
         line_count_ = 1u;
         cursor_ = 0u;
         preferred_column_ = 0u;
+        preferred_visual_x_px_ = 0u;
         scroll_top_line_ = 0u;
         view_column_ = 0u;
         dirty_ = 0u;
@@ -841,6 +1069,7 @@ namespace
 
         cursor_ = start + column;
         preferred_column_ = column;
+        preferred_visual_x_px_ = CursorVisualX();
         ResetCaretBlink();
         EnsureCursorVisible();
         view_dirty_ = 1u;
@@ -853,6 +1082,23 @@ namespace
 
         if (line_count_ == 0u)
             return;
+
+        if (wrap_enabled_)
+        {
+            uint32_t total = TotalVisualLines();
+            uint32_t current_visual = CursorVisualLine();
+            uint32_t keep_x = preferred_visual_x_px_;
+
+            target = (int32_t)current_visual + delta;
+            if (target < 0)
+                target = 0;
+            if ((uint32_t)target >= total)
+                target = (int32_t)total - 1;
+
+            SetCursorFromVisualLineX((uint32_t)target, (int32_t)keep_x);
+            preferred_visual_x_px_ = keep_x;
+            return;
+        }
 
         target = (int32_t)current_line + delta;
         if (target < 0)
@@ -867,7 +1113,7 @@ namespace
     {
         uint32_t line_idx = CursorLine();
         cursor_ = end_of_line ? LineEnd(line_idx) : LineStart(line_idx);
-        preferred_column_ = CursorColumn();
+        UpdatePreferredFromCursor();
         ResetCaretBlink();
         EnsureCursorVisible();
         view_dirty_ = 1u;
@@ -881,10 +1127,11 @@ namespace
     uint32_t TextEditor::MaxTopLine() const
     {
         uint32_t visible = VisibleLineCapacity();
+        uint32_t total = TotalVisualLines();
 
-        if (line_count_ <= visible)
+        if (total <= visible)
             return 0u;
-        return line_count_ - visible;
+        return total - visible;
     }
 
     void TextEditor::ClampScroll()
@@ -897,9 +1144,21 @@ namespace
     {
         uint32_t line_idx = CursorLine();
         uint32_t column = CursorColumn();
+        uint32_t visual_idx = CursorVisualLine();
         uint32_t visible_lines = VisibleLineCapacity();
         uint32_t visible_columns = 1u;
         kgfx_obj *viewport = kgfx_obj_ref(viewport_);
+
+        if (wrap_enabled_)
+        {
+            if (visual_idx < scroll_top_line_)
+                scroll_top_line_ = visual_idx;
+            else if (visual_idx >= scroll_top_line_ + visible_lines)
+                scroll_top_line_ = visual_idx - visible_lines + 1u;
+            view_column_ = 0u;
+            ClampScroll();
+            return;
+        }
 
         if (line_idx < scroll_top_line_)
             scroll_top_line_ = line_idx;
@@ -924,11 +1183,70 @@ namespace
         ClampScroll();
     }
 
+    void TextEditor::SetCursorFromVisualLineX(uint32_t visual_idx, int32_t x)
+    {
+        uint32_t line_idx = 0u;
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+        uint32_t src = 0u;
+        int32_t advance_x = 0;
+
+        if (!VisualSegmentForLine(visual_idx, &line_idx, &start, &end))
+            return;
+
+        (void)line_idx;
+        src = start;
+
+        if (x > 0)
+        {
+            while (src < end)
+            {
+                uint32_t ch_w = MeasureCharPx(buffer_[src]) + 1u;
+                int32_t boundary = advance_x + (int32_t)(ch_w / 2u);
+
+                if (x < boundary)
+                    break;
+
+                advance_x += (int32_t)ch_w;
+                ++src;
+            }
+        }
+
+        cursor_ = src;
+        UpdatePreferredFromCursor();
+        ResetCaretBlink();
+        EnsureCursorVisible();
+        view_dirty_ = 1u;
+    }
+
+    void TextEditor::RefreshWrapButton()
+    {
+        kgfx_obj *label = kgfx_obj_ref(wrap_button_.label);
+
+        if (label && label->kind == KGFX_OBJ_TEXT)
+            label->u.text.text = wrap_enabled_ ? "Wrap On" : "Wrap Off";
+    }
+
+    void TextEditor::ToggleWrap()
+    {
+        wrap_enabled_ = wrap_enabled_ ? 0u : 1u;
+        if (wrap_enabled_)
+            view_column_ = 0u;
+
+        UpdatePreferredFromCursor();
+        EnsureCursorVisible();
+        RefreshWrapButton();
+        SetStatus(wrap_enabled_ ? "text wrap on" : "text wrap off", rgb(188, 202, 224));
+        view_dirty_ = 1u;
+    }
+
     void TextEditor::SyncVisibleLines()
     {
         kgfx_obj *viewport = kgfx_obj_ref(viewport_);
         uint32_t cursor_line = CursorLine();
         uint32_t cursor_column = CursorColumn();
+        uint32_t cursor_visual = CursorVisualLine();
+        uint32_t total_visual = TotalVisualLines();
         uint8_t caret_visible = CaretVisible();
         uint32_t pad_x = 6u;
         uint32_t pad_y = 4u;
@@ -949,7 +1267,8 @@ namespace
 
         for (uint32_t i = 0u; i < visible_line_count_ && i < MAX_VISIBLE_LINES; ++i)
         {
-            uint32_t line_idx = scroll_top_line_ + i;
+            uint32_t visual_idx = scroll_top_line_ + i;
+            uint32_t line_idx = 0u;
             uint32_t start = 0u;
             uint32_t end = 0u;
             uint32_t src = 0u;
@@ -959,19 +1278,20 @@ namespace
             uint8_t caret_drawn = 0u;
             kgfx_obj *obj = 0;
 
-            if (line_idx >= line_count_)
+            if (visual_idx >= total_visual)
                 break;
 
             obj = kgfx_obj_ref(line_objs_[i]);
             if (!obj || obj->kind != KGFX_OBJ_TEXT)
                 continue;
 
-            start = LineStart(line_idx);
-            end = LineEnd(line_idx);
-            src = start;
-            column = 0u;
+            if (!VisualSegmentForLine(visual_idx, &line_idx, &start, &end))
+                break;
 
-            while (src < end && column < view_column_)
+            src = start;
+            column = start >= LineStart(line_idx) ? (start - LineStart(line_idx)) : 0u;
+
+            while (!wrap_enabled_ && src < end && column < view_column_)
             {
                 ++src;
                 ++column;
@@ -980,6 +1300,7 @@ namespace
             while (out_len + 1u < LINE_RENDER_CAP)
             {
                 if (focused_ && caret_visible && !caret_drawn &&
+                    visual_idx == cursor_visual &&
                     line_idx == cursor_line && column == cursor_column)
                 {
                     uint32_t caret_px = MeasureCharPx('|') + 1u;
@@ -1006,6 +1327,7 @@ namespace
             }
 
             if (focused_ && caret_visible && !caret_drawn &&
+                visual_idx == cursor_visual &&
                 line_idx == cursor_line && column == cursor_column &&
                 out_len + 1u < LINE_RENDER_CAP)
             {
@@ -1021,7 +1343,7 @@ namespace
             obj->u.text.char_spacing = 1;
             obj->u.text.line_spacing = 0;
             obj->u.text.align = KTEXT_ALIGN_LEFT;
-            obj->fill = (line_idx == cursor_line) ? rgb(240, 244, 250) : rgb(224, 229, 238);
+            obj->fill = (visual_idx == cursor_visual) ? rgb(240, 244, 250) : rgb(224, 229, 238);
             obj->alpha = 255u;
             obj->visible = 1u;
         }
@@ -1033,7 +1355,7 @@ namespace
     {
         dirty_ = 1u;
         RebuildLineStarts();
-        preferred_column_ = CursorColumn();
+        UpdatePreferredFromCursor();
         EnsureCursorVisible();
         RefreshPathVisual();
         view_dirty_ = 1u;
@@ -1115,6 +1437,13 @@ namespace
             local_y = 0;
 
         line_offset = line_height_px_ > 0u ? (uint32_t)local_y / line_height_px_ : 0u;
+
+        if (wrap_enabled_)
+        {
+            SetCursorFromVisualLineX(scroll_top_line_ + line_offset, local_x);
+            return;
+        }
+
         line_idx = scroll_top_line_ + line_offset;
         if (line_idx >= line_count_)
             line_idx = line_count_ ? (line_count_ - 1u) : 0u;
@@ -1133,7 +1462,7 @@ namespace
         if (local_x <= 0)
         {
             cursor_ = src;
-            preferred_column_ = column;
+            UpdatePreferredFromCursor();
             ResetCaretBlink();
             EnsureCursorVisible();
             view_dirty_ = 1u;
@@ -1154,7 +1483,7 @@ namespace
         }
 
         cursor_ = src;
-        preferred_column_ = column;
+        UpdatePreferredFromCursor();
         ResetCaretBlink();
         EnsureCursorVisible();
         view_dirty_ = 1u;
@@ -1294,7 +1623,7 @@ namespace
         if (KeyRepeatTrigger(KEY_LEFT) && cursor_ > 0u)
         {
             --cursor_;
-            preferred_column_ = CursorColumn();
+            UpdatePreferredFromCursor();
             ResetCaretBlink();
             EnsureCursorVisible();
             view_dirty_ = 1u;
@@ -1303,7 +1632,7 @@ namespace
         if (KeyRepeatTrigger(KEY_RIGHT) && cursor_ < len_)
         {
             ++cursor_;
-            preferred_column_ = CursorColumn();
+            UpdatePreferredFromCursor();
             ResetCaretBlink();
             EnsureCursorVisible();
             view_dirty_ = 1u;
@@ -1531,6 +1860,7 @@ namespace
         len_ = out_len;
         cursor_ = 0u;
         preferred_column_ = 0u;
+        preferred_visual_x_px_ = 0u;
         scroll_top_line_ = 0u;
         view_column_ = 0u;
         dirty_ = 0u;
@@ -1611,6 +1941,14 @@ namespace
         (void)button;
         if (self)
             self->BeginSaveAsDialog();
+    }
+
+    void TextEditor::WrapClickThunk(kbutton_handle button, void *user)
+    {
+        TextEditor *self = (TextEditor *)user;
+        (void)button;
+        if (self)
+            self->ToggleWrap();
     }
 
     void TextEditor::ExplorerDialogThunk(int accepted, const char *raw_path, const char *friendly_path, void *user)

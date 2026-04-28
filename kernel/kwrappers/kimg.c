@@ -4,6 +4,38 @@
 #include "kwrappers/kfile.h"
 #include "memory/pmem.h"
 
+#define KIMG_FILE_READ_CHUNK_BYTES (64u * 1024u)
+#define KIMG_STBI_TEMP_BYTES (32u * 1024u * 1024u)
+
+typedef struct
+{
+    uint8_t *base;
+    uint32_t cap;
+    uint32_t used;
+} kimg_stbi_arena_t;
+
+static kimg_stbi_arena_t g_kimg_stbi_arena;
+
+static int kimg_stbi_arena_prepare(void);
+static void kimg_stbi_arena_reset(void);
+static void *kimg_stbi_malloc(size_t size);
+static void *kimg_stbi_realloc(void *ptr, size_t new_size);
+static void kimg_stbi_free(void *ptr);
+
+#define STBI_NO_STDIO
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_NO_SIMD
+#define STBI_NO_THREAD_LOCALS
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ASSERT(x) ((void)0)
+#define STBI_MALLOC(sz) kimg_stbi_malloc(sz)
+#define STBI_REALLOC(p, newsz) kimg_stbi_realloc((p), (newsz))
+#define STBI_FREE(p) kimg_stbi_free(p)
+#define STB_IMAGE_IMPLEMENTATION
+#include "third_party/stb_image.h"
+
 extern void usbh_dbg_dot(int n, unsigned int rgb);
 
 volatile kimg_dbg_t g_kimg_dbg;
@@ -13,6 +45,90 @@ extern volatile uint32_t g_disk_last_count;
 extern volatile int g_disk_last_rc;
 
 uint64_t kfile_size(KFile *f);
+
+typedef struct
+{
+    uint32_t payload_size;
+} kimg_stbi_alloc_hdr_t;
+
+static uint32_t kimg_align_u32(uint32_t value, uint32_t align)
+{
+    return (value + align - 1u) & ~(align - 1u);
+}
+
+static int kimg_stbi_arena_prepare(void)
+{
+    if (g_kimg_stbi_arena.base)
+        return 0;
+
+    uint32_t pages = (KIMG_STBI_TEMP_BYTES + 4095u) >> 12;
+    uint8_t *base = (uint8_t *)pmem_alloc_pages((uint64_t)pages);
+    if (!base)
+        return -1;
+
+    g_kimg_stbi_arena.base = base;
+    g_kimg_stbi_arena.cap = pages << 12;
+    g_kimg_stbi_arena.used = 0u;
+    return 0;
+}
+
+static void kimg_stbi_arena_reset(void)
+{
+    g_kimg_stbi_arena.used = 0u;
+}
+
+static void *kimg_stbi_malloc(size_t size)
+{
+    uint32_t need = 0u;
+    uint32_t start = 0u;
+    kimg_stbi_alloc_hdr_t *hdr = 0;
+
+    if (size == 0u || size > 0x7FFFFFFFu)
+        return 0;
+    if (kimg_stbi_arena_prepare() != 0)
+        return 0;
+
+    need = kimg_align_u32((uint32_t)size + (uint32_t)sizeof(kimg_stbi_alloc_hdr_t), 8u);
+    start = kimg_align_u32(g_kimg_stbi_arena.used, 8u);
+    if (start > g_kimg_stbi_arena.cap || need > g_kimg_stbi_arena.cap - start)
+        return 0;
+
+    hdr = (kimg_stbi_alloc_hdr_t *)(g_kimg_stbi_arena.base + start);
+    hdr->payload_size = (uint32_t)size;
+    g_kimg_stbi_arena.used = start + need;
+    return (void *)(hdr + 1);
+}
+
+static void *kimg_stbi_realloc(void *ptr, size_t new_size)
+{
+    void *np = 0;
+    uint32_t old_size = 0u;
+    uint8_t *dst = 0;
+    const uint8_t *src = 0;
+    uint32_t copy_n = 0u;
+
+    if (!ptr)
+        return kimg_stbi_malloc(new_size);
+    if (new_size == 0u)
+        return 0;
+
+    np = kimg_stbi_malloc(new_size);
+    if (!np)
+        return 0;
+
+    old_size = ((kimg_stbi_alloc_hdr_t *)ptr - 1)->payload_size;
+    copy_n = old_size < (uint32_t)new_size ? old_size : (uint32_t)new_size;
+    dst = (uint8_t *)np;
+    src = (const uint8_t *)ptr;
+    memcpy(dst, src, copy_n);
+
+    return np;
+}
+
+static void kimg_stbi_free(void *ptr)
+{
+    (void)ptr;
+}
 
 static uint16_t rd16le(const uint8_t *p)
 {
@@ -273,7 +389,7 @@ int kimg_load_bmp_flags(kimg *out, const char *path, uint32_t flags)
 
     while (remaining)
     {
-        uint32_t want = (remaining > 4096ull) ? 4096u : (uint32_t)remaining;
+        uint32_t want = (remaining > (uint64_t)KIMG_FILE_READ_CHUNK_BYTES) ? KIMG_FILE_READ_CHUNK_BYTES : (uint32_t)remaining;
         uint32_t got = 0;
 
         // Update "row" estimate based on how many bytes we've already consumed.
@@ -369,4 +485,214 @@ int kimg_load_bmp_flags(kimg *out, const char *path, uint32_t flags)
 int kimg_load_bmp(kimg *out, const char *path)
 {
     return kimg_load_bmp_flags(out, path, 0);
+}
+
+typedef enum
+{
+    KIMG_FMT_UNKNOWN = 0,
+    KIMG_FMT_BMP,
+    KIMG_FMT_PNG,
+    KIMG_FMT_JPEG
+} kimg_file_format;
+
+static kimg_file_format kimg_detect_format_bytes(const uint8_t *p, uint32_t n)
+{
+    if (p && n >= 2u && p[0] == 'B' && p[1] == 'M')
+        return KIMG_FMT_BMP;
+
+    if (p && n >= 8u &&
+        p[0] == 0x89u && p[1] == 'P' && p[2] == 'N' && p[3] == 'G' &&
+        p[4] == 0x0Du && p[5] == 0x0Au && p[6] == 0x1Au && p[7] == 0x0Au)
+    {
+        return KIMG_FMT_PNG;
+    }
+
+    if (p && n >= 3u && p[0] == 0xFFu && p[1] == 0xD8u && p[2] == 0xFFu)
+        return KIMG_FMT_JPEG;
+
+    return KIMG_FMT_UNKNOWN;
+}
+
+static kimg_file_format kimg_detect_file_format(const char *path)
+{
+    KFile f;
+    uint8_t hdr[12];
+    uint32_t got = 0u;
+
+    if (!path)
+        return KIMG_FMT_UNKNOWN;
+
+    if (kfile_open(&f, path, KFILE_READ) != 0)
+        return KIMG_FMT_UNKNOWN;
+
+    (void)kfile_read(&f, hdr, (uint32_t)sizeof(hdr), &got);
+    kfile_close(&f);
+
+    return kimg_detect_format_bytes(hdr, got);
+}
+
+static int kimg_read_file_to_pmem(const char *path, uint8_t **out_buf, uint32_t *out_size)
+{
+    KFile f;
+    uint64_t size64 = 0ull;
+    uint32_t size = 0u;
+    uint32_t total = 0u;
+    uint8_t *buf = 0;
+
+    if (!path || !out_buf || !out_size)
+        return -1;
+
+    *out_buf = 0;
+    *out_size = 0u;
+
+    if (kfile_open(&f, path, KFILE_READ) != 0)
+        return -1;
+
+    size64 = kfile_size(&f);
+    if (size64 == 0ull || size64 > 0x7FFFFFFFull)
+    {
+        kfile_close(&f);
+        return -1;
+    }
+
+    size = (uint32_t)size64;
+    buf = (uint8_t *)pmem_alloc_pages((size64 + 4095ull) >> 12);
+    if (!buf)
+    {
+        kfile_close(&f);
+        return -1;
+    }
+
+    while (total < size)
+    {
+        uint32_t want = size - total;
+        uint32_t got = 0u;
+
+        if (want > KIMG_FILE_READ_CHUNK_BYTES)
+            want = KIMG_FILE_READ_CHUNK_BYTES;
+
+        if (kfile_read(&f, buf + total, want, &got) != 0 || got == 0u)
+        {
+            kfile_close(&f);
+            pmem_free_pages(buf, (size64 + 4095ull) >> 12);
+            return -1;
+        }
+
+        total += got;
+    }
+
+    kfile_close(&f);
+    *out_buf = buf;
+    *out_size = size;
+    return 0;
+}
+
+static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags)
+{
+    uint8_t *file_buf = 0;
+    uint32_t file_size = 0u;
+    stbi_uc *decoded = 0;
+    uint32_t *dst = 0;
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+
+    if (!out || !path)
+        return -1;
+
+    out->px = 0;
+    out->w = 0u;
+    out->h = 0u;
+
+    if (kimg_stbi_arena_prepare() != 0)
+        return -1;
+    kimg_stbi_arena_reset();
+
+    if (kimg_read_file_to_pmem(path, &file_buf, &file_size) != 0)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+
+    decoded = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &comp, 4);
+    pmem_free_pages(file_buf, ((uint64_t)file_size + 4095ull) >> 12);
+
+    if (!decoded || w <= 0 || h <= 0)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+
+    if ((uint32_t)w > 8192u || (uint32_t)h > 8192u)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+
+    uint64_t px_count = (uint64_t)(uint32_t)w * (uint64_t)(uint32_t)h;
+    uint64_t px_bytes = px_count * 4ull;
+    if (px_count == 0ull || px_bytes > (256ull * 1024ull * 1024ull))
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+
+    uint32_t px_pages = (uint32_t)((px_bytes + 4095ull) >> 12);
+    dst = (uint32_t *)pmem_alloc_pages(px_pages);
+    if (!dst)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+
+    for (uint64_t i = 0; i < px_count; ++i)
+    {
+        uint8_t r = decoded[i * 4ull + 0ull];
+        uint8_t g = decoded[i * 4ull + 1ull];
+        uint8_t b = decoded[i * 4ull + 2ull];
+        uint8_t a = decoded[i * 4ull + 3ull];
+        a = kimg_apply_bmp_alpha_flags(r, g, b, a, flags);
+        dst[i] = pack_pixel(r, g, b, a);
+    }
+
+    out->px = dst;
+    out->w = (uint32_t)w;
+    out->h = (uint32_t)h;
+
+    kimg_stbi_arena_reset();
+    return 0;
+}
+
+int kimg_load_png(kimg *out, const char *path)
+{
+    if (kimg_detect_file_format(path) != KIMG_FMT_PNG)
+        return -1;
+    return kimg_load_stbi_rgba_flags(out, path, 0u);
+}
+
+int kimg_load_jpg(kimg *out, const char *path)
+{
+    if (kimg_detect_file_format(path) != KIMG_FMT_JPEG)
+        return -1;
+    return kimg_load_stbi_rgba_flags(out, path, 0u);
+}
+
+int kimg_load_jpeg(kimg *out, const char *path)
+{
+    return kimg_load_jpg(out, path);
+}
+
+int kimg_load(kimg *out, const char *path)
+{
+    switch (kimg_detect_file_format(path))
+    {
+    case KIMG_FMT_BMP:
+        return kimg_load_bmp(out, path);
+    case KIMG_FMT_PNG:
+        return kimg_load_stbi_rgba_flags(out, path, 0u);
+    case KIMG_FMT_JPEG:
+        return kimg_load_stbi_rgba_flags(out, path, 0u);
+    default:
+        return -1;
+    }
 }

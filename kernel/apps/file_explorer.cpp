@@ -913,8 +913,8 @@ namespace
         }
 
         visible_rows = (uint32_t)(list_h / (int32_t)row_h);
-        if ((list_h % (int32_t)row_h) != 0 || visible_rows == 0u)
-            ++visible_rows;
+        if (visible_rows == 0u)
+            visible_rows = 1u;
         if (visible_rows > MAX_VISIBLE_ROWS)
             visible_rows = MAX_VISIBLE_ROWS;
         visible_rows_ = (int)visible_rows;

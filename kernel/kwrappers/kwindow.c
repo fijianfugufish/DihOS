@@ -56,6 +56,7 @@ static uint8_t G_prev_buttons = 0;
 static int32_t G_prev_mouse_x = 0;
 static int32_t G_prev_mouse_y = 0;
 static uint8_t G_prev_mouse_valid = 0;
+static uint32_t G_work_area_bottom_inset = 0;
 
 static inline int32_t kwindow_max_i32(int32_t a, int32_t b)
 {
@@ -180,6 +181,36 @@ static void kwindow_layout_controls(kwindow_slot *slot)
     }
 }
 
+static void kwindow_apply_fullscreen_bounds(kwindow_slot *slot)
+{
+    const kfb *fb = 0;
+    kgfx_obj *root = 0;
+    uint32_t usable_h = 0u;
+    uint32_t min_h = 0u;
+
+    if (!slot)
+        return;
+
+    fb = kgfx_info();
+    root = kgfx_obj_ref(slot->root);
+    if (!fb || !root || root->kind != KGFX_OBJ_RECT)
+        return;
+
+    usable_h = fb->height;
+    if (G_work_area_bottom_inset < usable_h)
+        usable_h -= G_work_area_bottom_inset;
+
+    min_h = kwindow_min_height_for_style(&slot->style);
+    if (usable_h < min_h)
+        usable_h = min_h;
+
+    root->u.rect.x = 0;
+    root->u.rect.y = 0;
+    root->u.rect.w = fb->width;
+    root->u.rect.h = usable_h;
+    kwindow_layout_controls(slot);
+}
+
 static void kwindow_toggle_fullscreen(kwindow_slot *slot)
 {
     const kfb *fb = 0;
@@ -199,11 +230,8 @@ static void kwindow_toggle_fullscreen(kwindow_slot *slot)
         slot->restore_y = root->u.rect.y;
         slot->restore_w = root->u.rect.w;
         slot->restore_h = root->u.rect.h;
-        root->u.rect.x = 0;
-        root->u.rect.y = 0;
-        root->u.rect.w = fb->width;
-        root->u.rect.h = fb->height;
         slot->fullscreen = 1;
+        kwindow_apply_fullscreen_bounds(slot);
     }
     else
     {
@@ -221,7 +249,8 @@ static void kwindow_toggle_fullscreen(kwindow_slot *slot)
     slot->dragging = 0;
     slot->resizing = 0;
     slot->resize_edges = 0;
-    kwindow_layout_controls(slot);
+    if (!slot->fullscreen)
+        kwindow_layout_controls(slot);
 }
 
 static inline int kwindow_clip_intersect(kwindow_clip_rect *dst, const kwindow_clip_rect *other)
@@ -636,6 +665,7 @@ void kwindow_init(void)
     G_prev_mouse_x = 0;
     G_prev_mouse_y = 0;
     G_prev_mouse_valid = 0;
+    G_work_area_bottom_inset = 0;
 }
 
 kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
@@ -1119,6 +1149,20 @@ int kwindow_raise(kwindow_handle h)
     if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
         return 0;
     return kwindow_raise_to_front(h.idx);
+}
+
+void kwindow_set_work_area_bottom_inset(uint32_t px)
+{
+    if (G_work_area_bottom_inset == px)
+        return;
+
+    G_work_area_bottom_inset = px;
+
+    for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
+        if (G_windows[i].used && G_windows[i].fullscreen)
+            kwindow_apply_fullscreen_bounds(&G_windows[i]);
+    }
 }
 
 void kwindow_set_title(kwindow_handle h, const char *title)

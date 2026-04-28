@@ -10,12 +10,13 @@ extern "C"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/kimg.h"
 #include "kwrappers/ktext.h"
+#include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
 }
 
 namespace
 {
-    static const char *kWallpaperPath = "0:/OS/System/Images/bgpaper.bmp";
+    static const char *kWallpaperPath = "0:/OS/System/Images/bgpaper.jpg";
 
     static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
     {
@@ -168,7 +169,7 @@ namespace
         kgfx_obj_ref(wallpaper_frame_)->outline_width = 0u;
         kgfx_obj_ref(wallpaper_frame_)->alpha = 255u;
 
-        if (kimg_load_bmp(&wallpaper_, kWallpaperPath) == 0)
+        if (kimg_load(&wallpaper_, kWallpaperPath) == 0)
         {
             wallpaper_loaded_ = 1u;
             wallpaper_image_ = kgfx_obj_add_image(wallpaper_.px, wallpaper_.w, wallpaper_.h, 0, 0, wallpaper_.w);
@@ -364,6 +365,7 @@ namespace
         screen_h = fb->height;
         last_screen_w_ = screen_w;
         last_screen_h_ = screen_h;
+        kwindow_set_work_area_bottom_inset(bar_h);
 
         if (kgfx_obj_ref(wallpaper_frame_) && kgfx_obj_ref(wallpaper_frame_)->kind == KGFX_OBJ_RECT)
         {

@@ -19,6 +19,14 @@ typedef struct kimg
 int kimg_load_bmp(kimg *out, const char *path);
 int kimg_load_bmp_flags(kimg *out, const char *path, uint32_t flags);
 
+// Load PNG and JPEG/JPG. Returns 0 on success.
+int kimg_load_png(kimg *out, const char *path);
+int kimg_load_jpg(kimg *out, const char *path);
+int kimg_load_jpeg(kimg *out, const char *path);
+
+// Auto-detect by file signature and dispatch to BMP/PNG/JPEG loader.
+int kimg_load(kimg *out, const char *path);
+
 // Draw at (x,y). global_alpha multiplies per-pixel alpha (0..255).
 void kimg_draw(const kimg *img, int x, int y, uint8_t global_alpha);
 
