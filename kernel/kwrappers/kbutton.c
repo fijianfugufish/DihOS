@@ -1,5 +1,6 @@
 #include "kwrappers/kbutton.h"
 #include "kwrappers/kmouse.h"
+#include "kwrappers/kwindow.h"
 
 #ifndef KBUTTON_MAX
 #define KBUTTON_MAX 128
@@ -309,6 +310,8 @@ void kbutton_update_all(void)
 
         inside = mouse.x >= resolved[i].clip.x0 && mouse.y >= resolved[i].clip.y0 &&
                  mouse.x < resolved[i].clip.x1 && mouse.y < resolved[i].clip.y1;
+        if (inside && !kwindow_obj_can_receive_input(G_buttons[i].root, mouse.x, mouse.y))
+            inside = 0;
 
         if (inside && (hovered_idx < 0 || resolved[i].z >= hovered_z))
         {

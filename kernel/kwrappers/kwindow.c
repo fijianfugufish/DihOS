@@ -380,6 +380,56 @@ static int kwindow_point_in_bounds(int32_t x, int32_t y, const kwindow_resolved_
     return x >= r->clip.x0 && y >= r->clip.y0 && x < r->clip.x1 && y < r->clip.y1;
 }
 
+static kgfx_obj_handle kwindow_top_ancestor(kgfx_obj_handle h)
+{
+    kgfx_obj *obj = kgfx_obj_ref(h);
+
+    while (obj && obj->parent_idx >= 0)
+    {
+        h.idx = (int)obj->parent_idx;
+        obj = kgfx_obj_ref(h);
+    }
+
+    return h;
+}
+
+static int kwindow_top_window_at_point(int32_t x, int32_t y, kwindow_handle *out_window, int32_t *out_z)
+{
+    int found = 0;
+    int best_idx = -1;
+    int32_t best_z = 0;
+
+    for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
+        kwindow_resolved_rect root_bounds = {0};
+
+        if (!G_windows[i].used || !G_windows[i].visible)
+            continue;
+
+        if (!kwindow_resolve_rect_bounds(G_windows[i].root, &root_bounds))
+            continue;
+
+        if (!kwindow_point_in_bounds(x, y, &root_bounds))
+            continue;
+
+        if (!found || root_bounds.z >= best_z)
+        {
+            found = 1;
+            best_idx = (int)i;
+            best_z = root_bounds.z;
+        }
+    }
+
+    if (!found)
+        return 0;
+
+    if (out_window)
+        out_window->idx = best_idx;
+    if (out_z)
+        *out_z = best_z;
+    return 1;
+}
+
 static uint8_t kwindow_hit_resize_edges(const kwindow_resolved_rect *r, int32_t x, int32_t y, uint16_t outline_width)
 {
     uint8_t edges = 0;
@@ -1076,4 +1126,32 @@ kgfx_obj_handle kwindow_root(kwindow_handle h)
     if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
         return (kgfx_obj_handle){-1};
     return G_windows[h.idx].root;
+}
+
+int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y)
+{
+    kwindow_handle top_window = {-1};
+    kwindow_resolved_rect ancestor_bounds = {0};
+    kgfx_obj_handle ancestor = {-1};
+    int32_t top_window_z = 0;
+
+    if (h.idx < 0)
+        return 0;
+
+    ancestor = kwindow_top_ancestor(h);
+    if (!kwindow_resolve_obj(ancestor, &ancestor_bounds, 0))
+        return 0;
+
+    if (!kwindow_top_window_at_point(x, y, &top_window, &top_window_z))
+        return 1;
+
+    if (top_window.idx >= 0 && kwindow_root(top_window).idx == ancestor.idx)
+        return 1;
+
+    return ancestor_bounds.z >= top_window_z;
+}
+
+int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y)
+{
+    return kwindow_obj_can_receive_input(kwindow_root(h), x, y);
 }

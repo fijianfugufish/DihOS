@@ -1,6 +1,7 @@
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kinput.h"
 #include "kwrappers/kmouse.h"
+#include "kwrappers/kwindow.h"
 
 #ifndef KTEXTBOX_MAX
 #define KTEXTBOX_MAX 32
@@ -759,6 +760,8 @@ void ktextbox_update_all(void)
 
         inside = mouse.x >= resolved[i].clip.x0 && mouse.y >= resolved[i].clip.y0 &&
                  mouse.x < resolved[i].clip.x1 && mouse.y < resolved[i].clip.y1;
+        if (inside && !kwindow_obj_can_receive_input(G_boxes[i].root, mouse.x, mouse.y))
+            inside = 0;
 
         if (inside && (hovered_idx < 0 || resolved[i].z >= hovered_z))
         {
@@ -921,6 +924,11 @@ void ktextbox_set_focus(ktextbox_handle h, uint8_t focused)
         ktextbox_focus_slot(h.idx);
     else if (G_focused_idx == h.idx)
         ktextbox_focus_slot(-1);
+}
+
+void ktextbox_clear_focus(void)
+{
+    ktextbox_focus_slot(-1);
 }
 
 int ktextbox_focused(ktextbox_handle h)

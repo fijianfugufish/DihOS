@@ -1,5 +1,6 @@
 #include "apps/desktop_shell_api.h"
 #include "apps/file_explorer_api.h"
+#include "apps/text_editor_api.h"
 #include "terminal/terminal_api.h"
 
 extern "C"
@@ -79,6 +80,7 @@ namespace
 
         static void TerminalClickThunk(kbutton_handle button, void *user);
         static void ExplorerClickThunk(kbutton_handle button, void *user);
+        static void EditorClickThunk(kbutton_handle button, void *user);
 
     private:
         uint8_t initialized_;
@@ -92,8 +94,10 @@ namespace
         kgfx_obj_handle taskbar_;
         AppButton terminal_button_;
         AppButton explorer_button_;
+        AppButton editor_button_;
         uint8_t terminal_active_;
         uint8_t explorer_active_;
+        uint8_t editor_active_;
         kbutton_style button_style_;
         kbutton_style active_style_;
     };
@@ -126,8 +130,15 @@ namespace
         explorer_button_.label.idx = -1;
         explorer_button_.icon_loaded = 0u;
         kimg_zero(&explorer_button_.icon);
+        editor_button_.button.idx = -1;
+        editor_button_.icon_image.idx = -1;
+        editor_button_.icon_fallback.idx = -1;
+        editor_button_.label.idx = -1;
+        editor_button_.icon_loaded = 0u;
+        kimg_zero(&editor_button_.icon);
         terminal_active_ = 0xFFu;
         explorer_active_ = 0xFFu;
+        editor_active_ = 0xFFu;
 
         button_style_ = kbutton_style_default();
         button_style_.fill = rgb(28, 33, 45);
@@ -177,11 +188,14 @@ namespace
 
         terminal_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, TerminalClickThunk, this);
         explorer_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, ExplorerClickThunk, this);
+        editor_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, EditorClickThunk, this);
 
         kgfx_obj_set_parent(kbutton_root(terminal_button_.button), taskbar_);
         kgfx_obj_set_parent(kbutton_root(explorer_button_.button), taskbar_);
+        kgfx_obj_set_parent(kbutton_root(editor_button_.button), taskbar_);
         kgfx_obj_set_clip_to_parent(kbutton_root(terminal_button_.button), 1u);
         kgfx_obj_set_clip_to_parent(kbutton_root(explorer_button_.button), 1u);
+        kgfx_obj_set_clip_to_parent(kbutton_root(editor_button_.button), 1u);
 
         if (font_)
         {
@@ -189,15 +203,21 @@ namespace
             terminal_button_.label = kgfx_obj_add_text(font_, "Terminal", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
             explorer_button_.icon_fallback = kgfx_obj_add_text(font_, "F", 0, 0, 1, rgb(224, 238, 248), 255, 2u, 0, 0, KTEXT_ALIGN_CENTER, 1);
             explorer_button_.label = kgfx_obj_add_text(font_, "Files", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+            editor_button_.icon_fallback = kgfx_obj_add_text(font_, "N", 0, 0, 1, rgb(224, 238, 248), 255, 2u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+            editor_button_.label = kgfx_obj_add_text(font_, "Notes", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
             kgfx_obj_set_parent(terminal_button_.icon_fallback, kbutton_root(terminal_button_.button));
             kgfx_obj_set_parent(terminal_button_.label, kbutton_root(terminal_button_.button));
             kgfx_obj_set_parent(explorer_button_.icon_fallback, kbutton_root(explorer_button_.button));
             kgfx_obj_set_parent(explorer_button_.label, kbutton_root(explorer_button_.button));
+            kgfx_obj_set_parent(editor_button_.icon_fallback, kbutton_root(editor_button_.button));
+            kgfx_obj_set_parent(editor_button_.label, kbutton_root(editor_button_.button));
             kgfx_obj_set_clip_to_parent(terminal_button_.icon_fallback, 1u);
             kgfx_obj_set_clip_to_parent(terminal_button_.label, 1u);
             kgfx_obj_set_clip_to_parent(explorer_button_.icon_fallback, 1u);
             kgfx_obj_set_clip_to_parent(explorer_button_.label, 1u);
+            kgfx_obj_set_clip_to_parent(editor_button_.icon_fallback, 1u);
+            kgfx_obj_set_clip_to_parent(editor_button_.label, 1u);
         }
 
         if (load_first_bmp(&terminal_button_.icon,
@@ -224,6 +244,19 @@ namespace
             kgfx_obj_set_clip_to_parent(explorer_button_.icon_image, 1u);
             kgfx_image_set_sample_mode(explorer_button_.icon_image, KGFX_IMAGE_SAMPLE_NEAREST);
             kgfx_obj_ref(explorer_button_.icon_image)->z = 1;
+        }
+
+        if (load_first_bmp(&editor_button_.icon,
+                           "0:/OS/System/Images/Taskbar/text_editor.bmp",
+                           "0:/OS/System/Images/Taskbar/notepad.bmp",
+                           "0:/OS/System/Images/Apps/text_editor.bmp") == 0)
+        {
+            editor_button_.icon_loaded = 1u;
+            editor_button_.icon_image = kgfx_obj_add_image(editor_button_.icon.px, editor_button_.icon.w, editor_button_.icon.h, 0, 0, editor_button_.icon.w);
+            kgfx_obj_set_parent(editor_button_.icon_image, kbutton_root(editor_button_.button));
+            kgfx_obj_set_clip_to_parent(editor_button_.icon_image, 1u);
+            kgfx_image_set_sample_mode(editor_button_.icon_image, KGFX_IMAGE_SAMPLE_NEAREST);
+            kgfx_obj_ref(editor_button_.icon_image)->z = 1;
         }
     }
 
@@ -376,12 +409,14 @@ namespace
 
         LayoutButton(terminal_button_, 10, button_y, button_w, button_h, "Terminal", ">");
         LayoutButton(explorer_button_, 10 + (int32_t)button_w + gap, button_y, button_w, button_h, "Files", "F");
+        LayoutButton(editor_button_, 10 + (int32_t)(button_w + gap) * 2, button_y, button_w, button_h, "Notes", "N");
     }
 
     void DesktopShell::UpdateButtonStyles(void)
     {
         uint8_t terminal_active = terminal_visible() ? 1u : 0u;
         uint8_t explorer_active = file_explorer_visible() ? 1u : 0u;
+        uint8_t editor_active = text_editor_visible() ? 1u : 0u;
 
         if (terminal_active_ != terminal_active)
         {
@@ -393,6 +428,12 @@ namespace
         {
             explorer_active_ = explorer_active;
             kbutton_set_style(explorer_button_.button, explorer_active ? &active_style_ : &button_style_);
+        }
+
+        if (editor_active_ != editor_active)
+        {
+            editor_active_ = editor_active;
+            kbutton_set_style(editor_button_.button, editor_active ? &active_style_ : &button_style_);
         }
     }
 
@@ -421,6 +462,13 @@ namespace
         (void)button;
         (void)user;
         file_explorer_activate();
+    }
+
+    void DesktopShell::EditorClickThunk(kbutton_handle button, void *user)
+    {
+        (void)button;
+        (void)user;
+        text_editor_activate();
     }
 }
 

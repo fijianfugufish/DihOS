@@ -1,4 +1,5 @@
 #include "apps/file_explorer_api.h"
+#include "apps/text_editor_api.h"
 
 extern "C"
 {
@@ -120,10 +121,13 @@ namespace
     class FileExplorer
     {
     public:
-        void Init(const kfont *font);
+        void Init(const kfont *font, uint8_t dialog_host);
         void Update();
         void Activate();
         int Visible() const;
+        int BeginDialog(file_explorer_dialog_mode mode, const char *initial_dir, const char *suggested_name,
+                        file_explorer_dialog_callback on_result, void *user);
+        int DialogActive() const;
 
     private:
         enum
@@ -176,6 +180,8 @@ namespace
         void Layout(void);
         void LayoutButton(LabeledButton &button, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t scale);
         void LayoutRow(RowSlot &row, int32_t y, uint32_t w, uint32_t h);
+        void SetButtonText(LabeledButton &button, const char *text);
+        void RefreshActionLabels(void);
         void SyncActionStates(void);
         void SyncRows(void);
         void HandleMouseWheel(void);
@@ -202,6 +208,8 @@ namespace
         void OpenModal(ModalMode mode, const char *title, const char *body, const char *confirm_text, const char *initial_text);
         void CloseModal(void);
         void CommitModal(void);
+        void CommitDialogSelection(void);
+        void FinishDialog(int accepted, const char *raw_path, const char *friendly_path);
         int ValidateSegmentName(const char *name);
         int BuildSelectedRawPath(char *out, uint32_t cap) const;
         int BuildSelectedFriendlyPath(char *out, uint32_t cap) const;
@@ -218,6 +226,7 @@ namespace
 
         static void PathSubmitThunk(ktextbox_handle textbox, const char *text, void *user);
         static void ModalSubmitThunk(ktextbox_handle textbox, const char *text, void *user);
+        static void DialogNameSubmitThunk(ktextbox_handle textbox, const char *text, void *user);
         static void RowClickThunk(kbutton_handle button, void *user);
         static void UpClickThunk(kbutton_handle button, void *user);
         static void RefreshClickThunk(kbutton_handle button, void *user);
@@ -230,6 +239,7 @@ namespace
 
     private:
         uint8_t initialized_;
+        uint8_t dialog_host_;
         uint32_t frame_counter_;
         const kfont *font_;
         kwindow_handle window_;
@@ -243,6 +253,8 @@ namespace
         kgfx_obj_handle list_viewport_;
         kgfx_obj_handle status_strip_;
         kgfx_obj_handle status_text_;
+        ktextbox_handle dialog_name_box_;
+        kgfx_obj_handle dialog_name_label_;
         RowSlot rows_[MAX_VISIBLE_ROWS];
         ktextbox_handle modal_input_;
         kgfx_obj_handle modal_backdrop_;
@@ -279,15 +291,21 @@ namespace
         uint8_t rows_dirty_;
         int last_root_w_;
         int last_root_h_;
+        file_explorer_dialog_mode dialog_mode_;
+        file_explorer_dialog_callback dialog_callback_;
+        void *dialog_user_;
+        uint8_t dialog_restore_hidden_;
     };
 
-    static FileExplorer g_explorer = {};
+    static FileExplorer g_main_explorer = {};
+    static FileExplorer g_dialog_explorer = {};
 
-    void FileExplorer::Init(const kfont *font)
+    void FileExplorer::Init(const kfont *font, uint8_t dialog_host)
     {
         if (initialized_ || !font)
             return;
 
+        dialog_host_ = dialog_host ? 1u : 0u;
         font_ = font;
         frame_counter_ = 0u;
         window_.idx = -1;
@@ -295,6 +313,8 @@ namespace
         list_viewport_.idx = -1;
         status_strip_.idx = -1;
         status_text_.idx = -1;
+        dialog_name_box_.idx = -1;
+        dialog_name_label_.idx = -1;
         modal_input_.idx = -1;
         modal_backdrop_.idx = -1;
         modal_panel_.idx = -1;
@@ -302,6 +322,10 @@ namespace
         modal_body_.idx = -1;
         modal_error_.idx = -1;
         modal_mode_ = MODAL_NONE;
+        dialog_mode_ = FILE_EXPLORER_DIALOG_NONE;
+        dialog_callback_ = 0;
+        dialog_user_ = 0;
+        dialog_restore_hidden_ = 0u;
         selected_index_ = -1;
         scroll_top_ = 0;
         visible_rows_ = 0;
@@ -380,6 +404,8 @@ namespace
 
         ktextbox_set_text(path_box_, current_dir_);
         initialized_ = 1u;
+        if (dialog_host_)
+            kwindow_set_visible(window_, 0u);
     }
 
     void FileExplorer::CreateWindow(void)
@@ -400,7 +426,14 @@ namespace
         style.fullscreen_button_style.outline = rgb(254, 246, 222);
         style.title_scale = 2u;
 
-        window_ = kwindow_create(80, 76, 620, 430, 15, font_, "File Explorer", &style);
+        window_ = kwindow_create(dialog_host_ ? 126 : 80,
+                                 dialog_host_ ? 94 : 76,
+                                 dialog_host_ ? 560u : 620u,
+                                 dialog_host_ ? 404u : 430u,
+                                 dialog_host_ ? 24 : 15,
+                                 font_,
+                                 dialog_host_ ? "File Dialog" : "File Explorer",
+                                 &style);
     }
 
     void FileExplorer::CreateButtons(void)
@@ -436,6 +469,14 @@ namespace
         kgfx_obj_set_parent(status_text_, status_strip_);
         kgfx_obj_set_clip_to_parent(status_text_, 1);
 
+        dialog_name_label_ = kgfx_obj_add_text(font_, "File Name", 0, 0, 1, rgb(222, 228, 238), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 0);
+        kgfx_obj_set_parent(dialog_name_label_, root);
+        kgfx_obj_set_clip_to_parent(dialog_name_label_, 1);
+
+        dialog_name_box_ = ktextbox_add_rect(0, 0, 120, 24, 2, font_, &path_style, DialogNameSubmitThunk, this);
+        kgfx_obj_set_parent(ktextbox_root(dialog_name_box_), root);
+        kgfx_obj_set_clip_to_parent(ktextbox_root(dialog_name_box_), 1);
+
         up_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, UpClickThunk, this);
         refresh_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, RefreshClickThunk, this);
         new_folder_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, NewFolderClickThunk, this);
@@ -465,6 +506,11 @@ namespace
             kgfx_obj_set_parent(buttons[i]->label, kbutton_root(buttons[i]->button));
             kgfx_obj_set_clip_to_parent(buttons[i]->label, 1);
         }
+
+        SetObjectVisible(dialog_name_label_, 0u);
+        SetTextboxVisible(dialog_name_box_, 0u);
+        ktextbox_set_enabled(dialog_name_box_, 0u);
+        RefreshActionLabels();
     }
 
     void FileExplorer::CreateRows(void)
@@ -567,6 +613,48 @@ namespace
         return RootVisible();
     }
 
+    int FileExplorer::DialogActive() const
+    {
+        return dialog_mode_ != FILE_EXPLORER_DIALOG_NONE;
+    }
+
+    int FileExplorer::BeginDialog(file_explorer_dialog_mode mode, const char *initial_dir, const char *suggested_name,
+                                  file_explorer_dialog_callback on_result, void *user)
+    {
+        if (!initialized_ || !on_result || !dialog_host_)
+            return -1;
+        if (mode != FILE_EXPLORER_DIALOG_OPEN_FILE && mode != FILE_EXPLORER_DIALOG_SAVE_FILE)
+            return -1;
+        if (modal_mode_ != MODAL_NONE || dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return -1;
+
+        dialog_mode_ = mode;
+        dialog_callback_ = on_result;
+        dialog_user_ = user;
+        dialog_restore_hidden_ = Visible() ? 0u : 1u;
+        layout_dirty_ = 1u;
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
+
+        if (initial_dir && initial_dir[0])
+            (void)NavigateTo(initial_dir);
+
+        if (suggested_name && suggested_name[0])
+        {
+            ktextbox_set_text(dialog_name_box_, suggested_name);
+            (void)ReloadDirectory(suggested_name);
+        }
+        else
+        {
+            ktextbox_set_text(dialog_name_box_, "");
+        }
+
+        RefreshActionLabels();
+        ShowDefaultStatus();
+        Activate();
+        return 0;
+    }
+
     kgfx_obj *FileExplorer::RootObject(void)
     {
         if (window_.idx < 0)
@@ -640,6 +728,34 @@ namespace
         label->u.text.y = text_y;
     }
 
+    void FileExplorer::SetButtonText(LabeledButton &button, const char *text)
+    {
+        kgfx_obj *label = kgfx_obj_ref(button.label);
+
+        if (!label || label->kind != KGFX_OBJ_TEXT)
+            return;
+
+        label->u.text.text = text ? text : "";
+    }
+
+    void FileExplorer::RefreshActionLabels(void)
+    {
+        SetButtonText(up_button_, "Up");
+        SetButtonText(refresh_button_, "Refresh");
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
+            SetButtonText(new_folder_button_, "Open");
+        else if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+            SetButtonText(new_folder_button_, "Save");
+        else
+            SetButtonText(new_folder_button_, "New Folder");
+
+        SetButtonText(new_file_button_,
+                      dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? "New File" : "Cancel");
+        SetButtonText(rename_button_, "Rename");
+        SetButtonText(delete_button_, "Delete");
+    }
+
     void FileExplorer::LayoutRow(RowSlot &row, int32_t y, uint32_t w, uint32_t h)
     {
         kgfx_obj *root = kgfx_obj_ref(kbutton_root(row.button));
@@ -683,13 +799,16 @@ namespace
         int32_t actions_y = 0;
         int32_t list_y = 0;
         int32_t status_y = 0;
+        int32_t name_y = 0;
         int32_t list_h = 0;
         uint32_t client_w = 0u;
         uint32_t button_gap = 8u;
-        uint32_t button_count = 6u;
+        uint32_t button_count = dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? 6u : 4u;
         uint32_t button_w = 1u;
         uint32_t used_w = 0u;
         uint32_t visible_rows = 0u;
+        uint32_t name_h = path_h;
+        uint32_t name_label_w = 76u;
 
         if (!root || root->kind != KGFX_OBJ_RECT)
             return;
@@ -706,7 +825,15 @@ namespace
         actions_y = path_y + (int32_t)path_h + 8;
         status_y = (int32_t)root->u.rect.h - pad - (int32_t)status_h;
         list_y = actions_y + (int32_t)action_h + 10;
-        list_h = status_y - 8 - list_y;
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+        {
+            name_y = status_y - 8 - (int32_t)name_h;
+            list_h = name_y - 8 - list_y;
+        }
+        else
+        {
+            list_h = status_y - 8 - list_y;
+        }
 
         if (list_h < (int32_t)row_h)
             list_h = (int32_t)row_h;
@@ -722,8 +849,11 @@ namespace
         LayoutButton(refresh_button_, client_x + (int32_t)(button_w + button_gap) * 1, actions_y, button_w, action_h, 1u);
         LayoutButton(new_folder_button_, client_x + (int32_t)(button_w + button_gap) * 2, actions_y, button_w, action_h, 1u);
         LayoutButton(new_file_button_, client_x + (int32_t)(button_w + button_gap) * 3, actions_y, button_w, action_h, 1u);
-        LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, 1u);
-        LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, 1u);
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_NONE)
+        {
+            LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, 1u);
+            LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, 1u);
+        }
 
         if (kgfx_obj_ref(list_viewport_) && kgfx_obj_ref(list_viewport_)->kind == KGFX_OBJ_RECT)
         {
@@ -745,6 +875,24 @@ namespace
         {
             kgfx_obj_ref(status_text_)->u.text.x = 8;
             kgfx_obj_ref(status_text_)->u.text.y = (int32_t)((status_h > text_h) ? (status_h - text_h) / 2u : 0u);
+        }
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+        {
+            if (kgfx_obj_ref(dialog_name_label_) && kgfx_obj_ref(dialog_name_label_)->kind == KGFX_OBJ_TEXT)
+            {
+                kgfx_obj_ref(dialog_name_label_)->u.text.x = client_x;
+                kgfx_obj_ref(dialog_name_label_)->u.text.y = name_y + (int32_t)((name_h > text_h) ? (name_h - text_h) / 2u : 0u);
+            }
+
+            if (client_w > name_label_w + 8u)
+                ktextbox_set_bounds(dialog_name_box_,
+                                    client_x + (int32_t)name_label_w + 8,
+                                    name_y,
+                                    client_w - name_label_w - 8u,
+                                    name_h);
+            else
+                ktextbox_set_bounds(dialog_name_box_, client_x, name_y, client_w, name_h);
         }
 
         visible_rows = (uint32_t)(list_h / (int32_t)row_h);
@@ -876,6 +1024,49 @@ namespace
         char message[STATUS_CAP];
 
         message[0] = 0;
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
+        {
+            if (selected_index_ >= 0 && selected_index_ < entry_count_ && !entries_[selected_index_].is_dir)
+            {
+                char friendly[DIHOS_PATH_CAP];
+
+                append_text(message, sizeof(message), "open ");
+                if (BuildSelectedFriendlyPath(friendly, sizeof(friendly)) == 0)
+                    append_text(message, sizeof(message), friendly);
+                else
+                    append_text(message, sizeof(message), entries_[selected_index_].name);
+            }
+            else
+            {
+                append_text(message, sizeof(message), "choose a file in ");
+                append_text(message, sizeof(message), current_dir_);
+            }
+
+            SetStatus(message, rgb(255, 214, 120));
+            return;
+        }
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+        {
+            const char *name = ktextbox_text(dialog_name_box_);
+
+            if (name && name[0])
+            {
+                append_text(message, sizeof(message), "save as ");
+                append_text(message, sizeof(message), current_dir_);
+                if (!strings_equal(current_dir_, "/"))
+                    append_text(message, sizeof(message), "/");
+                append_text(message, sizeof(message), name);
+            }
+            else
+            {
+                append_text(message, sizeof(message), "choose a folder and enter a file name");
+            }
+
+            SetStatus(message, rgb(255, 214, 120));
+            return;
+        }
 
         if (truncated_)
         {
@@ -1173,16 +1364,25 @@ namespace
     void FileExplorer::SyncActionStates(void)
     {
         uint8_t modal_active = modal_mode_ != MODAL_NONE;
+        uint8_t dialog_active = dialog_mode_ != FILE_EXPLORER_DIALOG_NONE;
+        uint8_t save_dialog = dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE;
         uint8_t has_selection = (selected_index_ >= 0 && selected_index_ < entry_count_) ? 1u : 0u;
         uint8_t is_root = strings_equal(current_dir_, "/") ? 1u : 0u;
 
+        RefreshActionLabels();
         ktextbox_set_enabled(path_box_, modal_active ? 0u : 1u);
         kbutton_set_enabled(up_button_.button, (!modal_active && !is_root) ? 1u : 0u);
         kbutton_set_enabled(refresh_button_.button, modal_active ? 0u : 1u);
         kbutton_set_enabled(new_folder_button_.button, modal_active ? 0u : 1u);
         kbutton_set_enabled(new_file_button_.button, modal_active ? 0u : 1u);
-        kbutton_set_enabled(rename_button_.button, (!modal_active && has_selection) ? 1u : 0u);
-        kbutton_set_enabled(delete_button_.button, (!modal_active && has_selection) ? 1u : 0u);
+        kbutton_set_enabled(rename_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
+        kbutton_set_enabled(delete_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
+
+        SetButtonVisible(rename_button_, dialog_active ? 0u : 1u);
+        SetButtonVisible(delete_button_, dialog_active ? 0u : 1u);
+        SetObjectVisible(dialog_name_label_, save_dialog ? 1u : 0u);
+        SetTextboxVisible(dialog_name_box_, save_dialog ? 1u : 0u);
+        ktextbox_set_enabled(dialog_name_box_, (save_dialog && !modal_active) ? 1u : 0u);
 
         for (int i = 0; i < MAX_VISIBLE_ROWS; ++i)
         {
@@ -1297,6 +1497,9 @@ namespace
         if (mouse.wheel == 0)
             return;
 
+        if (!kwindow_point_can_receive_input(window_, mouse.x, mouse.y))
+            return;
+
         left = root->u.rect.x + viewport->u.rect.x;
         top = root->u.rect.y + viewport->u.rect.y;
         right = left + (int32_t)viewport->u.rect.w;
@@ -1311,6 +1514,7 @@ namespace
 
     void FileExplorer::ActivateSelection(void)
     {
+        char raw[DIHOS_PATH_CAP];
         char friendly[DIHOS_PATH_CAP];
 
         if (selected_index_ < 0 || selected_index_ >= entry_count_)
@@ -1323,7 +1527,28 @@ namespace
             return;
         }
 
-        SetStatus("no app registered for files yet", rgb(255, 214, 120));
+        if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
+            BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
+        {
+            SetStatus("unable to resolve selected file", rgb(255, 140, 140));
+            return;
+        }
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
+        {
+            FinishDialog(1, raw, friendly);
+            return;
+        }
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+        {
+            ktextbox_set_text(dialog_name_box_, entries_[selected_index_].name);
+            CommitDialogSelection();
+            return;
+        }
+
+        if (text_editor_open_path(raw, friendly) != 0)
+            SetStatus("unable to open file in text editor", rgb(255, 140, 140));
     }
 
     void FileExplorer::OpenModal(ModalMode mode, const char *title, const char *body, const char *confirm_text, const char *initial_text)
@@ -1357,6 +1582,7 @@ namespace
             ktextbox_set_text(modal_input_, "");
 
         Layout();
+        SyncRows();
         SyncActionStates();
 
         if (mode != MODAL_DELETE_CONFIRM)
@@ -1371,11 +1597,17 @@ namespace
         modal_error_buffer_[0] = 0;
         ktextbox_set_text(modal_input_, "");
         SyncActionStates();
-        ktextbox_set_focus(path_box_, 1u);
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+            ktextbox_set_focus(dialog_name_box_, 1u);
+        else
+            ktextbox_set_focus(path_box_, 1u);
     }
 
     void FileExplorer::OpenCreateFolderModal(void)
     {
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return;
+
         OpenModal(MODAL_CREATE_FOLDER,
                   "Create Folder",
                   "Enter a single folder name.",
@@ -1385,6 +1617,9 @@ namespace
 
     void FileExplorer::OpenCreateFileModal(void)
     {
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return;
+
         OpenModal(MODAL_CREATE_FILE,
                   "Create File",
                   "Enter a file name. Extensions are allowed.",
@@ -1394,6 +1629,8 @@ namespace
 
     void FileExplorer::OpenRenameModal(void)
     {
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return;
         if (selected_index_ < 0 || selected_index_ >= entry_count_)
             return;
 
@@ -1408,6 +1645,8 @@ namespace
     {
         char body[MODAL_TEXT_CAP];
 
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return;
         if (selected_index_ < 0 || selected_index_ >= entry_count_)
             return;
 
@@ -1618,6 +1857,97 @@ namespace
             kgfx_obj_ref(modal_error_)->u.text.text = modal_error_buffer_;
     }
 
+    void FileExplorer::CommitDialogSelection(void)
+    {
+        char raw[DIHOS_PATH_CAP];
+        char friendly[DIHOS_PATH_CAP];
+        uint8_t is_dir = 0u;
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
+        {
+            if (selected_index_ < 0 || selected_index_ >= entry_count_)
+            {
+                SetStatus("select a file to open", rgb(255, 170, 120));
+                return;
+            }
+
+            if (entries_[selected_index_].is_dir)
+            {
+                if (BuildSelectedFriendlyPath(friendly, sizeof(friendly)) == 0)
+                    (void)NavigateTo(friendly);
+                return;
+            }
+
+            if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
+                BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
+            {
+                SetStatus("unable to resolve selected file", rgb(255, 140, 140));
+                return;
+            }
+
+            FinishDialog(1, raw, friendly);
+            return;
+        }
+
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_SAVE_FILE)
+            return;
+
+        if (ValidateSegmentName(ktextbox_text(dialog_name_box_)) != 0)
+        {
+            SetStatus(modal_error_buffer_, rgb(255, 140, 140));
+            modal_error_buffer_[0] = 0;
+            return;
+        }
+
+        if (dihos_path_join_raw(current_raw_, ktextbox_text(dialog_name_box_), raw, sizeof(raw)) != 0 ||
+            dihos_path_join_friendly(current_dir_, ktextbox_text(dialog_name_box_), friendly, sizeof(friendly)) != 0)
+        {
+            SetStatus("save path is too long", rgb(255, 170, 120));
+            return;
+        }
+
+        if (PathExists(raw, &is_dir) && is_dir)
+        {
+            SetStatus("that name is already a folder", rgb(255, 170, 120));
+            return;
+        }
+
+        FinishDialog(1, raw, friendly);
+    }
+
+    void FileExplorer::FinishDialog(int accepted, const char *raw_path, const char *friendly_path)
+    {
+        file_explorer_dialog_callback callback = dialog_callback_;
+        void *callback_user = dialog_user_;
+        uint8_t hide_after = dialog_restore_hidden_;
+
+        dialog_mode_ = FILE_EXPLORER_DIALOG_NONE;
+        dialog_callback_ = 0;
+        dialog_user_ = 0;
+        dialog_restore_hidden_ = 0u;
+        layout_dirty_ = 1u;
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
+        ktextbox_set_text(dialog_name_box_, "");
+        RefreshActionLabels();
+        ShowDefaultStatus();
+
+        if (hide_after)
+        {
+            kwindow_set_visible(window_, 0u);
+        }
+        else
+        {
+            Layout();
+            SyncRows();
+            SyncActionStates();
+            ktextbox_set_focus(path_box_, 1u);
+        }
+
+        if (callback)
+            callback(accepted, raw_path ? raw_path : "", friendly_path ? friendly_path : "", callback_user);
+    }
+
     void FileExplorer::Update()
     {
         kgfx_obj *root = 0;
@@ -1627,8 +1957,15 @@ namespace
 
         if (!RootVisible())
         {
+            if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            {
+                dialog_restore_hidden_ = 1u;
+                FinishDialog(0, 0, 0);
+            }
             if (path_box_.idx >= 0 && ktextbox_focused(path_box_))
                 ktextbox_set_focus(path_box_, 0u);
+            if (dialog_name_box_.idx >= 0 && ktextbox_focused(dialog_name_box_))
+                ktextbox_set_focus(dialog_name_box_, 0u);
             if (modal_input_.idx >= 0 && ktextbox_focused(modal_input_))
                 ktextbox_set_focus(modal_input_, 0u);
             return;
@@ -1649,10 +1986,10 @@ namespace
         if (layout_dirty_)
             Layout();
         HandleMouseWheel();
-        if (actions_dirty_)
-            SyncActionStates();
         if (rows_dirty_)
             SyncRows();
+        if (actions_dirty_)
+            SyncActionStates();
     }
 
     void FileExplorer::Activate()
@@ -1663,11 +2000,13 @@ namespace
         kwindow_set_visible(window_, 1u);
         (void)kwindow_raise(window_);
         Layout();
-        SyncActionStates();
         SyncRows();
+        SyncActionStates();
 
         if (modal_mode_ != MODAL_NONE && modal_mode_ != MODAL_DELETE_CONFIRM && modal_input_.idx >= 0)
             ktextbox_set_focus(modal_input_, 1u);
+        else if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE && dialog_name_box_.idx >= 0)
+            ktextbox_set_focus(dialog_name_box_, 1u);
         else if (path_box_.idx >= 0)
             ktextbox_set_focus(path_box_, 1u);
     }
@@ -1697,6 +2036,18 @@ namespace
         self->CommitModal();
     }
 
+    void FileExplorer::DialogNameSubmitThunk(ktextbox_handle textbox, const char *text, void *user)
+    {
+        FileExplorer *self = (FileExplorer *)user;
+        (void)textbox;
+        (void)text;
+
+        if (!self || self->dialog_mode_ != FILE_EXPLORER_DIALOG_SAVE_FILE)
+            return;
+
+        self->CommitDialogSelection();
+    }
+
     void FileExplorer::RowClickThunk(kbutton_handle button, void *user)
     {
         RowSlot *row = (RowSlot *)user;
@@ -1720,6 +2071,12 @@ namespace
         }
 
         self->SelectEntry(row->entry_index);
+        if (self->dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE &&
+            !self->entries_[row->entry_index].is_dir)
+        {
+            ktextbox_set_text(self->dialog_name_box_, self->entries_[row->entry_index].name);
+            self->ShowDefaultStatus();
+        }
         self->last_click_index_ = row->entry_index;
         self->last_click_frame_ = self->frame_counter_;
     }
@@ -1745,7 +2102,12 @@ namespace
         FileExplorer *self = (FileExplorer *)user;
         (void)button;
         if (self)
-            self->OpenCreateFolderModal();
+        {
+            if (self->dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+                self->CommitDialogSelection();
+            else
+                self->OpenCreateFolderModal();
+        }
     }
 
     void FileExplorer::NewFileClickThunk(kbutton_handle button, void *user)
@@ -1753,7 +2115,12 @@ namespace
         FileExplorer *self = (FileExplorer *)user;
         (void)button;
         if (self)
-            self->OpenCreateFileModal();
+        {
+            if (self->dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+                self->FinishDialog(0, 0, 0);
+            else
+                self->OpenCreateFileModal();
+        }
     }
 
     void FileExplorer::RenameClickThunk(kbutton_handle button, void *user)
@@ -1791,20 +2158,36 @@ namespace
 
 extern "C" void file_explorer_init(const kfont *font)
 {
-    g_explorer.Init(font);
+    g_main_explorer.Init(font, 0u);
+    g_dialog_explorer.Init(font, 1u);
 }
 
 extern "C" void file_explorer_update(void)
 {
-    g_explorer.Update();
+    g_main_explorer.Update();
+    g_dialog_explorer.Update();
 }
 
 extern "C" void file_explorer_activate(void)
 {
-    g_explorer.Activate();
+    g_main_explorer.Activate();
 }
 
 extern "C" int file_explorer_visible(void)
 {
-    return g_explorer.Visible();
+    return g_main_explorer.Visible();
+}
+
+extern "C" int file_explorer_begin_dialog(file_explorer_dialog_mode mode,
+                                          const char *initial_dir,
+                                          const char *suggested_name,
+                                          file_explorer_dialog_callback on_result,
+                                          void *user)
+{
+    return g_dialog_explorer.BeginDialog(mode, initial_dir, suggested_name, on_result, user);
+}
+
+extern "C" int file_explorer_dialog_active(void)
+{
+    return g_dialog_explorer.DialogActive();
 }

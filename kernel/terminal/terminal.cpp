@@ -133,6 +133,12 @@ static void terminal_input_submit(ktextbox_handle textbox, const char *text, voi
     terminal->SubmitInput(text);
 }
 
+static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
+{
+    kcolor c = {r, g, b};
+    return c;
+}
+
 Terminal::Terminal()
 {
     ResetState();
@@ -169,6 +175,20 @@ void Terminal::ResetState()
     prev_mouse_buttons = 0;
     font_ptr = 0;
     window_style = kwindow_style_default();
+
+    window_style.body_fill = rgb(14, 18, 24);
+    window_style.body_outline = rgb(98, 122, 166);
+    window_style.titlebar_fill = rgb(26, 35, 48);
+    window_style.title_color = rgb(239, 243, 248);
+    window_style.close_button_style.fill = rgb(128, 46, 46);
+    window_style.close_button_style.hover_fill = rgb(154, 58, 58);
+    window_style.close_button_style.pressed_fill = rgb(99, 35, 35);
+    window_style.close_button_style.outline = rgb(255, 225, 225);
+    window_style.fullscreen_button_style.fill = rgb(214, 168, 64);
+    window_style.fullscreen_button_style.hover_fill = rgb(232, 186, 82);
+    window_style.fullscreen_button_style.pressed_fill = rgb(182, 138, 50);
+    window_style.fullscreen_button_style.outline = rgb(254, 246, 222);
+    window_style.title_scale = 2u;
 
     window.idx = -1;
     input_box.idx = -1;
@@ -512,7 +532,6 @@ void Terminal::Initialize(kfont *font)
     ResetState();
     dihos_shell_init();
     font_ptr = font;
-    window_style = kwindow_style_default();
     window = kwindow_create(x, y, width, height, z, font_ptr, "Terminal", &window_style);
 
     if (font_ptr)
@@ -748,6 +767,7 @@ void Terminal::UpdateInput()
     int bottom = 0;
     int client_bottom = 0;
     int old_top = 0;
+    int accepts_pointer = 0;
 
     if (!font_ptr)
         return;
@@ -773,8 +793,9 @@ void Terminal::UpdateInput()
     top = root->u.rect.y + content_y;
     right = root->u.rect.x + (int32_t)root->u.rect.w - padding_x;
     client_bottom = root->u.rect.y + (int32_t)root->u.rect.h - padding_y;
+    accepts_pointer = kwindow_point_can_receive_input(window, mouse.x, mouse.y);
 
-    if (left_pressed && input_box.idx >= 0 &&
+    if (left_pressed && accepts_pointer && input_box.idx >= 0 &&
         mouse.x >= left && mouse.y >= top &&
         mouse.x < right && mouse.y < client_bottom)
     {
@@ -811,7 +832,7 @@ void Terminal::UpdateInput()
         return;
     }
 
-    if (mouse.x < left || mouse.y < top || mouse.x >= right || mouse.y >= bottom)
+    if (!accepts_pointer || mouse.x < left || mouse.y < top || mouse.x >= right || mouse.y >= bottom)
     {
         prev_mouse_buttons = mouse.buttons;
         return;
