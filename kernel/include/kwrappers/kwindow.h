@@ -83,6 +83,7 @@ extern "C"
     void kwindow_set_visible(kwindow_handle h, uint8_t visible);
     int kwindow_visible(kwindow_handle h);
     int kwindow_raise(kwindow_handle h);
+    void kwindow_set_title(kwindow_handle h, const char *title);
     kgfx_obj_handle kwindow_root(kwindow_handle h);
     int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y);
     int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y);

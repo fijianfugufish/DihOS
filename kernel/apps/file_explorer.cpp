@@ -182,6 +182,7 @@ namespace
         void LayoutRow(RowSlot &row, int32_t y, uint32_t w, uint32_t h);
         void SetButtonText(LabeledButton &button, const char *text);
         void RefreshActionLabels(void);
+        void RefreshDialogTitle(void);
         void SyncActionStates(void);
         void SyncRows(void);
         void HandleMouseWheel(void);
@@ -650,6 +651,7 @@ namespace
         }
 
         RefreshActionLabels();
+        RefreshDialogTitle();
         ShowDefaultStatus();
         Activate();
         return 0;
@@ -746,7 +748,7 @@ namespace
         if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
             SetButtonText(new_folder_button_, "Open");
         else if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
-            SetButtonText(new_folder_button_, "Save");
+            SetButtonText(new_folder_button_, "Save As");
         else
             SetButtonText(new_folder_button_, "New Folder");
 
@@ -754,6 +756,21 @@ namespace
                       dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? "New File" : "Cancel");
         SetButtonText(rename_button_, "Rename");
         SetButtonText(delete_button_, "Delete");
+    }
+
+    void FileExplorer::RefreshDialogTitle(void)
+    {
+        const char *title = "File Dialog";
+
+        if (!dialog_host_)
+            return;
+
+        if (dialog_mode_ == FILE_EXPLORER_DIALOG_OPEN_FILE)
+            title = "Open";
+        else if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
+            title = "Save As";
+
+        kwindow_set_title(window_, title);
     }
 
     void FileExplorer::LayoutRow(RowSlot &row, int32_t y, uint32_t w, uint32_t h)
@@ -1930,6 +1947,7 @@ namespace
         rows_dirty_ = 1u;
         ktextbox_set_text(dialog_name_box_, "");
         RefreshActionLabels();
+        RefreshDialogTitle();
         ShowDefaultStatus();
 
         if (hide_after)

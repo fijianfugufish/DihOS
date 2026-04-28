@@ -1121,6 +1121,20 @@ int kwindow_raise(kwindow_handle h)
     return kwindow_raise_to_front(h.idx);
 }
 
+void kwindow_set_title(kwindow_handle h, const char *title)
+{
+    kgfx_obj *title_text = 0;
+
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return;
+
+    title_text = kgfx_obj_ref(G_windows[h.idx].title_text);
+    if (!title_text || title_text->kind != KGFX_OBJ_TEXT)
+        return;
+
+    title_text->u.text.text = title ? title : "";
+}
+
 kgfx_obj_handle kwindow_root(kwindow_handle h)
 {
     if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
