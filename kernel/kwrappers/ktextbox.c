@@ -893,7 +893,11 @@ void ktextbox_set_enabled(ktextbox_handle h, uint8_t enabled)
     if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
         return;
 
-    G_boxes[h.idx].enabled = enabled ? 1u : 0u;
+    enabled = enabled ? 1u : 0u;
+    if (G_boxes[h.idx].enabled == enabled)
+        return;
+
+    G_boxes[h.idx].enabled = enabled;
     if (!G_boxes[h.idx].enabled && G_focused_idx == h.idx)
         G_focused_idx = -1;
     G_boxes[h.idx].hovered = 0;

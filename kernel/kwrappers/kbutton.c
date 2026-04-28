@@ -283,6 +283,8 @@ void kbutton_update_all(void)
     uint8_t left_now = 0;
     uint8_t left_pressed = 0;
     uint8_t left_released = 0;
+    uint8_t prev_hovered[KBUTTON_MAX];
+    uint8_t prev_pressed[KBUTTON_MAX];
     int hovered_idx = -1;
     int32_t hovered_z = 0;
     kbutton_resolved_rect resolved[KBUTTON_MAX];
@@ -297,6 +299,8 @@ void kbutton_update_all(void)
     {
         int inside = 0;
 
+        prev_hovered[i] = G_buttons[i].hovered;
+        prev_pressed[i] = G_buttons[i].pressed;
         resolved[i] = (kbutton_resolved_rect){0};
         G_buttons[i].hovered = 0;
 
@@ -343,7 +347,9 @@ void kbutton_update_all(void)
     }
 
     for (uint32_t i = 0; i < KBUTTON_MAX; ++i)
-        if (G_buttons[i].used)
+        if (G_buttons[i].used &&
+            (G_buttons[i].hovered != prev_hovered[i] ||
+             G_buttons[i].pressed != prev_pressed[i]))
             kbutton_apply_visual(&G_buttons[i]);
 
     G_prev_buttons = mouse.buttons;
@@ -378,7 +384,11 @@ void kbutton_set_enabled(kbutton_handle h, uint8_t enabled)
     if (h.idx < 0 || h.idx >= KBUTTON_MAX || !G_buttons[h.idx].used)
         return;
 
-    G_buttons[h.idx].enabled = enabled ? 1u : 0u;
+    enabled = enabled ? 1u : 0u;
+    if (G_buttons[h.idx].enabled == enabled)
+        return;
+
+    G_buttons[h.idx].enabled = enabled;
     if (!G_buttons[h.idx].enabled)
     {
         G_buttons[h.idx].hovered = 0;

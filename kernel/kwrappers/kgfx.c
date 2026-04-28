@@ -80,14 +80,24 @@ char *kgfx_pmem_strdup(const char *s)
     return p;
 }
 
-static inline void kgfx_flush_range(uintptr_t start, uintptr_t end)
+static inline void kgfx_flush_range_raw(uintptr_t start, uintptr_t end)
 {
     const uintptr_t line = 64;
     start &= ~(line - 1);
     end = (end + line - 1) & ~(line - 1);
     for (uintptr_t p = start; p < end; p += line)
         __asm__ __volatile__("dc cvac, %0" ::"r"(p) : "memory");
+}
+
+static inline void kgfx_flush_commit(void)
+{
     __asm__ __volatile__("dsb ish; isb" ::: "memory");
+}
+
+static inline void kgfx_flush_range(uintptr_t start, uintptr_t end)
+{
+    kgfx_flush_range_raw(start, end);
+    kgfx_flush_commit();
 }
 
 void kgfx_flush(void)
@@ -105,10 +115,7 @@ static uint32_t kgfx_pack(kcolor c)
         return (uint32_t)c.r | ((uint32_t)c.g << 8) | ((uint32_t)c.b << 16);
     if (FB.fmt == 1)
         return (uint32_t)c.b | ((uint32_t)c.g << 8) | ((uint32_t)c.r << 16);
-    uint32_t rs = ctz32(FB.rmask ? FB.rmask : 0x00FF0000);
-    uint32_t gs = ctz32(FB.gmask ? FB.gmask : 0x0000FF00);
-    uint32_t bs = ctz32(FB.bmask ? FB.bmask : 0x000000FF);
-    return ((uint32_t)c.r << rs) | ((uint32_t)c.g << gs) | ((uint32_t)c.b << bs);
+    return ((uint32_t)c.r << sR) | ((uint32_t)c.g << sG) | ((uint32_t)c.b << sB);
 }
 
 void kgfx_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, kcolor c)
@@ -900,11 +907,13 @@ static void bb_clear_region(const kgfx_clip_rect *clip, kcolor c)
 
 static void present_full(void)
 {
+    uint32_t row_bytes = FB.pitch;
+
     for (uint32_t y = 0; y < FB.height; ++y)
     {
-        void *dst = (void *)(FB.base + y * FB.pitch);
-        void *src = (void *)(BB_ptr + y * BB_stride);
-        kmemcpy64(dst, src, FB.pitch);
+        void *dst_row = (void *)(FB.base + y * FB.pitch);
+        const void *src_row = (const void *)(BB_ptr + y * BB_stride);
+        kmemcpy64(dst_row, src_row, row_bytes);
     }
     kgfx_flush();
 }
@@ -914,19 +923,22 @@ static void present_region(const kgfx_clip_rect *clip)
     if (!clip || !clip->enabled)
         return;
 
+    uint32_t copy_bytes = (uint32_t)(clip->x1 - clip->x0) * 4u;
+    uint8_t flushed = 0;
+
     for (int32_t y = clip->y0; y < clip->y1; ++y)
     {
-        volatile uint32_t *dst = (volatile uint32_t *)(FB.base + (uint32_t)y * FB.pitch + (uint32_t)clip->x0 * 4u);
-        const uint32_t *src = (const uint32_t *)(BB_ptr + (uint32_t)y * BB_stride + (uint32_t)clip->x0 * 4u);
-        uint32_t count = (uint32_t)(clip->x1 - clip->x0);
+        void *dst = (void *)(FB.base + (uint32_t)y * FB.pitch + (uint32_t)clip->x0 * 4u);
+        const void *src = (const void *)(BB_ptr + (uint32_t)y * BB_stride + (uint32_t)clip->x0 * 4u);
         uintptr_t start = (uintptr_t)dst;
-        uintptr_t end = start + (uintptr_t)count * 4u;
 
-        for (uint32_t x = 0; x < count; ++x)
-            dst[x] = src[x];
-
-        kgfx_flush_range(start, end);
+        kmemcpy64(dst, src, copy_bytes);
+        kgfx_flush_range_raw(start, start + (uintptr_t)copy_bytes);
+        flushed = 1;
     }
+
+    if (flushed)
+        kgfx_flush_commit();
 }
 
 // blend a solid src color (sr,sg,sb,sa) over an existing packed dst pixel
@@ -1643,6 +1655,17 @@ int kgfx_scene_init(void)
     return 0;
 }
 
+static void store_prev_snapshots(const kgfx_obj_snapshot *current, uint16_t count, kcolor clear_color)
+{
+    for (uint16_t i = 0; i < count; ++i)
+        g_prev_snapshot[i] = current[i];
+    for (uint16_t i = count; i < g_prev_snapshot_count; ++i)
+        g_prev_snapshot[i] = (kgfx_obj_snapshot){0};
+    g_prev_snapshot_count = count;
+    g_prev_clear_color = clear_color;
+    g_have_prev_frame = 1;
+}
+
 void kgfx_render_all(kcolor clear_color)
 {
     kgfx_resolved_obj resolved[KGFX_MAX_OBJS] = {0};
@@ -1696,11 +1719,7 @@ void kgfx_render_all(kcolor clear_color)
 
     if (!dirty.enabled)
     {
-        for (uint16_t i = 0; i < g_obj_count; ++i)
-            g_prev_snapshot[i] = current[i];
-        g_prev_snapshot_count = g_obj_count;
-        g_prev_clear_color = clear_color;
-        g_have_prev_frame = 1;
+        store_prev_snapshots(current, g_obj_count, clear_color);
         return;
     }
 
@@ -1805,11 +1824,10 @@ void kgfx_render_all(kcolor clear_color)
     }
 
     // 5) present backbuffer → framebuffer
-    for (uint32_t y = 0; y < FB.height; ++y)
-    {
-        void *dst = (void *)(FB.base + y * FB.pitch);
-        void *src = (void *)(BB_ptr + y * BB_stride);
-        kmemcpy64(dst, src, FB.pitch);
-    }
-    kgfx_flush();
+    if (full_redraw)
+        present_full();
+    else
+        present_region(&dirty);
+
+    store_prev_snapshots(current, g_obj_count, clear_color);
 }

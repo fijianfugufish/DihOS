@@ -801,6 +801,8 @@ int kmouse_set_cursor(kmouse_cursor cursor)
         return -1;
     if (!G.cursors[(uint32_t)cursor].loaded)
         return -1;
+    if (G.active_cursor == cursor)
+        return 0;
 
     G.active_cursor = cursor;
     kmouse_apply_active_cursor_image();

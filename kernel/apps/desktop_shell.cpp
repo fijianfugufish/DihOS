@@ -92,6 +92,8 @@ namespace
         kgfx_obj_handle taskbar_;
         AppButton terminal_button_;
         AppButton explorer_button_;
+        uint8_t terminal_active_;
+        uint8_t explorer_active_;
         kbutton_style button_style_;
         kbutton_style active_style_;
     };
@@ -124,6 +126,8 @@ namespace
         explorer_button_.label.idx = -1;
         explorer_button_.icon_loaded = 0u;
         kimg_zero(&explorer_button_.icon);
+        terminal_active_ = 0xFFu;
+        explorer_active_ = 0xFFu;
 
         button_style_ = kbutton_style_default();
         button_style_.fill = rgb(28, 33, 45);
@@ -376,8 +380,20 @@ namespace
 
     void DesktopShell::UpdateButtonStyles(void)
     {
-        kbutton_set_style(terminal_button_.button, terminal_visible() ? &active_style_ : &button_style_);
-        kbutton_set_style(explorer_button_.button, file_explorer_visible() ? &active_style_ : &button_style_);
+        uint8_t terminal_active = terminal_visible() ? 1u : 0u;
+        uint8_t explorer_active = file_explorer_visible() ? 1u : 0u;
+
+        if (terminal_active_ != terminal_active)
+        {
+            terminal_active_ = terminal_active;
+            kbutton_set_style(terminal_button_.button, terminal_active ? &active_style_ : &button_style_);
+        }
+
+        if (explorer_active_ != explorer_active)
+        {
+            explorer_active_ = explorer_active;
+            kbutton_set_style(explorer_button_.button, explorer_active ? &active_style_ : &button_style_);
+        }
     }
 
     void DesktopShell::Update()
@@ -388,8 +404,6 @@ namespace
             return;
 
         if (fb->width != last_screen_w_ || fb->height != last_screen_h_)
-            Layout();
-        else
             Layout();
 
         UpdateButtonStyles();

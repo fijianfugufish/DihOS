@@ -274,6 +274,11 @@ namespace
         kbutton_style row_selected_style_;
         kbutton_style modal_confirm_style_;
         kbutton_style modal_delete_style_;
+        uint8_t layout_dirty_;
+        uint8_t actions_dirty_;
+        uint8_t rows_dirty_;
+        int last_root_w_;
+        int last_root_h_;
     };
 
     static FileExplorer g_explorer = {};
@@ -304,6 +309,11 @@ namespace
         last_click_frame_ = 0u;
         entry_count_ = 0;
         truncated_ = 0u;
+        layout_dirty_ = 1u;
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
+        last_root_w_ = -1;
+        last_root_h_ = -1;
         copy_text(current_dir_, sizeof(current_dir_), "/");
         copy_text(current_raw_, sizeof(current_raw_), "0:/");
         copy_text(status_buffer_, sizeof(status_buffer_), "loading explorer...");
@@ -580,10 +590,15 @@ namespace
 
     void FileExplorer::ClampScroll(void)
     {
+        int old_scroll_top = scroll_top_;
+
         if (scroll_top_ < 0)
             scroll_top_ = 0;
         if (scroll_top_ > MaxScrollTop())
             scroll_top_ = MaxScrollTop();
+
+        if (scroll_top_ != old_scroll_top)
+            rows_dirty_ = 1u;
     }
 
     void FileExplorer::EnsureSelectionVisible(void)
@@ -678,6 +693,9 @@ namespace
 
         if (!root || root->kind != KGFX_OBJ_RECT)
             return;
+
+        last_root_w_ = (int)root->u.rect.w;
+        last_root_h_ = (int)root->u.rect.h;
 
         if (root->u.rect.w < 2u * (uint32_t)pad)
             return;
@@ -788,6 +806,9 @@ namespace
         }
 
         ClampScroll();
+        layout_dirty_ = 0u;
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
     }
 
     void FileExplorer::SetObjectVisible(kgfx_obj_handle handle, uint8_t visible)
@@ -825,6 +846,12 @@ namespace
 
     void FileExplorer::SetStatus(const char *text, kcolor color)
     {
+        if (strings_equal(status_buffer_, text) &&
+            status_color_.r == color.r &&
+            status_color_.g == color.g &&
+            status_color_.b == color.b)
+            return;
+
         copy_text(status_buffer_, sizeof(status_buffer_), text);
         status_color_ = color;
         RefreshStatusVisual();
@@ -899,6 +926,8 @@ namespace
         if (idx < 0 || idx >= entry_count_)
         {
             selected_index_ = -1;
+            actions_dirty_ = 1u;
+            rows_dirty_ = 1u;
             ShowDefaultStatus();
             return;
         }
@@ -906,6 +935,8 @@ namespace
         selected_index_ = idx;
         EnsureSelectionVisible();
         ResetDoubleClick();
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
         ShowDefaultStatus();
     }
 
@@ -1034,6 +1065,8 @@ namespace
         selected_index_ = -1;
         scroll_top_ = 0;
         truncated_ = 0u;
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
 
         if (kdir_open(&dir, current_raw_) != 0)
             return -1;
@@ -1077,6 +1110,8 @@ namespace
 
         EnsureSelectionVisible();
         ResetDoubleClick();
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
         return 0;
     }
 
@@ -1194,6 +1229,8 @@ namespace
             kbutton_set_enabled(modal_confirm_button_.button, 0u);
             kbutton_set_enabled(modal_cancel_button_.button, 0u);
         }
+
+        actions_dirty_ = 0u;
     }
 
     void FileExplorer::SyncRows(void)
@@ -1236,6 +1273,8 @@ namespace
 
             kbutton_set_style(rows_[i].button, (entry_index == selected_index_) ? &row_selected_style_ : &row_style_);
         }
+
+        rows_dirty_ = 0u;
     }
 
     void FileExplorer::HandleMouseWheel(void)
@@ -1290,6 +1329,8 @@ namespace
     void FileExplorer::OpenModal(ModalMode mode, const char *title, const char *body, const char *confirm_text, const char *initial_text)
     {
         modal_mode_ = mode;
+        layout_dirty_ = 1u;
+        actions_dirty_ = 1u;
         copy_text(modal_title_buffer_, sizeof(modal_title_buffer_), title);
         copy_text(modal_body_buffer_, sizeof(modal_body_buffer_), body);
         copy_text(modal_confirm_label_, sizeof(modal_confirm_label_), confirm_text);
@@ -1325,6 +1366,8 @@ namespace
     void FileExplorer::CloseModal(void)
     {
         modal_mode_ = MODAL_NONE;
+        layout_dirty_ = 1u;
+        actions_dirty_ = 1u;
         modal_error_buffer_[0] = 0;
         ktextbox_set_text(modal_input_, "");
         SyncActionStates();
@@ -1577,6 +1620,8 @@ namespace
 
     void FileExplorer::Update()
     {
+        kgfx_obj *root = 0;
+
         if (!initialized_)
             return;
 
@@ -1591,14 +1636,23 @@ namespace
 
         ++frame_counter_;
 
+        root = RootObject();
+        if (root && root->kind == KGFX_OBJ_RECT &&
+            ((int)root->u.rect.w != last_root_w_ || (int)root->u.rect.h != last_root_h_))
+        {
+            layout_dirty_ = 1u;
+        }
+
         if (modal_mode_ != MODAL_NONE && kinput_key_pressed(KEY_ESCAPE))
             CloseModal();
 
-        Layout();
+        if (layout_dirty_)
+            Layout();
         HandleMouseWheel();
-        SyncActionStates();
-        SyncRows();
-        RefreshStatusVisual();
+        if (actions_dirty_)
+            SyncActionStates();
+        if (rows_dirty_)
+            SyncRows();
     }
 
     void FileExplorer::Activate()
@@ -1665,9 +1719,7 @@ namespace
             }
         }
 
-        self->selected_index_ = row->entry_index;
-        self->EnsureSelectionVisible();
-        self->ShowDefaultStatus();
+        self->SelectEntry(row->entry_index);
         self->last_click_index_ = row->entry_index;
         self->last_click_frame_ = self->frame_counter_;
     }
