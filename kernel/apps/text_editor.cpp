@@ -260,7 +260,7 @@ namespace
     static int sac_keyword_token(const char *token, uint32_t token_len)
     {
         static const char *kKeywords[] = {
-            "if", "else", "while", "for", "fn", "end",
+            "if", "else", "while", "for", "from", "to", "step", "fn", "end",
             "continue", "break", "return", "let", "unset",
             "goto", "call", "exit", "input",
             "add", "sub", "mul", "div", "pow", "mod",
@@ -393,6 +393,7 @@ namespace
         uint32_t i = 0u;
         uint8_t fn_arg_context = 0u;
         uint8_t call_arg_context = 0u;
+        uint8_t for_var_context = 0u;
 
         if (!dst || cap == 0u)
             return;
@@ -509,16 +510,25 @@ namespace
                     {
                         fn_arg_context = 1u;
                         call_arg_context = 0u;
+                        for_var_context = 0u;
                     }
                     else if (is_call)
                     {
                         call_arg_context = 1u;
                         fn_arg_context = 0u;
+                        for_var_context = 0u;
+                    }
+                    else if (token_equals_ci(src + i, j - i, "for"))
+                    {
+                        for_var_context = 1u;
+                        fn_arg_context = 0u;
+                        call_arg_context = 0u;
                     }
                     else
                     {
                         fn_arg_context = 0u;
                         call_arg_context = 0u;
+                        for_var_context = 0u;
                     }
 
                     i = j;
@@ -539,6 +549,16 @@ namespace
                     line_append_color_set(dst, cap, &out_len, kFnArg);
                     line_append_span(dst, cap, &out_len, src + i, j - i);
                     line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+
+                if (for_var_context)
+                {
+                    line_append_color_set(dst, cap, &out_len, kFnArg);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    for_var_context = 0u;
                     i = j;
                     continue;
                 }
