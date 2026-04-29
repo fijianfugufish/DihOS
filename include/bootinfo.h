@@ -31,4 +31,7 @@ typedef struct
 
     uint64_t tlmm_mmio_base; /* 0 if unknown */
     uint64_t tlmm_mmio_size; /* 0 if unknown */
+
+    uint64_t sacx_exec_pool_base_phys;  /* executable app arena pool, reserved by stage2 */
+    uint64_t sacx_exec_pool_size_bytes; /* bytes available for .sacx arenas */
 } boot_info;

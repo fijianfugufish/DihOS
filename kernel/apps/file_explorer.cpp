@@ -129,20 +129,53 @@ namespace
     static int has_sac_extension(const char *name)
     {
         uint32_t len = 0u;
-        const char *ext = ".sac";
 
         if (!name)
             return 0;
 
         len = (uint32_t)strlen(name);
+        if (len >= 5u)
+        {
+            const char *ext = ".sacx";
+            const char *tail = name + (len - 5u);
+            int match = 1;
+            for (uint32_t i = 0u; i < 5u; ++i)
+                if (lower_ascii(tail[i]) != ext[i])
+                    match = 0;
+            if (match)
+                return 1;
+        }
+
         if (len < 4u)
             return 0;
 
-        name += len - 4u;
-        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            const char *ext = ".sac";
+            const char *tail = name + (len - 4u);
+            for (uint32_t i = 0u; i < 4u; ++i)
+                if (lower_ascii(tail[i]) != ext[i])
+                    return 0;
+        }
+
+        return 1;
+    }
+
+    static int has_sacx_extension(const char *name)
+    {
+        uint32_t len = 0u;
+        const char *ext = ".sacx";
+
+        if (!name)
+            return 0;
+
+        len = (uint32_t)strlen(name);
+        if (len < 5u)
+            return 0;
+
+        name += len - 5u;
+        for (uint32_t i = 0u; i < 5u; ++i)
             if (lower_ascii(name[i]) != ext[i])
                 return 0;
-
         return 1;
     }
 
@@ -1654,21 +1687,24 @@ namespace
     {
         char raw[DIHOS_PATH_CAP];
         char friendly[DIHOS_PATH_CAP];
+        int is_sacx = 0;
 
         if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
             BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
         {
-            SetStatus("unable to resolve selected script", rgb(255, 140, 140));
+            SetStatus("unable to resolve selected app", rgb(255, 140, 140));
             return;
         }
 
-        if (terminal_open_script(raw, friendly) != 0)
+        is_sacx = has_sacx_extension(entries_[selected_index_].name);
+
+        if (terminal_open_program(raw, friendly) != 0)
         {
-            SetStatus("unable to open SAC script terminal", rgb(255, 140, 140));
+            SetStatus("unable to open app terminal", rgb(255, 140, 140));
             return;
         }
 
-        SetStatus("running SAC script", rgb(148, 232, 180));
+        SetStatus(is_sacx ? "running SACX app" : "running SAC script", rgb(148, 232, 180));
     }
 
     void FileExplorer::OpenSelectedInTextEditor(void)

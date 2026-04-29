@@ -100,6 +100,7 @@ extern "C" void terminal_update_input(void)
         if (!g_terminals[i].Initialized())
             continue;
         g_terminals[i].UpdateScript();
+        g_terminals[i].UpdateSacx();
         g_terminals[i].UpdateInput();
     }
 }
@@ -129,7 +130,7 @@ extern "C" int terminal_visible(void)
     return g_terminals[0].Visible();
 }
 
-extern "C" int terminal_open_script(const char *raw_path, const char *friendly_path)
+static int terminal_open_script_internal(const char *raw_path, const char *friendly_path, uint32_t flags)
 {
     if (!g_terminal_font || !raw_path || !raw_path[0])
         return -1;
@@ -139,29 +140,18 @@ extern "C" int terminal_open_script(const char *raw_path, const char *friendly_p
         if (!g_terminals[i].Initialized())
             continue;
 
-        if (g_terminals[i].ScriptActive())
-        {
-            if (!g_terminals[i].Visible())
-            {
-                g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
-                if (!g_terminals[i].Initialized())
-                    continue;
-            }
-            else
-            {
-                continue;
-            }
-        }
+        if (g_terminals[i].ProgramActive())
+            continue;
 
-        if (g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+        if (g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
             return 0;
 
         if (!g_terminals[i].Visible())
         {
             g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
             if (g_terminals[i].Initialized() &&
-                !g_terminals[i].ScriptActive() &&
-                g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+                !g_terminals[i].ProgramActive() &&
+                g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
                 return 0;
         }
     }
@@ -172,14 +162,34 @@ extern "C" int terminal_open_script(const char *raw_path, const char *friendly_p
         {
             g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
             if (g_terminals[i].Initialized() &&
-                g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+                g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
                 return 0;
         }
     }
 
-    g_terminals[0].Error("no free SAC terminals");
+    g_terminals[0].Error("no free app terminals");
 
     return -1;
+}
+
+extern "C" int terminal_open_script_ex(const char *raw_path, const char *friendly_path, uint32_t flags)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, flags);
+}
+
+extern "C" int terminal_open_program_ex(const char *raw_path, const char *friendly_path, uint32_t flags)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, flags);
+}
+
+extern "C" int terminal_open_script(const char *raw_path, const char *friendly_path)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, TERMINAL_OPEN_FLAG_NONE);
+}
+
+extern "C" int terminal_open_program(const char *raw_path, const char *friendly_path)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, TERMINAL_OPEN_FLAG_NONE);
 }
 
 extern "C" void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user)

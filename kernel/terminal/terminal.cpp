@@ -1,5 +1,7 @@
 #include "terminal/terminal.hpp"
+#include "terminal/terminal_api.h"
 #include "shell/dihos_shell.h"
+#include "apps/sacx_runtime.h"
 
 extern "C"
 {
@@ -21,6 +23,33 @@ static char g_log_pending[262144];
 static int g_log_pending_len = 0;
 
 static int terminal_quiet = 0;
+
+static char lower_ascii(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return (char)(ch - 'A' + 'a');
+    return ch;
+}
+
+static int has_extension(const char *path, const char *ext)
+{
+    uint32_t path_len = 0u;
+    uint32_t ext_len = 0u;
+
+    if (!path || !ext)
+        return 0;
+
+    path_len = (uint32_t)strlen(path);
+    ext_len = (uint32_t)strlen(ext);
+    if (path_len < ext_len || ext_len == 0u)
+        return 0;
+
+    path += path_len - ext_len;
+    for (uint32_t i = 0u; i < ext_len; ++i)
+        if (lower_ascii(path[i]) != lower_ascii(ext[i]))
+            return 0;
+    return 1;
+}
 
 static void log_line_clear(void)
 {
@@ -138,6 +167,13 @@ static void terminal_session_print(const char *text, void *user)
     Terminal *terminal = (Terminal *)user;
     if (terminal)
         terminal->Print(text);
+}
+
+static void terminal_session_console_visible(uint8_t visible, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->SetWindowVisible(visible ? 1u : 0u);
 }
 
 static void terminal_session_print_inline(const char *text, void *user)
@@ -287,6 +323,9 @@ void Terminal::ResetState()
     input_box.idx = -1;
     script_active = 0u;
     script_done_reported = 0u;
+    sacx_active = 0u;
+    sacx_done_reported = 0u;
+    sacx_task_id = 0u;
     memset(&shell, 0, sizeof(shell));
     memset(&script, 0, sizeof(script));
 
@@ -362,7 +401,11 @@ void Terminal::LayoutInputBox(int placeholder_y)
     if (!root || root->kind != KGFX_OBJ_RECT)
         return;
 
-    if (script_active)
+    if (sacx_active)
+    {
+        prompt = "sacx> ";
+    }
+    else if (script_active)
     {
         if (dihos_script_waiting_input(&script))
             prompt = dihos_script_input_prompt(&script);
@@ -554,7 +597,11 @@ void Terminal::RefreshVisibleLines()
         return;
 
     (void)SyncLayoutFromWindow();
-    if (script_active)
+    if (sacx_active)
+    {
+        prompt = "sacx> ";
+    }
+    else if (script_active)
     {
         if (dihos_script_waiting_input(&script))
             prompt = dihos_script_input_prompt(&script);
@@ -568,7 +615,7 @@ void Terminal::RefreshVisibleLines()
 
     if (input_box.idx >= 0)
     {
-        uint8_t allow_input = (!script_active || dihos_script_waiting_input(&script)) ? 1u : 0u;
+        uint8_t allow_input = ((!script_active || dihos_script_waiting_input(&script)) && !sacx_active) ? 1u : 0u;
         ktextbox_set_enabled(input_box, allow_input);
         if (!allow_input)
         {
@@ -774,6 +821,13 @@ void Terminal::SubmitInput(const char *text)
         return;
     }
 
+    if (sacx_active)
+    {
+        Print("sacx app is running; shell input is disabled in this terminal");
+        RefreshVisibleLines();
+        return;
+    }
+
     if (!submitted[0])
     {
         RefreshVisibleLines();
@@ -916,6 +970,16 @@ void Terminal::Activate()
         RefreshVisibleLines();
 }
 
+void Terminal::SetWindowVisible(uint32_t visible)
+{
+    if (window.idx < 0)
+        return;
+
+    kwindow_set_visible(window, visible ? 1u : 0u);
+    if (input_box.idx >= 0)
+        ktextbox_set_focus(input_box, visible ? 1u : 0u);
+}
+
 int Terminal::Visible() const
 {
     if (window.idx < 0)
@@ -928,15 +992,82 @@ int Terminal::Initialized() const
     return initialized;
 }
 
+int Terminal::ProgramActive() const
+{
+    return (script_active || sacx_active) ? 1 : 0;
+}
+
 int Terminal::ScriptActive() const
 {
     return script_active ? 1 : 0;
 }
 
-int Terminal::StartScript(const char *raw_path, const char *friendly_path)
+int Terminal::StartProgram(const char *raw_path, const char *friendly_path, uint32_t launch_flags)
+{
+    uint32_t task_id = 0u;
+    sacx_runtime_io io = {0};
+    char title[96];
+    ksb builder;
+    uint8_t no_window = (launch_flags & TERMINAL_OPEN_FLAG_NO_WINDOW) ? 1u : 0u;
+
+    if (!raw_path || !raw_path[0])
+        return -1;
+
+    if (has_extension(raw_path, ".sac"))
+        return StartScript(raw_path, friendly_path, launch_flags);
+
+    if (!has_extension(raw_path, ".sacx"))
+        return -1;
+
+    if (!initialized || window.idx < 0)
+        return -1;
+
+    ksb_init(&builder, title, sizeof(title));
+    ksb_puts(&builder, "SACX App");
+    if (friendly_path && friendly_path[0])
+    {
+        ksb_puts(&builder, ": ");
+        ksb_puts(&builder, friendly_path);
+    }
+    kwindow_set_title(window, title);
+
+    ClearNoFlush();
+    PrintInline("launching ");
+    Print(friendly_path && friendly_path[0] ? friendly_path : raw_path);
+
+    io.print = terminal_session_print;
+    io.set_console_visible = terminal_session_console_visible;
+    io.user = this;
+    if (sacx_runtime_launch(raw_path, friendly_path, &io, &task_id) != 0)
+    {
+        Error("unable to launch sacx program");
+        sacx_active = 0u;
+        sacx_done_reported = 1u;
+        sacx_task_id = 0u;
+        if (no_window)
+            SetWindowVisible(0u);
+        else
+            Activate();
+        return -1;
+    }
+
+    script_active = 0u;
+    script_done_reported = 1u;
+    sacx_active = 1u;
+    sacx_done_reported = 0u;
+    sacx_task_id = task_id;
+    if (no_window)
+        SetWindowVisible(0u);
+    else
+        Activate();
+    return 0;
+}
+
+int Terminal::StartScript(const char *raw_path, const char *friendly_path, uint32_t launch_flags)
 {
     char title[96];
     ksb builder;
+    uint8_t no_window = (launch_flags & TERMINAL_OPEN_FLAG_NO_WINDOW) ? 1u : 0u;
 
     if (!initialized || window.idx < 0 || !raw_path || !raw_path[0])
         return -1;
@@ -958,13 +1089,25 @@ int Terminal::StartScript(const char *raw_path, const char *friendly_path)
     {
         script_active = 0u;
         script_done_reported = 1u;
-        Activate();
+        sacx_active = 0u;
+        sacx_done_reported = 1u;
+        sacx_task_id = 0u;
+        if (no_window)
+            SetWindowVisible(0u);
+        else
+            Activate();
         return 0;
     }
 
     script_active = 1u;
     script_done_reported = 0u;
-    Activate();
+    sacx_active = 0u;
+    sacx_done_reported = 1u;
+    sacx_task_id = 0u;
+    if (no_window)
+        SetWindowVisible(0u);
+    else
+        Activate();
     return 0;
 }
 
@@ -999,6 +1142,55 @@ void Terminal::UpdateScript()
         Error(status);
     }
     script_done_reported = 1u;
+    RefreshVisibleLines();
+}
+
+void Terminal::UpdateSacx()
+{
+    sacx_task_status st;
+    char status_text[16];
+
+    if (!sacx_active || !sacx_task_id)
+        return;
+
+    if (sacx_runtime_task_status(sacx_task_id, &st) != 0)
+    {
+        sacx_active = 0u;
+        sacx_done_reported = 1u;
+        sacx_task_id = 0u;
+        return;
+    }
+
+    if (st.state != SACX_TASK_EXITED && st.state != SACX_TASK_FAULTED)
+        return;
+
+    sacx_active = 0u;
+    if (sacx_done_reported)
+        return;
+
+    terminal_i32_to_dec(st.exit_status, status_text, sizeof(status_text));
+    if (st.state == SACX_TASK_FAULTED)
+    {
+        Print("sacx task faulted status ");
+        Error(status_text);
+    }
+    else if (st.exit_status == 0)
+    {
+        Print("sacx task exited status ");
+        Success(status_text);
+    }
+    else
+    {
+        Print("sacx task exited status ");
+        Error(status_text);
+    }
+
+    if (st.message[0])
+        Print(st.message);
+
+    (void)sacx_runtime_task_release(sacx_task_id);
+    sacx_done_reported = 1u;
+    sacx_task_id = 0u;
     RefreshVisibleLines();
 }
 
@@ -1051,7 +1243,7 @@ void Terminal::UpdateInput()
     }
 
     if (input_box.idx >= 0 && ktextbox_focused(input_box) &&
-        (!script_active || !dihos_script_waiting_input(&script)))
+        (!script_active || !dihos_script_waiting_input(&script)) && !sacx_active)
     {
         char recalled[DIHOS_SHELL_LINE_CAP];
 

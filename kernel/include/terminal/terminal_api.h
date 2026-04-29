@@ -8,6 +8,12 @@ extern "C"
 #include <stdint.h>
 #include "kwrappers/ktext.h"
 
+    enum
+    {
+        TERMINAL_OPEN_FLAG_NONE = 0u,
+        TERMINAL_OPEN_FLAG_NO_WINDOW = 1u << 0,
+    };
+
     typedef void (*terminal_capture_sink_fn)(const char *text, uint32_t len, void *user);
 
     void terminal_initialize(kfont *font);
@@ -34,7 +40,10 @@ extern "C"
     void terminal_set_loud();
     void terminal_activate(void);
     int terminal_visible(void);
+    int terminal_open_script_ex(const char *raw_path, const char *friendly_path, uint32_t flags);
+    int terminal_open_program_ex(const char *raw_path, const char *friendly_path, uint32_t flags);
     int terminal_open_script(const char *raw_path, const char *friendly_path);
+    int terminal_open_program(const char *raw_path, const char *friendly_path);
     void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
     void terminal_capture_end(void);
 

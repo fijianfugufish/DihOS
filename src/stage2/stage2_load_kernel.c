@@ -455,8 +455,35 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
 
     if (bi_out)
     {
+        static const UINTN sacx_pool_page_options[] = {
+            (UINTN)((32ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((16ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((8ull * 1024ull * 1024ull) >> 12),
+        };
         bi_out->kernel_base_phys = (uint64_t)base;
         bi_out->kernel_size_bytes = (uint64_t)(max_dst - min_dst);
+        bi_out->sacx_exec_pool_base_phys = 0;
+        bi_out->sacx_exec_pool_size_bytes = 0;
+
+        for (UINTN i = 0; i < (UINTN)(sizeof(sacx_pool_page_options) / sizeof(sacx_pool_page_options[0])); ++i)
+        {
+            EFI_PHYSICAL_ADDRESS sacx_base = 0;
+            UINTN sacx_pages = sacx_pool_page_options[i];
+            EFI_STATUS ps = AllocPages(AllocateAnyPages, EfiLoaderCode, sacx_pages, &sacx_base);
+            if (!ps && sacx_base)
+            {
+                bi_out->sacx_exec_pool_base_phys = (uint64_t)sacx_base;
+                bi_out->sacx_exec_pool_size_bytes = (uint64_t)sacx_pages << 12;
+                print(st, L"[S2] SACX exec pool base = ");
+                hex64(st, bi_out->sacx_exec_pool_base_phys);
+                print(st, L"[S2] SACX exec pool size = ");
+                hex64(st, bi_out->sacx_exec_pool_size_bytes);
+                break;
+            }
+        }
+
+        if (!bi_out->sacx_exec_pool_base_phys)
+            println(st, L"[S2] WARNING: SACX exec pool allocation failed");
     }
 
     EFI_FREE_POOL FreePool = BsFreePool(st->BootServices);

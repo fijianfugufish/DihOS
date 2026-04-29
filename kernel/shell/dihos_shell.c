@@ -163,7 +163,7 @@ static const dihos_shell_command G_commands[] = {
     {"sys:history", "sys:history", "Show recent DIHOS commands.", 0u, dihos_cmd_sys_history},
     {"sys:status", "sys:status", "Show current shell and device status.", 0u, dihos_cmd_sys_status},
     {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
-    {"sys:run", "sys:run [path] [args...] [out=name]", "Run a .sac script in this terminal session.", 1u, dihos_cmd_sys_run},
+    {"sys:run", "sys:run [path] [args...] [out=name] [window=yes|no]", "Run a .sac script or .sacx app.", 1u, dihos_cmd_sys_run},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -213,6 +213,25 @@ static int dihos_has_sac_extension(const char *path)
            dihos_lower_ascii(path[3]) == 'c';
 }
 
+static int dihos_has_sacx_extension(const char *path)
+{
+    uint32_t len = 0u;
+
+    if (!path)
+        return 0;
+
+    len = (uint32_t)strlen(path);
+    if (len < 5u)
+        return 0;
+
+    path += len - 5u;
+    return dihos_lower_ascii(path[0]) == '.' &&
+           dihos_lower_ascii(path[1]) == 's' &&
+           dihos_lower_ascii(path[2]) == 'a' &&
+           dihos_lower_ascii(path[3]) == 'c' &&
+           dihos_lower_ascii(path[4]) == 'x';
+}
+
 static uint8_t dihos_is_yes(const char *value)
 {
     if (!value)
@@ -222,6 +241,18 @@ static uint8_t dihos_is_yes(const char *value)
            strcmp(value, "yes") == 0 ||
            strcmp(value, "true") == 0 ||
            strcmp(value, "on") == 0;
+}
+
+static uint8_t dihos_is_no(const char *value)
+{
+    if (!value)
+        return 0u;
+
+    return strcmp(value, "0") == 0 ||
+           strcmp(value, "no") == 0 ||
+           strcmp(value, "false") == 0 ||
+           strcmp(value, "off") == 0 ||
+           strcmp(value, "hidden") == 0;
 }
 
 static void dihos_copy_trunc(char *dst, uint32_t cap, const char *src)
@@ -1273,6 +1304,7 @@ static int dihos_cmd_sys_boot(dihos_shell_stage *stage)
         return -1;
     }
 
+    terminal_print_inline("\n");
     dihos_print_label_hex64("fb_base: ", k_bootinfo_ptr->fb.fb_base);
     terminal_print_inline("fb_size: ");
     dihos_print_dec_value(k_bootinfo_ptr->fb.fb_size);
@@ -1286,6 +1318,8 @@ static int dihos_cmd_sys_boot(dihos_shell_stage *stage)
     dihos_print_label_hex64("xhci_mmio: ", k_bootinfo_ptr->xhci_mmio_base);
     dihos_print_label_hex64("tlmm_mmio: ", k_bootinfo_ptr->tlmm_mmio_base);
     dihos_print_label_hex64("kernel_base: ", k_bootinfo_ptr->kernel_base_phys);
+    dihos_print_label_hex64("sacx_exec_pool: ", k_bootinfo_ptr->sacx_exec_pool_base_phys);
+    dihos_print_label_hex64("sacx_exec_size: ", k_bootinfo_ptr->sacx_exec_pool_size_bytes);
     return 0;
 }
 
@@ -1367,8 +1401,11 @@ static int dihos_cmd_sys_run(dihos_shell_stage *stage)
     uint32_t stdin_len = 0u;
     uint32_t stdin_pos = 0u;
     uint32_t arg_count = 0u;
+    uint32_t launch_flags = TERMINAL_OPEN_FLAG_NONE;
     uint8_t have_stdin = 0u;
+    uint8_t hide_window = 0u;
     char stdin_line[DIHOS_SCRIPT_VAR_VALUE_CAP];
+    const char *window_mode = 0;
     dihos_script_runner runner;
     int rc = 0;
 
@@ -1376,19 +1413,46 @@ static int dihos_cmd_sys_run(dihos_shell_stage *stage)
 
     if (stage->positional_count == 0u)
     {
-        terminal_error("sys:run needs a script path");
+        terminal_error("sys:run needs a script/app path");
         return -1;
     }
 
     if (dihos_resolve_raw_path(stage->positional[0], friendly, raw) != 0)
     {
-        terminal_error("invalid script path");
+        terminal_error("invalid script/app path");
         return -1;
+    }
+
+    if (dihos_has_sacx_extension(friendly))
+    {
+        window_mode = dihos_stage_named(stage, "window");
+        if (window_mode && dihos_is_no(window_mode))
+            hide_window = 1u;
+        if (dihos_is_yes(dihos_stage_named(stage, "hidden")) ||
+            dihos_is_yes(dihos_stage_named(stage, "no_window")))
+            hide_window = 1u;
+        if (hide_window)
+            launch_flags |= TERMINAL_OPEN_FLAG_NO_WINDOW;
+
+        if (stage->positional_count > 1u)
+            terminal_warn("sys:run .sacx currently ignores extra args/stdin");
+
+        if (terminal_open_program_ex(raw, friendly, launch_flags) != 0)
+        {
+            terminal_error("unable to launch .sacx app");
+            return -1;
+        }
+
+        if (hide_window)
+            dihos_copy_trunc(G_shell.run_status_text, sizeof(G_shell.run_status_text), "launched sacx app (hidden window)");
+        else
+            dihos_copy_trunc(G_shell.run_status_text, sizeof(G_shell.run_status_text), "launched sacx app");
+        return 0;
     }
 
     if (!dihos_has_sac_extension(friendly))
     {
-        terminal_error("sys:run only supports .sac scripts");
+        terminal_error("sys:run supports .sac and .sacx files");
         return -1;
     }
 

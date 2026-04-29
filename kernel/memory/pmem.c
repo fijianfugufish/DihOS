@@ -1,6 +1,8 @@
 #include "memory/pmem.h"
 #include "bootinfo.h"
 
+#define EFI_BOOT_SERVICES_CODE 3
+#define EFI_BOOT_SERVICES_DATA 4
 #define EFI_CONVENTIONAL_MEMORY 7
 #define PAGE_SIZE 4096ull
 
@@ -11,14 +13,16 @@ typedef struct
 
 static inline int is_reclaimable_type(uint32_t t)
 {
-    // After ExitBootServices, 3/4 (BootServicesCode/Data) are reclaimable, as is 7 (Conventional).
-    return (t == 3 /*EfiBootServicesCode*/ ||
-            t == 4 /*EfiBootServicesData*/ ||
-            t == 7 /*EfiConventionalMemory*/);
+    // After ExitBootServices, BootServicesCode/Data and Conventional memory are reclaimable.
+    return (t == EFI_BOOT_SERVICES_CODE ||
+            t == EFI_BOOT_SERVICES_DATA ||
+            t == EFI_CONVENTIONAL_MEMORY);
 }
 
 static range_t pool[256];
 static uint32_t pool_count = 0;
+static range_t pool_exec[256];
+static uint32_t pool_exec_count = 0;
 
 // Minimal descriptor layout per UEFI spec (version-independent via desc_size stride)
 typedef struct
@@ -41,8 +45,56 @@ static void range_add(uint64_t base, uint64_t len)
     }
 }
 
+static void range_add_exec(uint64_t base, uint64_t len)
+{
+    if (!len)
+        return;
+    if (pool_exec_count < (uint32_t)(sizeof(pool_exec) / sizeof(pool_exec[0])))
+    {
+        pool_exec[pool_exec_count++] = (range_t){base, len};
+    }
+}
+
 static uint64_t align_up(uint64_t x, uint64_t a) { return (x + (a - 1)) & ~(a - 1); }
 static uint64_t align_down(uint64_t x, uint64_t a) { return x & ~(a - 1); }
+
+static void range_append(range_t *ranges, uint32_t *count, uint32_t capacity, uint64_t base, uint64_t len)
+{
+    if (!len)
+        return;
+    if (*count < capacity)
+        ranges[(*count)++] = (range_t){base, len};
+}
+
+static void range_exclude_from(range_t *ranges, uint32_t *count, uint32_t capacity, uint64_t ebase, uint64_t elen)
+{
+    if (!elen)
+        return;
+    for (uint32_t i = 0; i < *count;)
+    {
+        uint64_t b = ranges[i].base, e = b + ranges[i].len;
+        uint64_t xb = ebase, xe = ebase + elen;
+        if (xe <= b || e <= xb)
+        {
+            i++;
+            continue;
+        }
+
+        range_t left = {b, xb > b ? xb - b : 0};
+        range_t right = {xe < e ? xe : 0, xe < e ? e - xe : 0};
+
+        if (left.len)
+        {
+            ranges[i] = left;
+            i++;
+        }
+        else
+        {
+            ranges[i] = ranges[--(*count)];
+        }
+        range_append(ranges, count, capacity, right.base, right.len);
+    }
+}
 
 /* We learn the VA←→PA delta from the framebuffer mapping */
 extern volatile uint32_t *g_fb32;       // VA the kernel draws into
@@ -53,35 +105,8 @@ static uint64_t g_pa2va_delta = 0;
 
 static void range_exclude(uint64_t ebase, uint64_t elen)
 {
-    if (!elen)
-        return;
-    for (uint32_t i = 0; i < pool_count;)
-    {
-        uint64_t b = pool[i].base, e = b + pool[i].len;
-        uint64_t xb = ebase, xe = ebase + elen;
-        if (xe <= b || e <= xb)
-        {
-            i++;
-            continue;
-        } // no overlap
-
-        // overlap: split into up to two remaining chunks
-        range_t left = {b, xb > b ? xb - b : 0};
-        range_t right = {xe < e ? xe : 0, xe < e ? e - xe : 0};
-
-        // replace current with left (if any), and maybe append right
-        if (left.len)
-        {
-            pool[i] = left;
-            i++;
-        }
-        else
-        { // remove this slot by swapping with last
-            pool[i] = pool[--pool_count];
-        }
-        if (right.len)
-            range_add(right.base, right.len);
-    }
+    range_exclude_from(pool, &pool_count, (uint32_t)(sizeof(pool) / sizeof(pool[0])), ebase, elen);
+    range_exclude_from(pool_exec, &pool_exec_count, (uint32_t)(sizeof(pool_exec) / sizeof(pool_exec[0])), ebase, elen);
 }
 
 #ifndef phys_to_virt
@@ -161,6 +186,7 @@ static inline void pmem_try_learn_va_delta(void)
 void pmem_init(const boot_info *bi)
 {
     pool_count = 0;
+    pool_exec_count = 0;
 
     pmem_try_learn_va_delta();
 
@@ -172,16 +198,18 @@ void pmem_init(const boot_info *bi)
     for (; p + dsz <= end; p += dsz)
     {
         const efi_mdesc *d = (const efi_mdesc *)p;
-        if (!is_reclaimable_type(d->Type))
-            continue;
-
         uint64_t base = d->PhysicalStart;
         uint64_t size = d->NumberOfPages * PAGE_SIZE;
 
         // normalise and store
-        if (size)
+        if (size && is_reclaimable_type(d->Type))
             range_add(base, size);
     }
+
+    // Stage2 reserves this as EfiLoaderCode before ExitBootServices, so it is
+    // writable for loading and executable for direct AArch64 app entry.
+    if (bi->sacx_exec_pool_base_phys && bi->sacx_exec_pool_size_bytes)
+        range_add_exec(bi->sacx_exec_pool_base_phys, bi->sacx_exec_pool_size_bytes);
 
     // 2) exclude regions we must not touch:
     //    - the kernel image itself
@@ -208,6 +236,26 @@ void pmem_init(const boot_info *bi)
             pool[i] = pool[--pool_count];
             i--;
         }
+    }
+    for (uint32_t i = 0; i < pool_exec_count; ++i)
+    {
+        uint64_t b = align_up(pool_exec[i].base, PAGE_SIZE);
+        uint64_t e = align_down(pool_exec[i].base + pool_exec[i].len, PAGE_SIZE);
+        if (e > b)
+        {
+            pool_exec[i].base = b;
+            pool_exec[i].len = e - b;
+        }
+        else
+        {
+            pool_exec[i] = pool_exec[--pool_exec_count];
+            i--;
+        }
+    }
+    for (uint32_t i = 0; i < pool_exec_count; ++i)
+    {
+        range_exclude_from(pool, &pool_count, (uint32_t)(sizeof(pool) / sizeof(pool[0])),
+                           pool_exec[i].base, pool_exec[i].len);
     }
 
     // 3b) split the usable memory into <4GB (low-DMA) and >=4GB pools
@@ -238,6 +286,29 @@ void *pmem_alloc_pages(uint64_t n_pages)
     if (p)
         return p;
     return pool_alloc(pool_lo, &pool_lo_count, n_pages);
+}
+
+void *pmem_alloc_executable_pages(uint64_t n_pages)
+{
+    if (!n_pages)
+        return NULL;
+    return pool_alloc(pool_exec, &pool_exec_count, n_pages);
+}
+
+void pmem_free_executable_pages(void *p, uint64_t n_pages)
+{
+    uint64_t base = 0;
+    uint64_t len = 0;
+
+    if (!p || !n_pages)
+        return;
+
+    base = (uint64_t)(uintptr_t)p;
+    if (g_pa2va_delta && base >= g_pa2va_delta)
+        base -= g_pa2va_delta;
+
+    len = n_pages * PAGE_SIZE;
+    range_add_exec(base, len);
 }
 
 void pmem_free_pages(void *p, uint64_t n)

@@ -15,6 +15,7 @@
 #include "system/dihos_time.h"
 #include "apps/desktop_shell_api.h"
 #include "apps/file_explorer_api.h"
+#include "apps/sacx_runtime.h"
 #include "apps/text_editor_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 
@@ -88,8 +89,11 @@ void kmain(const boot_info *bi)
         have_font = 1;
     }
 
+    sacx_runtime_init(have_font ? &font : 0);
+
     terminal_initialize(&font);
     terminal_print("terminal online");
+    terminal_success("sacx runtime online");
 
     kinput_init(bi->xhci_mmio_base, bi->acpi_rsdp);
 
@@ -140,6 +144,7 @@ void kmain(const boot_info *bi)
         terminal_update_input();
 
         kgfx_render_all(black);
+        sacx_runtime_update();
         frame++;
     }
 }

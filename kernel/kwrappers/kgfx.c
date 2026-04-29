@@ -147,6 +147,7 @@ const kfb *kgfx_info(void) { return &FB; }
 /* object pool */
 static kgfx_obj g_objs[KGFX_MAX_OBJS];
 static uint16_t g_obj_count = 0;
+static uint8_t g_obj_used[KGFX_MAX_OBJS];
 
 typedef struct
 {
@@ -191,16 +192,50 @@ static uint16_t g_prev_snapshot_count = 0;
 static kcolor g_prev_clear_color = {0, 0, 0};
 static uint8_t g_have_prev_frame = 0;
 
+static int kgfx_alloc_slot(uint16_t *out_idx)
+{
+    if (!out_idx)
+        return 0;
+
+    for (uint16_t i = 0; i < g_obj_count; ++i)
+    {
+        if (g_obj_used[i])
+            continue;
+        g_obj_used[i] = 1u;
+        *out_idx = i;
+        return 1;
+    }
+
+    if (g_obj_count >= KGFX_MAX_OBJS)
+        return 0;
+
+    g_obj_used[g_obj_count] = 1u;
+    *out_idx = g_obj_count;
+    ++g_obj_count;
+    return 1;
+}
+
+static void kgfx_clear_slot(uint16_t idx)
+{
+    if (idx >= KGFX_MAX_OBJS)
+        return;
+    g_objs[idx] = (kgfx_obj){0};
+    g_objs[idx].parent_idx = -1;
+    g_objs[idx].clip_to_parent = 1u;
+}
+
 /* ---------- creation ---------- */
 
 kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t height,
                                   int32_t z, kcolor fill, uint8_t visible)
 {
+    uint16_t idx = 0;
     kgfx_obj_handle handle = {.idx = -1};
-    if (g_obj_count >= KGFX_MAX_OBJS)
+    if (!kgfx_alloc_slot(&idx))
         return handle;
 
-    kgfx_obj *o = &g_objs[g_obj_count];
+    kgfx_obj *o = &g_objs[idx];
+    *o = (kgfx_obj){0};
     o->kind = KGFX_OBJ_RECT;
     o->z = z;
     o->visible = visible ? 1 : 0;
@@ -217,18 +252,20 @@ kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t hei
     o->u.rect.y = y;
     o->u.rect.w = w;
     o->u.rect.h = height;
-    handle.idx = (int)g_obj_count++;
+    handle.idx = (int)idx;
     return handle;
 }
 
 kgfx_obj_handle kgfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r,
                                     int32_t z, kcolor fill, uint8_t visible)
 {
+    uint16_t idx = 0;
     kgfx_obj_handle handle = {.idx = -1};
-    if (g_obj_count >= KGFX_MAX_OBJS)
+    if (!kgfx_alloc_slot(&idx))
         return handle;
 
-    kgfx_obj *o = &g_objs[g_obj_count];
+    kgfx_obj *o = &g_objs[idx];
+    *o = (kgfx_obj){0};
     o->kind = KGFX_OBJ_CIRCLE;
     o->z = z;
     o->visible = visible ? 1 : 0;
@@ -244,7 +281,7 @@ kgfx_obj_handle kgfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r,
     o->u.circle.cx = cx;
     o->u.circle.cy = cy;
     o->u.circle.r = r;
-    handle.idx = (int)g_obj_count++;
+    handle.idx = (int)idx;
     return handle;
 }
 
@@ -255,11 +292,15 @@ kgfx_obj_handle kgfx_obj_add_text(const kfont *font, const char *text,
                                   int32_t char_spacing, int32_t line_spacing,
                                   ktext_align align, uint8_t visible)
 {
+    uint16_t idx = 0;
     kgfx_obj_handle h = {.idx = -1};
-    if (g_obj_count >= KGFX_MAX_OBJS || !font || !text || scale == 0)
+    if (!font || !text || scale == 0)
+        return h;
+    if (!kgfx_alloc_slot(&idx))
         return h;
 
-    kgfx_obj *o = &g_objs[g_obj_count];
+    kgfx_obj *o = &g_objs[idx];
+    *o = (kgfx_obj){0};
     o->kind = KGFX_OBJ_TEXT;
     o->z = z;
     o->visible = visible ? 1 : 0;
@@ -281,7 +322,7 @@ kgfx_obj_handle kgfx_obj_add_text(const kfont *font, const char *text,
     o->u.text.line_spacing = line_spacing;
     o->u.text.align = align;
 
-    h.idx = (int)g_obj_count++;
+    h.idx = (int)idx;
     return h;
 }
 
@@ -290,17 +331,24 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
                                    int32_t x, int32_t y,
                                    uint32_t stride_px)
 {
+    uint16_t idx = 0;
     kgfx_obj_handle handle = {.idx = -1};
-    if (g_obj_count >= KGFX_MAX_OBJS)
+    if (!kgfx_alloc_slot(&idx))
         return handle;
 
     if (!argb || w == 0 || h == 0)
+    {
+        g_obj_used[idx] = 0u;
+        if (idx + 1u == g_obj_count)
+            --g_obj_count;
         return handle;
+    }
 
     if (stride_px == 0)
         stride_px = w;
 
-    kgfx_obj *o = &g_objs[g_obj_count];
+    kgfx_obj *o = &g_objs[idx];
+    *o = (kgfx_obj){0};
     o->kind = KGFX_OBJ_IMAGE;
     o->visible = 1;
     o->z = 0;
@@ -324,13 +372,13 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
     o->u.image.stride_px = stride_px;
     o->u.image.sample_mode = KGFX_IMAGE_SAMPLE_NEAREST;
 
-    handle.idx = (int)g_obj_count++;
+    handle.idx = (int)idx;
     return handle;
 }
 
 kgfx_obj *kgfx_obj_ref(kgfx_obj_handle h)
 {
-    if (h.idx < 0 || (uint16_t)h.idx >= g_obj_count)
+    if (h.idx < 0 || (uint16_t)h.idx >= g_obj_count || !g_obj_used[(uint16_t)h.idx])
         return 0;
     return &g_objs[h.idx];
 }
@@ -544,7 +592,7 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
     int32_t local_y = 0;
     kgfx_clip_rect parent_bounds = {0, 0, 0, 0, 0};
 
-    if (!resolved || idx >= g_obj_count)
+    if (!resolved || idx >= g_obj_count || !g_obj_used[idx])
         return 0;
 
     r = &resolved[idx];
@@ -568,7 +616,9 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
     r->clip.x1 = (int32_t)FB.width;
     r->clip.y1 = (int32_t)FB.height;
 
-    if (o->parent_idx >= 0 && (uint16_t)o->parent_idx < g_obj_count)
+    if (o->parent_idx >= 0 &&
+        (uint16_t)o->parent_idx < g_obj_count &&
+        g_obj_used[(uint16_t)o->parent_idx])
     {
         if (!g_objs[(uint16_t)o->parent_idx].visible)
         {
@@ -1605,29 +1655,26 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
 {
     if (h.idx < 0 || (uint16_t)h.idx >= g_obj_count)
         return -1;
+    if (!g_obj_used[(uint16_t)h.idx])
+        return -1;
 
     uint16_t idx = (uint16_t)h.idx;
-    uint16_t last = (uint16_t)(g_obj_count - 1);
+    g_obj_used[idx] = 0u;
 
-    if (idx != last)
+    for (uint16_t i = 0; i < g_obj_count; ++i)
     {
-        g_objs[idx] = g_objs[last];
-    }
-
-    for (uint16_t i = 0; i < last; ++i)
-    {
+        if (!g_obj_used[i])
+            continue;
         if (g_objs[i].parent_idx == (int16_t)idx)
             g_objs[i].parent_idx = -1;
-        else if (g_objs[i].parent_idx == (int16_t)last && idx != last)
-            g_objs[i].parent_idx = (int16_t)idx;
     }
 
-    // optional: zero old last slot for cleaner debugging
-    g_objs[last].visible = 0;
-    g_objs[last].z = 0;
-    g_objs[last].kind = 0;
-
-    g_obj_count--;
+    kgfx_clear_slot(idx);
+    while (g_obj_count > 0u && !g_obj_used[g_obj_count - 1u])
+    {
+        kgfx_clear_slot(g_obj_count - 1u);
+        --g_obj_count;
+    }
     return 0;
 }
 
@@ -1646,6 +1693,11 @@ int kgfx_scene_init(void)
     BB_stride = FB.pitch;
     BB_bytes = pages * 4096ull;
     g_obj_count = 0;
+    for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
+    {
+        g_obj_used[i] = 0u;
+        kgfx_clear_slot(i);
+    }
     g_prev_snapshot_count = 0;
     g_prev_clear_color = (kcolor){0, 0, 0};
     g_have_prev_frame = 0;
@@ -1682,6 +1734,9 @@ void kgfx_render_all(kcolor clear_color)
     uint16_t n = 0;
     for (uint16_t i = 0; i < g_obj_count; ++i)
     {
+        if (!g_obj_used[i])
+            continue;
+
         current[i].in_use = 1;
 
         if (!g_objs[i].visible)

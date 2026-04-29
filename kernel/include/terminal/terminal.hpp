@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 extern "C"
 {
 #include "kwrappers/kgfx.h"
@@ -31,11 +33,15 @@ public:
     void SetQuiet();
     void SetLoud();
     void Activate();
+    void SetWindowVisible(uint32_t visible);
     int Visible() const;
     int Initialized() const;
+    int ProgramActive() const;
     int ScriptActive() const;
-    int StartScript(const char *raw_path, const char *friendly_path);
+    int StartProgram(const char *raw_path, const char *friendly_path, uint32_t launch_flags = 0u);
+    int StartScript(const char *raw_path, const char *friendly_path, uint32_t launch_flags = 0u);
     void UpdateScript();
+    void UpdateSacx();
 
 private:
     static const int LINE_TEXT_CAP = 512;
@@ -103,4 +109,7 @@ private:
     dihos_script_runner script;
     uint8_t script_active;
     uint8_t script_done_reported;
+    uint8_t sacx_active;
+    uint8_t sacx_done_reported;
+    uint32_t sacx_task_id;
 };
