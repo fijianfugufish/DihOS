@@ -386,9 +386,13 @@ namespace
         static const char *kLabel = "C78DFF";
         static const char *kCommand = "8CF5D0";
         static const char *kOperator = "FF9DB5";
+        static const char *kFnArg = "9FE8A6";
+        static const char *kNumber = "F9C780";
 
         uint32_t out_len = 0u;
         uint32_t i = 0u;
+        uint8_t fn_arg_context = 0u;
+        uint8_t call_arg_context = 0u;
 
         if (!dst || cap == 0u)
             return;
@@ -494,9 +498,29 @@ namespace
 
                 if (sac_keyword_token(src + i, j - i))
                 {
+                    uint8_t is_fn = token_equals_ci(src + i, j - i, "fn") ? 1u : 0u;
+                    uint8_t is_call = token_equals_ci(src + i, j - i, "call") ? 1u : 0u;
+
                     line_append_color_set(dst, cap, &out_len, kKeyword);
                     line_append_span(dst, cap, &out_len, src + i, j - i);
                     line_append_color_reset(dst, cap, &out_len);
+
+                    if (is_fn)
+                    {
+                        fn_arg_context = 1u;
+                        call_arg_context = 0u;
+                    }
+                    else if (is_call)
+                    {
+                        call_arg_context = 1u;
+                        fn_arg_context = 0u;
+                    }
+                    else
+                    {
+                        fn_arg_context = 0u;
+                        call_arg_context = 0u;
+                    }
+
                     i = j;
                     continue;
                 }
@@ -509,6 +533,39 @@ namespace
                     i = j;
                     continue;
                 }
+
+                if (fn_arg_context || call_arg_context)
+                {
+                    line_append_color_set(dst, cap, &out_len, kFnArg);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+
+                line_append_span(dst, cap, &out_len, src + i, j - i);
+                i = j;
+                continue;
+            }
+
+            if (ascii_is_digit(src[i]))
+            {
+                j = i + 1u;
+                while (ascii_is_digit(src[j]))
+                    ++j;
+
+                if (src[j] == '.' && ascii_is_digit(src[j + 1u]))
+                {
+                    ++j;
+                    while (ascii_is_digit(src[j]))
+                        ++j;
+                }
+
+                line_append_color_set(dst, cap, &out_len, kNumber);
+                line_append_span(dst, cap, &out_len, src + i, j - i);
+                line_append_color_reset(dst, cap, &out_len);
+                i = j;
+                continue;
             }
 
             if ((src[i] == '=' && src[i + 1u] == '=') ||
@@ -595,9 +652,30 @@ namespace
         void SetStatus(const char *text, kcolor color);
         void ResetRepeat();
         void ResetCaretBlink();
+        void SnapshotFromCurrent(char *dst_buf, uint32_t *dst_len, uint32_t *dst_cursor,
+                                 uint8_t *dst_has_selection, uint32_t *dst_sel_anchor, uint32_t *dst_sel_cursor) const;
+        void RestoreFromSnapshot(const char *src_buf, uint32_t src_len, uint32_t src_cursor,
+                                 uint8_t src_has_selection, uint32_t src_sel_anchor, uint32_t src_sel_cursor);
+        void SaveUndoSnapshot();
+        void SaveRedoSnapshot();
+        void ClearRedoSnapshot();
+        void Undo();
+        void Redo();
         uint8_t ShiftDown() const;
         uint8_t CtrlDown() const;
         uint8_t CaretVisible() const;
+        uint8_t HasSelection() const;
+        uint32_t SelectionStart() const;
+        uint32_t SelectionEnd() const;
+        void ClearSelection();
+        void StartSelectionFromCursor();
+        void UpdateSelectionToCursor();
+        void DeleteSelection();
+        void CopySelectionToClipboard();
+        void CutSelectionToClipboard();
+        void ReplaceSelectionWithText(const char *text);
+        void WrapSelection(const char *left, const char *right);
+        void PrefixSelection(const char *prefix);
         uint8_t KeyRepeatTrigger(uint8_t usage);
         uint32_t MeasureCharPx(char ch) const;
         uint32_t TextAreaAvailablePx() const;
@@ -678,9 +756,30 @@ namespace
         kgfx_obj_handle status_strip_;
         kgfx_obj_handle status_text_;
         kgfx_obj_handle line_objs_[MAX_VISIBLE_LINES];
+        kgfx_obj_handle selection_objs_[MAX_VISIBLE_LINES];
         char line_buffers_[MAX_VISIBLE_LINES][LINE_RENDER_CAP];
         char buffer_[TEXT_CAP];
         char scratch_[TEXT_CAP];
+        char clipboard_[TEXT_CAP];
+        uint32_t clipboard_len_;
+        char undo_buffer_[TEXT_CAP];
+        uint32_t undo_len_;
+        uint32_t undo_cursor_;
+        uint8_t undo_has_selection_;
+        uint32_t undo_sel_anchor_;
+        uint32_t undo_sel_cursor_;
+        uint8_t has_undo_;
+        char redo_buffer_[TEXT_CAP];
+        uint32_t redo_len_;
+        uint32_t redo_cursor_;
+        uint8_t redo_has_selection_;
+        uint32_t redo_sel_anchor_;
+        uint32_t redo_sel_cursor_;
+        uint8_t has_redo_;
+        uint8_t selecting_mouse_;
+        uint8_t has_selection_;
+        uint32_t selection_anchor_;
+        uint32_t selection_cursor_;
         uint32_t line_starts_[MAX_LINES];
         uint32_t len_;
         uint32_t line_count_;
@@ -774,6 +873,26 @@ namespace
         last_root_h_ = -1;
         layout_dirty_ = 1u;
         view_dirty_ = 1u;
+        clipboard_[0] = 0;
+        clipboard_len_ = 0u;
+        undo_buffer_[0] = 0;
+        undo_len_ = 0u;
+        undo_cursor_ = 0u;
+        undo_has_selection_ = 0u;
+        undo_sel_anchor_ = 0u;
+        undo_sel_cursor_ = 0u;
+        has_undo_ = 0u;
+        redo_buffer_[0] = 0;
+        redo_len_ = 0u;
+        redo_cursor_ = 0u;
+        redo_has_selection_ = 0u;
+        redo_sel_anchor_ = 0u;
+        redo_sel_cursor_ = 0u;
+        has_redo_ = 0u;
+        selecting_mouse_ = 0u;
+        has_selection_ = 0u;
+        selection_anchor_ = 0u;
+        selection_cursor_ = 0u;
         current_raw_[0] = 0;
         current_friendly_[0] = 0;
         path_buffer_[0] = 0;
@@ -786,6 +905,7 @@ namespace
         for (uint32_t i = 0; i < MAX_VISIBLE_LINES; ++i)
         {
             line_objs_[i].idx = -1;
+            selection_objs_[i].idx = -1;
             line_buffers_[i][0] = 0;
         }
 
@@ -904,6 +1024,7 @@ namespace
         for (uint32_t i = 0; i < MAX_VISIBLE_LINES; ++i)
         {
             line_objs_[i].idx = -1;
+            selection_objs_[i].idx = -1;
             line_buffers_[i][0] = 0;
         }
     }
@@ -1130,6 +1251,90 @@ namespace
         caret_blink_tick_ = 0u;
     }
 
+    void TextEditor::SnapshotFromCurrent(char *dst_buf, uint32_t *dst_len, uint32_t *dst_cursor,
+                                         uint8_t *dst_has_selection, uint32_t *dst_sel_anchor, uint32_t *dst_sel_cursor) const
+    {
+        if (!dst_buf || !dst_len || !dst_cursor || !dst_has_selection || !dst_sel_anchor || !dst_sel_cursor)
+            return;
+
+        for (uint32_t i = 0u; i <= len_ && i < TEXT_CAP; ++i)
+            dst_buf[i] = buffer_[i];
+
+        *dst_len = len_;
+        *dst_cursor = cursor_;
+        *dst_has_selection = has_selection_;
+        *dst_sel_anchor = selection_anchor_;
+        *dst_sel_cursor = selection_cursor_;
+    }
+
+    void TextEditor::RestoreFromSnapshot(const char *src_buf, uint32_t src_len, uint32_t src_cursor,
+                                         uint8_t src_has_selection, uint32_t src_sel_anchor, uint32_t src_sel_cursor)
+    {
+        if (!src_buf || src_len >= TEXT_CAP)
+            return;
+
+        for (uint32_t i = 0u; i <= src_len; ++i)
+            buffer_[i] = src_buf[i];
+
+        len_ = src_len;
+        cursor_ = src_cursor <= len_ ? src_cursor : len_;
+        has_selection_ = src_has_selection ? 1u : 0u;
+        selection_anchor_ = src_sel_anchor <= len_ ? src_sel_anchor : len_;
+        selection_cursor_ = src_sel_cursor <= len_ ? src_sel_cursor : len_;
+        if (!HasSelection())
+            ClearSelection();
+
+        dirty_ = 1u;
+        RefreshPathVisual();
+        RebuildLineStarts();
+        UpdatePreferredFromCursor();
+        EnsureCursorVisible();
+        view_dirty_ = 1u;
+    }
+
+    void TextEditor::SaveUndoSnapshot()
+    {
+        SnapshotFromCurrent(undo_buffer_, &undo_len_, &undo_cursor_,
+                            &undo_has_selection_, &undo_sel_anchor_, &undo_sel_cursor_);
+        has_undo_ = 1u;
+    }
+
+    void TextEditor::SaveRedoSnapshot()
+    {
+        SnapshotFromCurrent(redo_buffer_, &redo_len_, &redo_cursor_,
+                            &redo_has_selection_, &redo_sel_anchor_, &redo_sel_cursor_);
+        has_redo_ = 1u;
+    }
+
+    void TextEditor::ClearRedoSnapshot()
+    {
+        has_redo_ = 0u;
+    }
+
+    void TextEditor::Undo()
+    {
+        if (!has_undo_)
+            return;
+
+        SaveRedoSnapshot();
+        RestoreFromSnapshot(undo_buffer_, undo_len_, undo_cursor_,
+                            undo_has_selection_, undo_sel_anchor_, undo_sel_cursor_);
+        has_undo_ = 0u;
+        SetStatus("undo", rgb(188, 202, 224));
+    }
+
+    void TextEditor::Redo()
+    {
+        if (!has_redo_)
+            return;
+
+        SaveUndoSnapshot();
+        RestoreFromSnapshot(redo_buffer_, redo_len_, redo_cursor_,
+                            redo_has_selection_, redo_sel_anchor_, redo_sel_cursor_);
+        has_redo_ = 0u;
+        SetStatus("redo", rgb(188, 202, 224));
+    }
+
     uint8_t TextEditor::ShiftDown() const
     {
         return (kinput_key_down(KEY_LSHIFT) || kinput_key_down(KEY_RSHIFT)) ? 1u : 0u;
@@ -1145,6 +1350,164 @@ namespace
         if (!focused_)
             return 0u;
         return ((caret_blink_tick_ / CARET_BLINK_FRAMES) & 1u) == 0u ? 1u : 0u;
+    }
+
+    uint8_t TextEditor::HasSelection() const
+    {
+        return (has_selection_ && selection_anchor_ != selection_cursor_) ? 1u : 0u;
+    }
+
+    uint32_t TextEditor::SelectionStart() const
+    {
+        if (!HasSelection())
+            return cursor_;
+        return selection_anchor_ < selection_cursor_ ? selection_anchor_ : selection_cursor_;
+    }
+
+    uint32_t TextEditor::SelectionEnd() const
+    {
+        if (!HasSelection())
+            return cursor_;
+        return selection_anchor_ > selection_cursor_ ? selection_anchor_ : selection_cursor_;
+    }
+
+    void TextEditor::ClearSelection()
+    {
+        has_selection_ = 0u;
+        selection_anchor_ = cursor_;
+        selection_cursor_ = cursor_;
+    }
+
+    void TextEditor::StartSelectionFromCursor()
+    {
+        has_selection_ = 1u;
+        selection_anchor_ = cursor_;
+        selection_cursor_ = cursor_;
+    }
+
+    void TextEditor::UpdateSelectionToCursor()
+    {
+        if (!has_selection_)
+            StartSelectionFromCursor();
+        selection_cursor_ = cursor_;
+    }
+
+    void TextEditor::DeleteSelection()
+    {
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+
+        if (!HasSelection())
+            return;
+
+        start = SelectionStart();
+        end = SelectionEnd();
+        memmove(buffer_ + start, buffer_ + end, len_ - end + 1u);
+        len_ -= (end - start);
+        cursor_ = start;
+        ClearSelection();
+        MarkTextChanged();
+        ResetCaretBlink();
+    }
+
+    void TextEditor::CopySelectionToClipboard()
+    {
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+        uint32_t count = 0u;
+
+        if (!HasSelection())
+            return;
+
+        start = SelectionStart();
+        end = SelectionEnd();
+        count = end - start;
+        if (count >= TEXT_CAP)
+            count = TEXT_CAP - 1u;
+
+        for (uint32_t i = 0u; i < count; ++i)
+            clipboard_[i] = buffer_[start + i];
+        clipboard_[count] = 0;
+        clipboard_len_ = count;
+    }
+
+    void TextEditor::CutSelectionToClipboard()
+    {
+        if (!HasSelection())
+            return;
+
+        CopySelectionToClipboard();
+        DeleteSelection();
+    }
+
+    void TextEditor::ReplaceSelectionWithText(const char *text)
+    {
+        if (HasSelection())
+            DeleteSelection();
+        InsertText(text);
+    }
+
+    void TextEditor::WrapSelection(const char *left, const char *right)
+    {
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+        uint32_t left_len = 0u;
+        uint32_t right_len = 0u;
+
+        if (!HasSelection())
+            return;
+
+        if (!left)
+            left = "";
+        if (!right)
+            right = "";
+
+        start = SelectionStart();
+        end = SelectionEnd();
+        while (left[left_len])
+            ++left_len;
+        while (right[right_len])
+            ++right_len;
+
+        ClearSelection();
+        cursor_ = end;
+        InsertText(right);
+        cursor_ = start;
+        InsertText(left);
+
+        has_selection_ = 1u;
+        selection_anchor_ = start;
+        selection_cursor_ = end + left_len + right_len;
+        cursor_ = selection_cursor_;
+        UpdatePreferredFromCursor();
+        EnsureCursorVisible();
+        view_dirty_ = 1u;
+    }
+
+    void TextEditor::PrefixSelection(const char *prefix)
+    {
+        uint32_t start = 0u;
+        uint32_t end = 0u;
+        uint32_t prefix_len = 0u;
+
+        if (!HasSelection() || !prefix)
+            return;
+
+        start = SelectionStart();
+        end = SelectionEnd();
+        while (prefix[prefix_len])
+            ++prefix_len;
+
+        ClearSelection();
+        cursor_ = start;
+        InsertText(prefix);
+        has_selection_ = 1u;
+        selection_anchor_ = start;
+        selection_cursor_ = end + prefix_len;
+        cursor_ = selection_cursor_;
+        UpdatePreferredFromCursor();
+        EnsureCursorVisible();
+        view_dirty_ = 1u;
     }
 
     uint8_t TextEditor::KeyRepeatTrigger(uint8_t usage)
@@ -1396,6 +1759,10 @@ namespace
         scroll_top_line_ = 0u;
         view_column_ = 0u;
         dirty_ = 0u;
+        has_undo_ = 0u;
+        has_redo_ = 0u;
+        selecting_mouse_ = 0u;
+        ClearSelection();
         buffer_[0] = 0;
         line_starts_[0] = 0u;
         current_raw_[0] = 0;
@@ -1735,6 +2102,9 @@ namespace
         uint32_t total_visual = TotalVisualLines();
         uint8_t caret_visible = CaretVisible();
         uint8_t sac_mode = SacEditingEnabled() ? 1u : 0u;
+        uint8_t has_selection = HasSelection();
+        uint32_t selection_start = SelectionStart();
+        uint32_t selection_end = SelectionEnd();
         uint32_t pad_x = 6u;
         uint32_t pad_y = 4u;
         uint32_t available_px = 0u;
@@ -1747,9 +2117,12 @@ namespace
 
         for (uint32_t i = 0u; i < MAX_VISIBLE_LINES; ++i)
         {
-            kgfx_obj *obj = kgfx_obj_ref(line_objs_[i]);
-            if (obj)
-                obj->visible = 0u;
+            kgfx_obj *line_obj = kgfx_obj_ref(line_objs_[i]);
+            kgfx_obj *sel_obj = kgfx_obj_ref(selection_objs_[i]);
+            if (line_obj)
+                line_obj->visible = 0u;
+            if (sel_obj)
+                sel_obj->visible = 0u;
         }
 
         for (uint32_t i = 0u; i < visible_line_count_ && i < MAX_VISIBLE_LINES; ++i)
@@ -1759,12 +2132,14 @@ namespace
             uint32_t start = 0u;
             uint32_t end = 0u;
             uint32_t src = 0u;
+            uint32_t render_start = 0u;
             uint32_t out_len = 0u;
             uint32_t used_px = 0u;
             uint32_t column = 0u;
             uint8_t caret_drawn = 0u;
             char plain_line[LINE_RENDER_CAP];
             kgfx_obj *obj = 0;
+            kgfx_obj *sel_obj = 0;
 
             if (visual_idx >= total_visual)
                 break;
@@ -1783,7 +2158,24 @@ namespace
                 }
             }
 
+            if (selection_objs_[i].idx < 0)
+            {
+                selection_objs_[i] = kgfx_obj_add_rect(0, 0, 1, line_height_px_ ? line_height_px_ : 1u,
+                                                       0, rgb(68, 96, 145), 0u);
+                if (selection_objs_[i].idx >= 0)
+                {
+                    kgfx_obj_set_parent(selection_objs_[i], viewport_);
+                    kgfx_obj_set_clip_to_parent(selection_objs_[i], 1u);
+                    if (kgfx_obj_ref(selection_objs_[i]) && kgfx_obj_ref(selection_objs_[i])->kind == KGFX_OBJ_RECT)
+                    {
+                        kgfx_obj_ref(selection_objs_[i])->outline_width = 0u;
+                        kgfx_obj_ref(selection_objs_[i])->alpha = 185u;
+                    }
+                }
+            }
+
             obj = kgfx_obj_ref(line_objs_[i]);
+            sel_obj = kgfx_obj_ref(selection_objs_[i]);
             if (!obj || obj->kind != KGFX_OBJ_TEXT)
                 break;
 
@@ -1798,6 +2190,7 @@ namespace
                 ++src;
                 ++column;
             }
+            render_start = src;
 
             while (out_len + 1u < LINE_RENDER_CAP)
             {
@@ -1837,6 +2230,33 @@ namespace
             }
 
             plain_line[out_len] = 0;
+
+            if (sel_obj && sel_obj->kind == KGFX_OBJ_RECT && has_selection && src > render_start)
+            {
+                uint32_t hi_start = selection_start > render_start ? selection_start : render_start;
+                uint32_t hi_end = selection_end < src ? selection_end : src;
+
+                if (hi_start < hi_end)
+                {
+                    uint32_t x_start = 0u;
+                    uint32_t x_width = 0u;
+
+                    for (uint32_t p = render_start; p < hi_start; ++p)
+                        x_start += MeasureCharPx(buffer_[p]) + 1u;
+                    for (uint32_t p = hi_start; p < hi_end; ++p)
+                        x_width += MeasureCharPx(buffer_[p]) + 1u;
+
+                    if (x_width == 0u)
+                        x_width = 1u;
+
+                    sel_obj->u.rect.x = (int32_t)pad_x + (int32_t)x_start;
+                    sel_obj->u.rect.y = (int32_t)pad_y + (int32_t)(i * line_height_px_);
+                    sel_obj->u.rect.w = x_width;
+                    sel_obj->u.rect.h = line_height_px_ ? line_height_px_ : 1u;
+                    sel_obj->visible = 1u;
+                }
+            }
+
             if (sac_mode)
                 sac_render_highlighted_line(plain_line, line_buffers_[i], LINE_RENDER_CAP);
             else
@@ -1870,6 +2290,9 @@ namespace
 
     void TextEditor::InsertChar(char ch)
     {
+        if (HasSelection())
+            DeleteSelection();
+
         if (len_ + 1u >= TEXT_CAP)
         {
             SetStatus("document is full", rgb(255, 170, 120));
@@ -1897,6 +2320,12 @@ namespace
     {
         uint32_t remove_count = 1u;
 
+        if (HasSelection())
+        {
+            DeleteSelection();
+            return;
+        }
+
         if (cursor_ == 0u || len_ == 0u)
             return;
 
@@ -1923,6 +2352,12 @@ namespace
 
     void TextEditor::DeleteForward()
     {
+        if (HasSelection())
+        {
+            DeleteSelection();
+            return;
+        }
+
         if (cursor_ >= len_)
             return;
 
@@ -2019,6 +2454,7 @@ namespace
         kmouse_state mouse = {0};
         uint8_t left_now = 0u;
         uint8_t left_pressed = 0u;
+        uint8_t left_released = 0u;
         int32_t root_left = 0;
         int32_t root_top = 0;
         int32_t root_right = 0;
@@ -2038,6 +2474,7 @@ namespace
         kmouse_get_state(&mouse);
         left_now = (mouse.buttons & 0x01u) ? 1u : 0u;
         left_pressed = left_now && !(prev_mouse_buttons_ & 0x01u);
+        left_released = (!left_now) && (prev_mouse_buttons_ & 0x01u);
 
         root_left = root->u.rect.x;
         root_top = root->u.rect.y;
@@ -2082,19 +2519,56 @@ namespace
         {
             if (in_view)
             {
+                uint32_t prior_cursor = cursor_;
+                uint8_t shift = ShiftDown();
                 focused_ = 1u;
                 ktextbox_clear_focus();
                 ResetRepeat();
                 PlaceCursorFromMouse(mouse.x, mouse.y);
+                if (shift)
+                {
+                    if (!has_selection_)
+                    {
+                        has_selection_ = 1u;
+                        selection_anchor_ = prior_cursor;
+                    }
+                    selection_cursor_ = cursor_;
+                }
+                else
+                {
+                    has_selection_ = 1u;
+                    selection_anchor_ = cursor_;
+                    selection_cursor_ = cursor_;
+                }
+                selecting_mouse_ = 1u;
+                view_dirty_ = 1u;
             }
             else if (in_root)
             {
                 focused_ = 0u;
+                selecting_mouse_ = 0u;
             }
             else
             {
                 focused_ = 0u;
+                selecting_mouse_ = 0u;
             }
+        }
+
+        if (left_now && selecting_mouse_ && in_view)
+        {
+            PlaceCursorFromMouse(mouse.x, mouse.y);
+            has_selection_ = 1u;
+            selection_cursor_ = cursor_;
+            view_dirty_ = 1u;
+        }
+
+        if (left_released)
+        {
+            selecting_mouse_ = 0u;
+            if (!HasSelection())
+                ClearSelection();
+            view_dirty_ = 1u;
         }
 
         prev_mouse_buttons_ = mouse.buttons;
@@ -2110,6 +2584,64 @@ namespace
 
         if (CtrlDown())
         {
+            if (kinput_key_pressed(KEY_Z))
+            {
+                Undo();
+                return;
+            }
+
+            if (kinput_key_pressed(KEY_Y))
+            {
+                Redo();
+                return;
+            }
+
+            if (kinput_key_pressed(KEY_C))
+            {
+                if (HasSelection())
+                {
+                    CopySelectionToClipboard();
+                    SetStatus("copied selection", rgb(188, 202, 224));
+                }
+                return;
+            }
+
+            if (kinput_key_pressed(KEY_X))
+            {
+                if (HasSelection())
+                {
+                    SaveUndoSnapshot();
+                    ClearRedoSnapshot();
+                    CutSelectionToClipboard();
+                    SetStatus("cut selection", rgb(188, 202, 224));
+                }
+                return;
+            }
+
+            if (kinput_key_pressed(KEY_V))
+            {
+                if (clipboard_len_ > 0u)
+                {
+                    SaveUndoSnapshot();
+                    ClearRedoSnapshot();
+                    ReplaceSelectionWithText(clipboard_);
+                    SetStatus("pasted", rgb(188, 202, 224));
+                }
+                return;
+            }
+
+            if (kinput_key_pressed(KEY_A))
+            {
+                cursor_ = len_;
+                has_selection_ = 1u;
+                selection_anchor_ = 0u;
+                selection_cursor_ = len_;
+                UpdatePreferredFromCursor();
+                EnsureCursorVisible();
+                view_dirty_ = 1u;
+                return;
+            }
+
             if (kinput_key_pressed(KEY_N))
             {
                 BeginNewDocument();
@@ -2135,26 +2667,81 @@ namespace
         if (kinput_key_pressed(KEY_ESCAPE))
         {
             focused_ = 0u;
+            ClearSelection();
+            view_dirty_ = 1u;
             return;
         }
 
         if (KeyRepeatTrigger(KEY_BACKSPACE))
-            Backspace();
-        if (KeyRepeatTrigger(KEY_DELETE))
-            DeleteForward();
-
-        if (KeyRepeatTrigger(KEY_LEFT) && cursor_ > 0u)
         {
-            --cursor_;
+            if (kinput_key_pressed(KEY_BACKSPACE))
+            {
+                SaveUndoSnapshot();
+                ClearRedoSnapshot();
+            }
+            Backspace();
+        }
+
+        if (KeyRepeatTrigger(KEY_DELETE))
+        {
+            if (kinput_key_pressed(KEY_DELETE))
+            {
+                SaveUndoSnapshot();
+                ClearRedoSnapshot();
+            }
+            DeleteForward();
+        }
+
+        if (KeyRepeatTrigger(KEY_LEFT))
+        {
+            if (!ShiftDown() && HasSelection())
+            {
+                cursor_ = SelectionStart();
+                ClearSelection();
+            }
+            else if (cursor_ > 0u)
+            {
+                if (ShiftDown())
+                {
+                    if (!has_selection_)
+                        StartSelectionFromCursor();
+                    --cursor_;
+                    UpdateSelectionToCursor();
+                }
+                else
+                {
+                    --cursor_;
+                    ClearSelection();
+                }
+            }
             UpdatePreferredFromCursor();
             ResetCaretBlink();
             EnsureCursorVisible();
             view_dirty_ = 1u;
         }
 
-        if (KeyRepeatTrigger(KEY_RIGHT) && cursor_ < len_)
+        if (KeyRepeatTrigger(KEY_RIGHT))
         {
-            ++cursor_;
+            if (!ShiftDown() && HasSelection())
+            {
+                cursor_ = SelectionEnd();
+                ClearSelection();
+            }
+            else if (cursor_ < len_)
+            {
+                if (ShiftDown())
+                {
+                    if (!has_selection_)
+                        StartSelectionFromCursor();
+                    ++cursor_;
+                    UpdateSelectionToCursor();
+                }
+                else
+                {
+                    ++cursor_;
+                    ClearSelection();
+                }
+            }
             UpdatePreferredFromCursor();
             ResetCaretBlink();
             EnsureCursorVisible();
@@ -2163,22 +2750,75 @@ namespace
 
         if (KeyRepeatTrigger(KEY_UP))
         {
+            if (ShiftDown())
+            {
+                if (!has_selection_)
+                    StartSelectionFromCursor();
+            }
+            else
+            {
+                ClearSelection();
+            }
             MoveCursorVertical(-1);
+            if (ShiftDown())
+                UpdateSelectionToCursor();
+            view_dirty_ = 1u;
         }
 
         if (KeyRepeatTrigger(KEY_DOWN))
         {
+            if (ShiftDown())
+            {
+                if (!has_selection_)
+                    StartSelectionFromCursor();
+            }
+            else
+            {
+                ClearSelection();
+            }
             MoveCursorVertical(1);
+            if (ShiftDown())
+                UpdateSelectionToCursor();
+            view_dirty_ = 1u;
         }
 
         if (KeyRepeatTrigger(KEY_HOME))
+        {
+            if (ShiftDown())
+            {
+                if (!has_selection_)
+                    StartSelectionFromCursor();
+            }
+            else
+            {
+                ClearSelection();
+            }
             MoveCursorToLineBoundary(0u);
+            if (ShiftDown())
+                UpdateSelectionToCursor();
+            view_dirty_ = 1u;
+        }
         if (KeyRepeatTrigger(KEY_END))
+        {
+            if (ShiftDown())
+            {
+                if (!has_selection_)
+                    StartSelectionFromCursor();
+            }
+            else
+            {
+                ClearSelection();
+            }
             MoveCursorToLineBoundary(1u);
+            if (ShiftDown())
+                UpdateSelectionToCursor();
+            view_dirty_ = 1u;
+        }
 
         if (KeyRepeatTrigger(KEY_PAGEUP))
         {
             uint32_t delta = VisibleLineCapacity();
+            ClearSelection();
             if (delta > scroll_top_line_)
                 scroll_top_line_ = 0u;
             else
@@ -2189,6 +2829,7 @@ namespace
 
         if (KeyRepeatTrigger(KEY_PAGEDOWN))
         {
+            ClearSelection();
             scroll_top_line_ += VisibleLineCapacity();
             ClampScroll();
             MoveCursorVertical((int)VisibleLineCapacity());
@@ -2196,10 +2837,18 @@ namespace
         }
 
         if (kinput_key_pressed(KEY_ENTER) || kinput_key_pressed(KEY_KP_ENTER))
+        {
+            SaveUndoSnapshot();
+            ClearRedoSnapshot();
             InsertNewlineSmart();
+        }
 
         if (kinput_key_pressed(KEY_TAB))
+        {
+            SaveUndoSnapshot();
+            ClearRedoSnapshot();
             InsertText("    ");
+        }
 
         if (!CtrlDown())
         {
@@ -2214,7 +2863,51 @@ namespace
                 {
                     char ch = usage_to_char(usage, shift, caps_lock_);
                     if (ch)
+                    {
+                        SaveUndoSnapshot();
+                        ClearRedoSnapshot();
+
+                        if (SacEditingEnabled() && HasSelection())
+                        {
+                            if (ch == '$')
+                            {
+                                PrefixSelection("$");
+                                continue;
+                            }
+                            if (ch == '%')
+                            {
+                                WrapSelection("%", "%");
+                                continue;
+                            }
+                            if (ch == '"')
+                            {
+                                WrapSelection("\"", "\"");
+                                continue;
+                            }
+                            if (ch == '\'')
+                            {
+                                WrapSelection("'", "'");
+                                continue;
+                            }
+                            if (ch == '(')
+                            {
+                                WrapSelection("(", ")");
+                                continue;
+                            }
+                            if (ch == '[')
+                            {
+                                WrapSelection("[", "]");
+                                continue;
+                            }
+                            if (ch == '{')
+                            {
+                                WrapSelection("{", "}");
+                                continue;
+                            }
+                        }
+
                         InsertChar(ch);
+                    }
                 }
             }
         }
@@ -2387,9 +3080,13 @@ namespace
         scroll_top_line_ = 0u;
         view_column_ = 0u;
         dirty_ = 0u;
+        has_undo_ = 0u;
+        has_redo_ = 0u;
+        selecting_mouse_ = 0u;
         copy_text(current_raw_, sizeof(current_raw_), raw_path);
         copy_text(current_friendly_, sizeof(current_friendly_), friendly_path);
         RebuildLineStarts();
+        ClearSelection();
         RefreshPathVisual();
         SetStatus("file opened", rgb(148, 232, 180));
         view_dirty_ = 1u;
