@@ -1660,6 +1660,9 @@ static int script_step_one(dihos_script_runner *runner)
 {
     char expanded[DIHOS_SCRIPT_LINE_CAP];
     char work[DIHOS_SCRIPT_LINE_CAP];
+    char cmd_scan[DIHOS_SCRIPT_LINE_CAP];
+    char *cmd_cursor = 0;
+    char *cmd_name = 0;
     char out_scan[DIHOS_SCRIPT_LINE_CAP];
     char out_name[DIHOS_SCRIPT_VAR_NAME_CAP];
     char *line = 0;
@@ -2394,7 +2397,14 @@ static int script_step_one(dihos_script_runner *runner)
 
     {
         int rc = dihos_shell_session_execute_line(runner->session, line);
-        script_set_status(runner, rc);
+        script_copy(cmd_scan, sizeof(cmd_scan), line);
+        cmd_cursor = cmd_scan;
+        cmd_name = script_next_token(&cmd_cursor);
+
+        // Keep previous status across pure logging lines so `%status%` can still
+        // refer to the prior command (notably after `sys:run` followed by `sys:echo`).
+        if (!cmd_name || strcmp(cmd_name, "sys:echo") != 0)
+            script_set_status(runner, rc);
 
         script_copy(out_scan, sizeof(out_scan), line);
         if (script_extract_run_out_target(out_scan, out_name, sizeof(out_name)))
