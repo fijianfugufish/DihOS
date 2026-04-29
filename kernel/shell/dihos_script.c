@@ -1528,6 +1528,8 @@ static int script_extract_run_out_target(char *line, char *out_name, uint32_t ou
 {
     char *cursor = line;
     char *token = 0;
+    uint8_t saw_out = 0u;
+    uint8_t saw_out_eq = 0u;
 
     if (!line || !out_name || out_cap == 0u)
         return 0;
@@ -1545,13 +1547,57 @@ static int script_extract_run_out_target(char *line, char *out_name, uint32_t ou
             strcmp(token, "||") == 0 || strcmp(token, ";") == 0)
             break;
 
+        if (saw_out_eq)
+        {
+            if (script_name_valid(token))
+            {
+                script_copy(out_name, out_cap, token);
+                return 1;
+            }
+            saw_out_eq = 0u;
+            saw_out = 0u;
+        }
+
+        if (saw_out)
+        {
+            if (strcmp(token, "=") == 0)
+            {
+                saw_out_eq = 1u;
+                continue;
+            }
+
+            if (token[0] == '=' && script_name_valid(token + 1u))
+            {
+                script_copy(out_name, out_cap, token + 1u);
+                return 1;
+            }
+
+            saw_out = 0u;
+        }
+
+        if (strcmp(token, "out") == 0)
+        {
+            saw_out = 1u;
+            continue;
+        }
+
         if (eq && eq != token)
         {
             *eq = 0;
-            if (strcmp(token, "out") == 0 && script_name_valid(eq + 1u))
+            if (strcmp(token, "out") == 0)
             {
-                script_copy(out_name, out_cap, eq + 1u);
-                return 1;
+                if (eq[1] == 0)
+                {
+                    saw_out_eq = 1u;
+                    saw_out = 1u;
+                    continue;
+                }
+
+                if (script_name_valid(eq + 1u))
+                {
+                    script_copy(out_name, out_cap, eq + 1u);
+                    return 1;
+                }
             }
             continue;
         }
@@ -1693,6 +1739,7 @@ static int script_step_one(dihos_script_runner *runner)
         {
             uint32_t target = 0u;
             uint8_t target_kind = 0u;
+            char branch_expanded[DIHOS_SCRIPT_LINE_CAP];
             char branch_work[DIHOS_SCRIPT_LINE_CAP];
             char *branch_line = 0;
             int branch_truthy = 0;
@@ -1715,7 +1762,13 @@ static int script_step_one(dihos_script_runner *runner)
                 return 0;
             }
 
-            script_copy(branch_work, sizeof(branch_work), runner->lines[target]);
+            if (script_expand_vars(runner, runner->lines[target], branch_expanded, sizeof(branch_expanded)) != 0)
+            {
+                script_error(runner, "invalid else if condition");
+                return -1;
+            }
+
+            script_copy(branch_work, sizeof(branch_work), branch_expanded);
             branch_line = script_trim(branch_work);
             if (script_eval_condition(runner, script_trim(branch_line + 7u), &branch_truthy) != 0)
             {

@@ -54,7 +54,6 @@ void kmain(const boot_info *bi)
 
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
 
-    // Breadcrumb A: we reached kernel and framebuffer works
     crumb((kcolor){20, 20, 20});
 
     // Try USB only if we have *some* hint
@@ -63,8 +62,6 @@ void kmain(const boot_info *bi)
     {
         usb_ok = usbdisk_bind_and_enumerate(bi->xhci_mmio_base, bi->acpi_rsdp);
     }
-    // Breadcrumb B: green if usb_ok==0, red otherwise
-    // crumb(usb_ok == 0 ? green : red);
 
     // Mount only when enumeration succeeded
     int mounted = 0;

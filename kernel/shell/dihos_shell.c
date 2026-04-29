@@ -1400,7 +1400,28 @@ static int dihos_cmd_sys_run(dihos_shell_stage *stage)
 
     for (uint32_t i = 1u; i < stage->positional_count; ++i)
     {
+        const char *pos = stage->positional[i];
         uint32_t len = 0u;
+
+        if (pos && strcmp(pos, "out") == 0)
+        {
+            if (i + 2u < stage->positional_count &&
+                stage->positional[i + 1u] &&
+                stage->positional[i + 2u] &&
+                strcmp(stage->positional[i + 1u], "=") == 0)
+            {
+                i += 2u;
+                continue;
+            }
+
+            if (i + 1u < stage->positional_count &&
+                stage->positional[i + 1u] &&
+                stage->positional[i + 1u][0] == '=')
+            {
+                ++i;
+                continue;
+            }
+        }
 
         dihos_copy_trunc(arg_storage[arg_count], sizeof(arg_storage[arg_count]), stage->positional[i]);
         len = (uint32_t)strlen(arg_storage[arg_count]);
