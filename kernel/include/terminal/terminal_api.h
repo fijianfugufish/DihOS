@@ -34,6 +34,7 @@ extern "C"
     void terminal_set_loud();
     void terminal_activate(void);
     int terminal_visible(void);
+    int terminal_open_script(const char *raw_path, const char *friendly_path);
     void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
     void terminal_capture_end(void);
 

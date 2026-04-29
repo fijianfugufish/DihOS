@@ -350,6 +350,88 @@ uint32_t ktext_line_height(const kfont *f, uint32_t scale, int line_spacing)
     return (lh > 0) ? (uint32_t)lh : 0;
 }
 
+static int ktext_hex_nibble(unsigned char c)
+{
+    if (c >= '0' && c <= '9')
+        return (int)(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return (int)(c - 'a') + 10;
+    if (c >= 'A' && c <= 'F')
+        return (int)(c - 'A') + 10;
+    return -1;
+}
+
+static int ktext_try_parse_inline_color(const unsigned char *p,
+                                        kcolor *out_col,
+                                        uint8_t *out_reset,
+                                        uint32_t *out_consumed)
+{
+    int rh = -1;
+    int rl = -1;
+    int gh = -1;
+    int gl = -1;
+    int bh = -1;
+    int bl = -1;
+
+    if (!p || *p != (unsigned char)KTEXT_INLINE_COLOR_CTRL)
+        return 0;
+
+    if (p[1] == '.')
+    {
+        if (out_reset)
+            *out_reset = 1;
+        if (out_consumed)
+            *out_consumed = 2;
+        return 1;
+    }
+
+    if (p[1] != '<')
+    {
+        if (out_reset)
+            *out_reset = 0;
+        if (out_consumed)
+            *out_consumed = 1;
+        return 1;
+    }
+
+    if (p[2] == '\0' || p[3] == '\0' || p[4] == '\0' || p[5] == '\0' ||
+        p[6] == '\0' || p[7] == '\0' || p[8] != '>')
+    {
+        if (out_reset)
+            *out_reset = 0;
+        if (out_consumed)
+            *out_consumed = 1;
+        return 1;
+    }
+
+    rh = ktext_hex_nibble(p[2]);
+    rl = ktext_hex_nibble(p[3]);
+    gh = ktext_hex_nibble(p[4]);
+    gl = ktext_hex_nibble(p[5]);
+    bh = ktext_hex_nibble(p[6]);
+    bl = ktext_hex_nibble(p[7]);
+    if (rh < 0 || rl < 0 || gh < 0 || gl < 0 || bh < 0 || bl < 0)
+    {
+        if (out_reset)
+            *out_reset = 0;
+        if (out_consumed)
+            *out_consumed = 1;
+        return 1;
+    }
+
+    if (out_col)
+    {
+        out_col->r = (uint8_t)((rh << 4) | rl);
+        out_col->g = (uint8_t)((gh << 4) | gl);
+        out_col->b = (uint8_t)((bh << 4) | bl);
+    }
+    if (out_reset)
+        *out_reset = 0;
+    if (out_consumed)
+        *out_consumed = 9;
+    return 1;
+}
+
 uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, int char_spacing)
 {
     if (!f || !s || scale == 0)
@@ -363,6 +445,15 @@ uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, in
 
     while (*p && *p != '\n')
     {
+        uint32_t consumed = 0;
+        uint8_t was_reset = 0;
+        if (ktext_try_parse_inline_color(p, 0, &was_reset, &consumed))
+        {
+            (void)was_reset;
+            p += consumed;
+            continue;
+        }
+
         uint32_t gi = (uint32_t)(*p++);
         uint32_t adv;
         if (gi < f->glyph_count && f->tight_width[gi] != 0)
@@ -395,23 +486,36 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
                        int char_spacing, int line_spacing)
 {
     uint32_t font_h_scaled = 0;
+    kcolor active_col = col;
 
     if (!f || !s || !f->glyphs || f->w == 0 || f->h == 0 || scale == 0)
         return;
     font_h_scaled = ktext_scale_mul_px(f->h, scale);
     const int start_x = x;
 
-    for (const unsigned char *p = (const unsigned char *)s; *p; ++p)
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p)
     {
         if (*p == '\n')
         {
             // newline: move to next baseline
             x = start_x;
             y += (int)font_h_scaled + line_spacing;
+            ++p;
             continue;
         }
 
-        uint32_t gi = (uint32_t)(*p);
+        uint32_t consumed = 0;
+        uint8_t was_reset = 0;
+        kcolor parsed_col = {0, 0, 0};
+        if (ktext_try_parse_inline_color(p, &parsed_col, &was_reset, &consumed))
+        {
+            active_col = was_reset ? col : parsed_col;
+            p += consumed;
+            continue;
+        }
+
+        uint32_t gi = (uint32_t)(*p++);
         uint8_t left = f->w; // default for empty
         uint8_t tw = 0;
 
@@ -447,7 +551,7 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
         // draw bitmap columns in the tight range
         if (draw_cols)
         {
-            draw_glyph_tight_scaled(f, gi, x, y, scale, col, alpha);
+            draw_glyph_tight_scaled(f, gi, x, y, scale, active_col, alpha);
         }
 
         // advance pen
@@ -462,6 +566,7 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
                           int char_spacing, int line_spacing, ktext_align align)
 {
     uint32_t font_h_scaled = 0;
+    kcolor active_col = col;
 
     if (!f || !s || !f->glyphs || f->w == 0 || f->h == 0 || scale == 0)
         return;
@@ -489,9 +594,19 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
         }
 
         // 3) draw chars of this line (stop at '\n' or '\0')
-        for (; *p && *p != '\n'; ++p)
+        while (*p && *p != '\n')
         {
-            uint32_t gi = (uint32_t)(*p);
+            uint32_t consumed = 0;
+            uint8_t was_reset = 0;
+            kcolor parsed_col = {0, 0, 0};
+            if (ktext_try_parse_inline_color(p, &parsed_col, &was_reset, &consumed))
+            {
+                active_col = was_reset ? col : parsed_col;
+                p += consumed;
+                continue;
+            }
+
+            uint32_t gi = (uint32_t)(*p++);
             uint8_t left = f->w;
             uint8_t tw = 0;
 
@@ -522,7 +637,7 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
 
             if (draw_cols)
             {
-                draw_glyph_tight_scaled(f, gi, x, y, scale, col, alpha);
+                draw_glyph_tight_scaled(f, gi, x, y, scale, active_col, alpha);
             }
 
             x += (int)ktext_scale_mul_px(adv, scale);
@@ -568,6 +683,7 @@ void ktext_draw_str_align_outline(
         return;
 
     uint32_t font_h_scaled = ktext_scale_mul_px(f->h, scale);
+    kcolor active_fill = fill;
     const unsigned char *p = (const unsigned char *)s;
 
     while (*p)
@@ -591,9 +707,19 @@ void ktext_draw_str_align_outline(
         }
 
         // 3) draw glyphs in this line
-        for (; *p && *p != '\n'; ++p)
+        while (*p && *p != '\n')
         {
-            uint32_t gi = (uint32_t)(*p);
+            uint32_t consumed = 0;
+            uint8_t was_reset = 0;
+            kcolor parsed_col = {0, 0, 0};
+            if (ktext_try_parse_inline_color(p, &parsed_col, &was_reset, &consumed))
+            {
+                active_fill = was_reset ? fill : parsed_col;
+                p += consumed;
+                continue;
+            }
+
+            uint32_t gi = (uint32_t)(*p++);
             uint8_t left = f->w, tw = 0;
 
             if (gi < f->glyph_count)
@@ -627,7 +753,7 @@ void ktext_draw_str_align_outline(
             // Fill pass
             if (tw != 0 && left < f->w)
             {
-                draw_glyph_tight_scaled(f, gi, x, y, scale, fill, fill_alpha);
+                draw_glyph_tight_scaled(f, gi, x, y, scale, active_fill, fill_alpha);
             }
             // spaces/empty just advance
 

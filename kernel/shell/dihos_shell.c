@@ -13,18 +13,16 @@
 #include "i2c/i2c1_hidi2c.h"
 #include "kwrappers/kfile.h"
 #include "kwrappers/string.h"
+#include "system/dihos_time.h"
 #include "terminal/terminal_api.h"
 #include <stddef.h>
 #include <stdint.h>
 
 extern const boot_info *k_bootinfo_ptr;
 
-#define DIHOS_SHELL_HISTORY_MAX 32u
-#define DIHOS_SHELL_HISTORY_ENTRY_CAP DIHOS_SHELL_LINE_CAP
 #define DIHOS_SHELL_TOKEN_MAX 64u
 #define DIHOS_SHELL_ARG_MAX 24u
 #define DIHOS_SHELL_PIPELINE_MAX 8u
-#define DIHOS_SHELL_CAPTURE_CAP 65536u
 #define DIHOS_SHELL_TAIL_RING_MAX 128u
 
 typedef enum
@@ -50,6 +48,7 @@ typedef struct
 
 typedef struct dihos_shell_stage
 {
+    dihos_shell_session *session;
     const char *name;
     const char *stdin_text;
     uint32_t stdin_len;
@@ -90,8 +89,43 @@ typedef struct
     uint8_t truncated;
 } dihos_capture_buffer;
 
-static dihos_shell_state G_shell;
-static char G_pipe_buffers[2][DIHOS_SHELL_CAPTURE_CAP];
+static dihos_shell_session G_default_shell;
+static dihos_shell_session *G_active_shell = &G_default_shell;
+
+static void dihos_shell_default_print(const char *text, void *user);
+static void dihos_shell_default_print_inline(const char *text, void *user);
+static void dihos_shell_default_warn(const char *text, void *user);
+static void dihos_shell_default_error(const char *text, void *user);
+static void dihos_shell_default_success(const char *text, void *user);
+static void dihos_shell_default_clear(void *user);
+static void dihos_terminal_capture_begin_raw(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
+static void dihos_terminal_capture_end_raw(void);
+static dihos_shell_session *dihos_current_shell(void);
+static void dihos_shell_output_print(dihos_shell_session *session, const char *text);
+static void dihos_shell_output_print_inline(dihos_shell_session *session, const char *text);
+static void dihos_shell_output_warn(dihos_shell_session *session, const char *text);
+static void dihos_shell_output_error(dihos_shell_session *session, const char *text);
+static void dihos_shell_output_success(dihos_shell_session *session, const char *text);
+static void dihos_shell_output_clear(dihos_shell_session *session);
+static void dihos_shell_output_inline_hex64(dihos_shell_session *session, uint64_t value);
+static void dihos_shell_output_inline_hex32(dihos_shell_session *session, uint32_t value);
+static void dihos_shell_output_inline_hex8(dihos_shell_session *session, uint32_t value);
+static void dihos_shell_capture_begin(dihos_shell_session *session, uint8_t mirror_to_terminal,
+                                      dihos_shell_capture_sink_fn sink, void *user);
+static void dihos_shell_capture_end(dihos_shell_session *session);
+
+#define G_shell (*dihos_current_shell())
+#define terminal_print(text) dihos_shell_output_print(dihos_current_shell(), (text))
+#define terminal_print_inline(text) dihos_shell_output_print_inline(dihos_current_shell(), (text))
+#define terminal_warn(text) dihos_shell_output_warn(dihos_current_shell(), (text))
+#define terminal_error(text) dihos_shell_output_error(dihos_current_shell(), (text))
+#define terminal_success(text) dihos_shell_output_success(dihos_current_shell(), (text))
+#define terminal_clear_no_flush() dihos_shell_output_clear(dihos_current_shell())
+#define terminal_print_inline_hex64(value) dihos_shell_output_inline_hex64(dihos_current_shell(), (value))
+#define terminal_print_inline_hex32(value) dihos_shell_output_inline_hex32(dihos_current_shell(), (value))
+#define terminal_print_inline_hex8(value) dihos_shell_output_inline_hex8(dihos_current_shell(), (value))
+#define terminal_capture_begin(mirror, sink, user) dihos_shell_capture_begin(dihos_current_shell(), (mirror), (sink), (user))
+#define terminal_capture_end() dihos_shell_capture_end(dihos_current_shell())
 
 static int dihos_cmd_sys_help(dihos_shell_stage *stage);
 static int dihos_cmd_sys_clear(dihos_shell_stage *stage);
@@ -100,6 +134,8 @@ static int dihos_cmd_sys_about(dihos_shell_stage *stage);
 static int dihos_cmd_sys_boot(dihos_shell_stage *stage);
 static int dihos_cmd_sys_history(dihos_shell_stage *stage);
 static int dihos_cmd_sys_status(dihos_shell_stage *stage);
+static int dihos_cmd_sys_time(dihos_shell_stage *stage);
+static int dihos_cmd_sys_run(dihos_shell_stage *stage);
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_cd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_list(dihos_shell_stage *stage);
@@ -126,6 +162,8 @@ static const dihos_shell_command G_commands[] = {
     {"sys:boot", "sys:boot", "Show boot and firmware hints.", 0u, dihos_cmd_sys_boot},
     {"sys:history", "sys:history", "Show recent DIHOS commands.", 0u, dihos_cmd_sys_history},
     {"sys:status", "sys:status", "Show current shell and device status.", 0u, dihos_cmd_sys_status},
+    {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
+    {"sys:run", "sys:run [path] [args...] [out=name]", "Run a .sac script in this terminal session.", 1u, dihos_cmd_sys_run},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -148,6 +186,31 @@ static const dihos_shell_command G_commands[] = {
 static int dihos_is_space(char ch)
 {
     return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+}
+
+static char dihos_lower_ascii(char ch)
+{
+    if (ch >= 'A' && ch <= 'Z')
+        return (char)(ch - 'A' + 'a');
+    return ch;
+}
+
+static int dihos_has_sac_extension(const char *path)
+{
+    uint32_t len = 0u;
+
+    if (!path)
+        return 0;
+
+    len = (uint32_t)strlen(path);
+    if (len < 4u)
+        return 0;
+
+    path += len - 4u;
+    return dihos_lower_ascii(path[0]) == '.' &&
+           dihos_lower_ascii(path[1]) == 's' &&
+           dihos_lower_ascii(path[2]) == 'a' &&
+           dihos_lower_ascii(path[3]) == 'c';
 }
 
 static uint8_t dihos_is_yes(const char *value)
@@ -200,6 +263,195 @@ static int dihos_append_cstr(char *dst, uint32_t cap, const char *src)
 
     dst[len + i] = 0;
     return 0;
+}
+
+static void dihos_shell_default_print(const char *text, void *user)
+{
+    (void)user;
+    (terminal_print)(text);
+}
+
+static void dihos_shell_default_print_inline(const char *text, void *user)
+{
+    (void)user;
+    (terminal_print_inline)(text);
+}
+
+static void dihos_shell_default_warn(const char *text, void *user)
+{
+    (void)user;
+    (terminal_warn)(text);
+}
+
+static void dihos_shell_default_error(const char *text, void *user)
+{
+    (void)user;
+    (terminal_error)(text);
+}
+
+static void dihos_shell_default_success(const char *text, void *user)
+{
+    (void)user;
+    (terminal_success)(text);
+}
+
+static void dihos_shell_default_clear(void *user)
+{
+    (void)user;
+    (terminal_clear_no_flush)();
+}
+
+static void dihos_terminal_capture_begin_raw(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user)
+{
+    (terminal_capture_begin)(mirror_to_terminal, sink, user);
+}
+
+static void dihos_terminal_capture_end_raw(void)
+{
+    (terminal_capture_end)();
+}
+
+static dihos_shell_session *dihos_current_shell(void)
+{
+    return G_active_shell ? G_active_shell : &G_default_shell;
+}
+
+static void dihos_shell_capture_feed(dihos_shell_session *session, const char *prefix,
+                                     const char *text, uint8_t append_newline)
+{
+    uint32_t text_len = 0u;
+
+    if (!session || !session->capture_sink)
+        return;
+
+    if (prefix && prefix[0])
+        session->capture_sink(prefix, (uint32_t)strlen(prefix), session->capture_user);
+    if (text && text[0])
+    {
+        text_len = (uint32_t)strlen(text);
+        session->capture_sink(text, text_len, session->capture_user);
+    }
+    if (append_newline && (!text || text_len == 0u || text[text_len - 1u] != '\n'))
+        session->capture_sink("\n", 1u, session->capture_user);
+}
+
+static void dihos_shell_output_print(dihos_shell_session *session, const char *text)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_shell_capture_feed(session, "", text, 1u);
+    if (session->capture_sink && !session->capture_mirror)
+        return;
+    if (session->io.print)
+        session->io.print(text ? text : "", session->io.user);
+}
+
+static void dihos_shell_output_print_inline(dihos_shell_session *session, const char *text)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_shell_capture_feed(session, "", text, 0u);
+    if (session->capture_sink && !session->capture_mirror)
+        return;
+    if (session->io.print_inline)
+        session->io.print_inline(text ? text : "", session->io.user);
+}
+
+static void dihos_shell_output_warn(dihos_shell_session *session, const char *text)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_shell_capture_feed(session, "[WARN] ", text, 1u);
+    if (session->capture_sink && !session->capture_mirror)
+        return;
+    if (session->io.warn)
+        session->io.warn(text ? text : "", session->io.user);
+}
+
+static void dihos_shell_output_error(dihos_shell_session *session, const char *text)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_shell_capture_feed(session, "[ERROR] ", text, 1u);
+    if (session->capture_sink && !session->capture_mirror)
+        return;
+    if (session->io.error)
+        session->io.error(text ? text : "", session->io.user);
+}
+
+static void dihos_shell_output_success(dihos_shell_session *session, const char *text)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_shell_capture_feed(session, "[SUCCESS] ", text, 1u);
+    if (session->capture_sink && !session->capture_mirror)
+        return;
+    if (session->io.success)
+        session->io.success(text ? text : "", session->io.user);
+}
+
+static void dihos_shell_output_clear(dihos_shell_session *session)
+{
+    if (!session)
+        session = &G_default_shell;
+    if (session->io.clear)
+        session->io.clear(session->io.user);
+}
+
+static void dihos_shell_hex_to_text(uint64_t value, uint8_t digits, char *out)
+{
+    const char *hex = "0123456789ABCDEF";
+
+    out[0] = '0';
+    out[1] = 'x';
+    for (uint8_t i = 0u; i < digits; ++i)
+    {
+        uint8_t shift = (uint8_t)((digits - 1u - i) * 4u);
+        out[2u + i] = hex[(value >> shift) & 0xFu];
+    }
+    out[2u + digits] = 0;
+}
+
+static void dihos_shell_output_inline_hex64(dihos_shell_session *session, uint64_t value)
+{
+    char buf[19];
+    dihos_shell_hex_to_text(value, 16u, buf);
+    dihos_shell_output_print_inline(session, buf);
+}
+
+static void dihos_shell_output_inline_hex32(dihos_shell_session *session, uint32_t value)
+{
+    char buf[11];
+    dihos_shell_hex_to_text(value, 8u, buf);
+    dihos_shell_output_print_inline(session, buf);
+}
+
+static void dihos_shell_output_inline_hex8(dihos_shell_session *session, uint32_t value)
+{
+    char buf[5];
+    dihos_shell_hex_to_text((uint8_t)value, 2u, buf);
+    dihos_shell_output_print_inline(session, buf);
+}
+
+static void dihos_shell_capture_begin(dihos_shell_session *session, uint8_t mirror_to_terminal,
+                                      dihos_shell_capture_sink_fn sink, void *user)
+{
+    if (!session)
+        session = &G_default_shell;
+    session->capture_mirror = mirror_to_terminal ? 1u : 0u;
+    session->capture_sink = sink;
+    session->capture_user = user;
+    dihos_terminal_capture_begin_raw(mirror_to_terminal, sink, user);
+}
+
+static void dihos_shell_capture_end(dihos_shell_session *session)
+{
+    if (!session)
+        session = &G_default_shell;
+    dihos_terminal_capture_end_raw();
+    session->capture_mirror = 0u;
+    session->capture_sink = 0;
+    session->capture_user = 0;
 }
 
 static void dihos_update_prompt(void)
@@ -472,6 +724,28 @@ static void dihos_capture_sink(const char *text, uint32_t len, void *user)
     capture->dst[capture->len] = 0;
 }
 
+static void dihos_external_terminal_sink(const char *text, uint32_t len, void *user)
+{
+    dihos_shell_session *session = (dihos_shell_session *)user;
+    char chunk[256];
+    uint32_t copied = 0u;
+
+    if (!session || !text || len == 0u)
+        return;
+
+    while (copied < len)
+    {
+        uint32_t take = len - copied;
+        if (take >= sizeof(chunk))
+            take = (uint32_t)sizeof(chunk) - 1u;
+
+        memcpy(chunk, text + copied, take);
+        chunk[take] = 0;
+        dihos_shell_output_print_inline(session, chunk);
+        copied += take;
+    }
+}
+
 static int dihos_tokenize(char *line, dihos_token *tokens, uint32_t *out_count)
 {
     char *read = line;
@@ -637,6 +911,7 @@ static int dihos_execute_stage(dihos_token *tokens, uint32_t start, uint32_t end
         return -1;
 
     memset(&stage, 0, sizeof(stage));
+    stage.session = dihos_current_shell();
     stage.name = tokens[start].text;
     stage.stdin_text = stdin_text ? stdin_text : "";
     stage.stdin_len = stdin_present ? stdin_len : 0u;
@@ -711,7 +986,9 @@ static int dihos_execute_stage(dihos_token *tokens, uint32_t start, uint32_t end
     }
     else
     {
+        dihos_terminal_capture_begin_raw(0u, dihos_external_terminal_sink, dihos_current_shell());
         rc = command->handler(&stage);
+        dihos_terminal_capture_end_raw();
     }
 
     return rc;
@@ -729,7 +1006,7 @@ static int dihos_execute_pipeline(dihos_token *tokens, uint32_t *cmd_starts,
     for (i = 0; i < stage_count; ++i)
     {
         uint8_t capture_only = (i + 1u < stage_count) ? 1u : 0u;
-        char *capture_dst = capture_only ? G_pipe_buffers[i & 1u] : 0;
+        char *capture_dst = capture_only ? G_shell.pipe_buffers[i & 1u] : 0;
 
         if (capture_only && capture_dst)
             capture_dst[0] = 0;
@@ -914,6 +1191,8 @@ static int dihos_cmd_sys_help(dihos_shell_stage *stage)
             return -1;
         }
 
+        terminal_print_inline("\n");
+
         dihos_print_label_value("name: ", cmd->name);
         dihos_print_label_value("usage: ", cmd->usage);
         dihos_print_label_value("about: ", cmd->summary);
@@ -1044,6 +1323,176 @@ static int dihos_cmd_sys_status(dihos_shell_stage *stage)
     terminal_print_inline("touchpad_online: ");
     terminal_print_inline((tpd && tpd->online) ? "yes\n" : "no\n");
     return 0;
+}
+
+static int dihos_cmd_sys_time(dihos_shell_stage *stage)
+{
+    const char *mode = dihos_stage_named(stage, "mode");
+    const char *base = dihos_stage_named(stage, "base");
+    uint64_t value = 0u;
+
+    if (!mode || strcmp(mode, "ticks") == 0)
+        value = dihos_time_ticks();
+    else if (strcmp(mode, "seconds") == 0)
+        value = dihos_time_seconds();
+    else if (strcmp(mode, "fattime") == 0)
+        value = (uint64_t)dihos_time_fattime();
+    else
+    {
+        terminal_error("sys:time mode must be ticks, seconds, or fattime");
+        return -1;
+    }
+
+    if (base && strcmp(base, "hex") == 0)
+    {
+        terminal_print_inline_hex64(value);
+        terminal_print_inline("\n");
+    }
+    else
+    {
+        dihos_print_dec_value(value);
+        terminal_print_inline("\n");
+    }
+
+    return 0;
+}
+
+static int dihos_cmd_sys_run(dihos_shell_stage *stage)
+{
+    char friendly[DIHOS_SHELL_PATH_CAP];
+    char raw[DIHOS_SHELL_PATH_CAP];
+    char arg_storage[DIHOS_SCRIPT_MAX_ARGS][DIHOS_SCRIPT_VAR_VALUE_CAP];
+    const char *script_args[DIHOS_SCRIPT_MAX_ARGS];
+    const char *stdin_text = 0;
+    uint32_t stdin_len = 0u;
+    uint32_t stdin_pos = 0u;
+    uint32_t arg_count = 0u;
+    uint8_t have_stdin = 0u;
+    char stdin_line[DIHOS_SCRIPT_VAR_VALUE_CAP];
+    dihos_script_runner runner;
+    int rc = 0;
+
+    G_shell.run_status_text[0] = 0;
+
+    if (stage->positional_count == 0u)
+    {
+        terminal_error("sys:run needs a script path");
+        return -1;
+    }
+
+    if (dihos_resolve_raw_path(stage->positional[0], friendly, raw) != 0)
+    {
+        terminal_error("invalid script path");
+        return -1;
+    }
+
+    if (!dihos_has_sac_extension(friendly))
+    {
+        terminal_error("sys:run only supports .sac scripts");
+        return -1;
+    }
+
+    if (stage->positional_count > 1u + DIHOS_SCRIPT_MAX_ARGS)
+    {
+        terminal_error("sys:run supports up to 16 script args");
+        return -1;
+    }
+
+    for (uint32_t i = 1u; i < stage->positional_count; ++i)
+    {
+        uint32_t len = 0u;
+
+        dihos_copy_trunc(arg_storage[arg_count], sizeof(arg_storage[arg_count]), stage->positional[i]);
+        len = (uint32_t)strlen(arg_storage[arg_count]);
+        while (len > 0u && arg_storage[arg_count][len - 1u] == ',')
+            arg_storage[arg_count][--len] = 0;
+
+        if (!arg_storage[arg_count][0])
+            continue;
+
+        script_args[arg_count] = arg_storage[arg_count];
+        ++arg_count;
+    }
+
+    if (stage->has_stdin)
+    {
+        have_stdin = 1u;
+        stdin_text = stage->stdin_text ? stage->stdin_text : "";
+        stdin_len = stage->stdin_len;
+    }
+    else if (dihos_stage_named(stage, "stdin"))
+    {
+        have_stdin = 1u;
+        stdin_text = dihos_stage_named(stage, "stdin");
+        stdin_len = (uint32_t)strlen(stdin_text);
+    }
+    else
+    {
+        stdin_text = "";
+        stdin_len = 0u;
+    }
+
+    if (dihos_script_load_file_with_args(&runner, &G_shell, raw, friendly, stdin_text, script_args, arg_count) != 0)
+        return -1;
+
+    for (;;)
+    {
+        rc = dihos_script_step(&runner, DIHOS_SCRIPT_STEP_BUDGET);
+        if (rc < 0)
+            return -1;
+        if (rc > 0)
+            break;
+
+        if (dihos_script_waiting_input(&runner))
+        {
+            if (have_stdin)
+            {
+                uint32_t out_len = 0u;
+                uint8_t have_line = 0u;
+                if (stdin_pos < stdin_len)
+                {
+                    have_line = 1u;
+                    while (stdin_pos < stdin_len)
+                    {
+                        char ch = stdin_text[stdin_pos++];
+
+                        if (ch == '\r')
+                        {
+                            if (stdin_pos < stdin_len && stdin_text[stdin_pos] == '\n')
+                                ++stdin_pos;
+                            break;
+                        }
+                        if (ch == '\n')
+                            break;
+
+                        if (out_len + 1u < sizeof(stdin_line))
+                            stdin_line[out_len++] = ch;
+                    }
+                }
+
+                stdin_line[out_len] = 0;
+
+                if (have_line)
+                {
+                    if (dihos_script_submit_input(&runner, stdin_line) != 0)
+                    {
+                        terminal_error("failed to feed script input");
+                        return -1;
+                    }
+                    continue;
+                }
+
+                terminal_error("sys:run stdin exhausted while script requested input");
+                return -1;
+            }
+
+            terminal_error("sys:run requires piped stdin for input");
+            return -1;
+        }
+    }
+
+    dihos_copy_trunc(G_shell.run_status_text, sizeof(G_shell.run_status_text), dihos_script_exit_text(&runner));
+    return dihos_script_exit_status(&runner);
 }
 
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage)
@@ -1820,15 +2269,60 @@ static int dihos_cmd_text_count(dihos_shell_stage *stage)
     return 0;
 }
 
-void dihos_shell_init(void)
+static dihos_shell_session *dihos_shell_enter(dihos_shell_session *session)
 {
-    memset(&G_shell, 0, sizeof(G_shell));
-    dihos_copy_trunc(G_shell.cwd, sizeof(G_shell.cwd), "/");
-    dihos_history_reset_browse();
-    dihos_update_prompt();
+    dihos_shell_session *previous = G_active_shell;
+    G_active_shell = session ? session : &G_default_shell;
+    return previous;
 }
 
-int dihos_shell_execute_line(const char *line)
+static void dihos_shell_leave(dihos_shell_session *previous)
+{
+    G_active_shell = previous ? previous : &G_default_shell;
+}
+
+static void dihos_shell_set_io_defaults(dihos_shell_session *session, const dihos_shell_io *io)
+{
+    memset(&session->io, 0, sizeof(session->io));
+    if (io)
+        session->io = *io;
+
+    if (!session->io.print)
+        session->io.print = dihos_shell_default_print;
+    if (!session->io.print_inline)
+        session->io.print_inline = dihos_shell_default_print_inline;
+    if (!session->io.warn)
+        session->io.warn = dihos_shell_default_warn;
+    if (!session->io.error)
+        session->io.error = dihos_shell_default_error;
+    if (!session->io.success)
+        session->io.success = dihos_shell_default_success;
+    if (!session->io.clear)
+        session->io.clear = dihos_shell_default_clear;
+}
+
+void dihos_shell_session_init(dihos_shell_session *session, const dihos_shell_io *io)
+{
+    dihos_shell_session *previous = 0;
+
+    if (!session)
+        return;
+
+    memset(session, 0, sizeof(*session));
+    dihos_shell_set_io_defaults(session, io);
+    dihos_copy_trunc(session->cwd, sizeof(session->cwd), "/");
+    previous = dihos_shell_enter(session);
+    dihos_history_reset_browse();
+    dihos_update_prompt();
+    dihos_shell_leave(previous);
+}
+
+void dihos_shell_init(void)
+{
+    dihos_shell_session_init(&G_default_shell, 0);
+}
+
+static int dihos_shell_execute_line_current(const char *line)
 {
     char buffer[DIHOS_SHELL_LINE_CAP];
     dihos_token tokens[DIHOS_SHELL_TOKEN_MAX];
@@ -1878,48 +2372,114 @@ int dihos_shell_execute_line(const char *line)
     return rc;
 }
 
-const char *dihos_shell_prompt(void)
+int dihos_shell_session_execute_line(dihos_shell_session *session, const char *line)
 {
+    dihos_shell_session *previous = dihos_shell_enter(session ? session : &G_default_shell);
+    int rc = dihos_shell_execute_line_current(line);
+    dihos_shell_leave(previous);
+    return rc;
+}
+
+int dihos_shell_execute_line(const char *line)
+{
+    return dihos_shell_session_execute_line(&G_default_shell, line);
+}
+
+const char *dihos_shell_session_prompt(dihos_shell_session *session)
+{
+    dihos_shell_session *previous = 0;
+
+    if (!session)
+        session = &G_default_shell;
+
+    previous = dihos_shell_enter(session);
     if (!G_shell.prompt[0])
         dihos_update_prompt();
-    return G_shell.prompt;
+    dihos_shell_leave(previous);
+    return session->prompt;
+}
+
+const char *dihos_shell_prompt(void)
+{
+    return dihos_shell_session_prompt(&G_default_shell);
+}
+
+int dihos_shell_session_history_prev(dihos_shell_session *session, const char *current_text, char *out, uint32_t out_cap)
+{
+    if (!session)
+        session = &G_default_shell;
+
+    if (!out || out_cap == 0u || session->history_count == 0u)
+        return 0;
+
+    if (session->history_browse_index < 0)
+    {
+        dihos_copy_trunc(session->history_draft, sizeof(session->history_draft),
+                         current_text ? current_text : "");
+        session->history_browse_index = (int)session->history_count - 1;
+    }
+    else if (session->history_browse_index > 0)
+    {
+        session->history_browse_index--;
+    }
+
+    dihos_copy_trunc(out, out_cap, session->history[session->history_browse_index]);
+    return 1;
 }
 
 int dihos_shell_history_prev(const char *current_text, char *out, uint32_t out_cap)
 {
-    if (!out || out_cap == 0u || G_shell.history_count == 0u)
+    return dihos_shell_session_history_prev(&G_default_shell, current_text, out, out_cap);
+}
+
+int dihos_shell_session_history_next(dihos_shell_session *session, const char *current_text, char *out, uint32_t out_cap)
+{
+    (void)current_text;
+
+    if (!session)
+        session = &G_default_shell;
+
+    if (!out || out_cap == 0u || session->history_browse_index < 0)
         return 0;
 
-    if (G_shell.history_browse_index < 0)
+    if (session->history_browse_index < (int)session->history_count - 1)
     {
-        dihos_copy_trunc(G_shell.history_draft, sizeof(G_shell.history_draft),
-                         current_text ? current_text : "");
-        G_shell.history_browse_index = (int)G_shell.history_count - 1;
-    }
-    else if (G_shell.history_browse_index > 0)
-    {
-        G_shell.history_browse_index--;
+        session->history_browse_index++;
+        dihos_copy_trunc(out, out_cap, session->history[session->history_browse_index]);
+        return 1;
     }
 
-    dihos_copy_trunc(out, out_cap, G_shell.history[G_shell.history_browse_index]);
+    session->history_browse_index = -1;
+    dihos_copy_trunc(out, out_cap, session->history_draft);
     return 1;
 }
 
 int dihos_shell_history_next(const char *current_text, char *out, uint32_t out_cap)
 {
-    (void)current_text;
+    return dihos_shell_session_history_next(&G_default_shell, current_text, out, out_cap);
+}
 
-    if (!out || out_cap == 0u || G_shell.history_browse_index < 0)
-        return 0;
+void dihos_shell_session_print(dihos_shell_session *session, const char *text)
+{
+    dihos_shell_output_print(session ? session : &G_default_shell, text);
+}
 
-    if (G_shell.history_browse_index < (int)G_shell.history_count - 1)
-    {
-        G_shell.history_browse_index++;
-        dihos_copy_trunc(out, out_cap, G_shell.history[G_shell.history_browse_index]);
-        return 1;
-    }
+void dihos_shell_session_print_inline(dihos_shell_session *session, const char *text)
+{
+    dihos_shell_output_print_inline(session ? session : &G_default_shell, text);
+}
 
-    G_shell.history_browse_index = -1;
-    dihos_copy_trunc(out, out_cap, G_shell.history_draft);
-    return 1;
+void dihos_shell_session_warn(dihos_shell_session *session, const char *text)
+{
+    dihos_shell_output_warn(session ? session : &G_default_shell, text);
+}
+
+void dihos_shell_session_error(dihos_shell_session *session, const char *text)
+{
+    dihos_shell_output_error(session ? session : &G_default_shell, text);
+}
+
+void dihos_shell_session_success(dihos_shell_session *session, const char *text)
+{
+    dihos_shell_output_success(session ? session : &G_default_shell, text);
 }

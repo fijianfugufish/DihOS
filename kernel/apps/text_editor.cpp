@@ -141,6 +141,410 @@ namespace
         }
     }
 
+    static int ascii_is_space(char ch)
+    {
+        return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+    }
+
+    static int ascii_is_digit(char ch)
+    {
+        return ch >= '0' && ch <= '9';
+    }
+
+    static int ascii_is_name_start(char ch)
+    {
+        return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+    }
+
+    static int ascii_is_name_char(char ch)
+    {
+        return ascii_is_name_start(ch) || ascii_is_digit(ch);
+    }
+
+    static char ascii_lower(char ch)
+    {
+        if (ch >= 'A' && ch <= 'Z')
+            return (char)(ch - 'A' + 'a');
+        return ch;
+    }
+
+    static int token_equals_ci(const char *token, uint32_t token_len, const char *keyword)
+    {
+        uint32_t i = 0u;
+
+        if (!token || !keyword)
+            return 0;
+
+        while (keyword[i])
+        {
+            if (i >= token_len || ascii_lower(token[i]) != ascii_lower(keyword[i]))
+                return 0;
+            ++i;
+        }
+
+        return i == token_len ? 1 : 0;
+    }
+
+    static int line_starts_with_keyword_ci(const char *line, const char *keyword)
+    {
+        uint32_t i = 0u;
+
+        if (!line || !keyword)
+            return 0;
+
+        while (keyword[i])
+        {
+            if (!line[i] || ascii_lower(line[i]) != ascii_lower(keyword[i]))
+                return 0;
+            ++i;
+        }
+
+        return line[i] == 0 || ascii_is_space(line[i]);
+    }
+
+    static int path_has_ext_ci(const char *path, const char *ext)
+    {
+        uint32_t path_len = 0u;
+        uint32_t ext_len = 0u;
+
+        if (!path || !ext)
+            return 0;
+
+        while (path[path_len])
+            ++path_len;
+        while (ext[ext_len])
+            ++ext_len;
+
+        if (path_len < ext_len || ext_len == 0u)
+            return 0;
+
+        for (uint32_t i = 0u; i < ext_len; ++i)
+        {
+            if (ascii_lower(path[path_len - ext_len + i]) != ascii_lower(ext[i]))
+                return 0;
+        }
+
+        return 1;
+    }
+
+    static void sac_newline_behavior(const char *trimmed_line,
+                                     uint8_t *out_indent_next,
+                                     uint8_t *out_insert_end)
+    {
+        uint8_t indent_next = 0u;
+        uint8_t insert_end = 0u;
+
+        if (trimmed_line && trimmed_line[0] && trimmed_line[0] != '#')
+        {
+            if (line_starts_with_keyword_ci(trimmed_line, "if") ||
+                line_starts_with_keyword_ci(trimmed_line, "while") ||
+                line_starts_with_keyword_ci(trimmed_line, "for") ||
+                line_starts_with_keyword_ci(trimmed_line, "fn"))
+            {
+                indent_next = 1u;
+                insert_end = 1u;
+            }
+            else if (line_starts_with_keyword_ci(trimmed_line, "else if") ||
+                     line_starts_with_keyword_ci(trimmed_line, "else"))
+            {
+                indent_next = 1u;
+            }
+        }
+
+        if (out_indent_next)
+            *out_indent_next = indent_next;
+        if (out_insert_end)
+            *out_insert_end = insert_end;
+    }
+
+    static int sac_keyword_token(const char *token, uint32_t token_len)
+    {
+        static const char *kKeywords[] = {
+            "if", "else", "while", "for", "fn", "end",
+            "continue", "break", "return", "let", "unset",
+            "goto", "call", "exit", "input",
+            "add", "sub", "mul", "div", "pow", "mod",
+            "rand", "randrange", "seedrand",
+            "and", "or", "xor", "not", "shl", "shr", "rol", "ror",
+            "cmp", "eq", "neq", "lt", "lte", "gt", "gte", "abs"};
+
+        for (uint32_t i = 0u; i < sizeof(kKeywords) / sizeof(kKeywords[0]); ++i)
+        {
+            if (token_equals_ci(token, token_len, kKeywords[i]))
+                return 1;
+        }
+
+        return 0;
+    }
+
+    static int token_has_known_namespace(const char *token, uint32_t token_len)
+    {
+        static const char *kNamespaces[] = {"sys", "fs", "hw"};
+        uint32_t colon = token_len;
+
+        if (!token || token_len == 0u)
+            return 0;
+
+        for (uint32_t i = 0u; i < token_len; ++i)
+        {
+            if (token[i] == ':')
+            {
+                colon = i;
+                break;
+            }
+        }
+
+        if (colon == 0u || colon >= token_len)
+            return 0;
+
+        for (uint32_t i = 0u; i < sizeof(kNamespaces) / sizeof(kNamespaces[0]); ++i)
+        {
+            if (token_equals_ci(token, colon, kNamespaces[i]))
+                return 1;
+        }
+
+        return 0;
+    }
+
+    static void line_append_char(char *dst, uint32_t cap, uint32_t *len, char ch)
+    {
+        if (!dst || !len || cap == 0u)
+            return;
+
+        if (*len + 1u >= cap)
+            return;
+
+        dst[*len] = ch;
+        ++(*len);
+        dst[*len] = 0;
+    }
+
+    static void line_append_span(char *dst, uint32_t cap, uint32_t *len, const char *src, uint32_t src_len)
+    {
+        if (!dst || !len || !src || cap == 0u)
+            return;
+
+        for (uint32_t i = 0u; i < src_len && *len + 1u < cap; ++i)
+        {
+            dst[*len] = src[i];
+            ++(*len);
+        }
+        dst[*len] = 0;
+    }
+
+    static void line_append_cstr(char *dst, uint32_t cap, uint32_t *len, const char *src)
+    {
+        if (!src)
+            return;
+
+        while (*src && *len + 1u < cap)
+        {
+            dst[*len] = *src;
+            ++(*len);
+            ++src;
+        }
+        dst[*len] = 0;
+    }
+
+    static void line_append_color_set(char *dst, uint32_t cap, uint32_t *len, const char *hex_rgb)
+    {
+        line_append_char(dst, cap, len, KTEXT_INLINE_COLOR_CTRL);
+        line_append_char(dst, cap, len, '<');
+        line_append_cstr(dst, cap, len, hex_rgb);
+        line_append_char(dst, cap, len, '>');
+    }
+
+    static void line_append_color_reset(char *dst, uint32_t cap, uint32_t *len)
+    {
+        line_append_char(dst, cap, len, KTEXT_INLINE_COLOR_CTRL);
+        line_append_char(dst, cap, len, '.');
+    }
+
+    static int sac_line_is_leading_colon_label(const char *src, uint32_t index)
+    {
+        uint32_t i = 0u;
+
+        if (!src || src[index] != ':')
+            return 0;
+
+        for (i = 0u; i < index; ++i)
+        {
+            if (src[i] != ' ' && src[i] != '\t')
+                return 0;
+        }
+
+        return ascii_is_name_start(src[index + 1u]) ? 1 : 0;
+    }
+
+    static void sac_render_highlighted_line(const char *src, char *dst, uint32_t cap)
+    {
+        // Color palette chosen for high contrast against the editor's dark viewport.
+        static const char *kKeyword = "7BC8FF";
+        static const char *kUserVar = "FFA658";
+        static const char *kRuntimeVar = "FFEB7A";
+        static const char *kComment = "7FA18E";
+        static const char *kLabel = "C78DFF";
+        static const char *kCommand = "8CF5D0";
+        static const char *kOperator = "FF9DB5";
+
+        uint32_t out_len = 0u;
+        uint32_t i = 0u;
+
+        if (!dst || cap == 0u)
+            return;
+
+        dst[0] = 0;
+        if (!src)
+            return;
+
+        while (src[i] && out_len + 1u < cap)
+        {
+            uint32_t j = 0u;
+
+            if (src[i] == '#')
+            {
+                line_append_color_set(dst, cap, &out_len, kComment);
+                while (src[i] && out_len + 1u < cap)
+                {
+                    line_append_char(dst, cap, &out_len, src[i]);
+                    ++i;
+                }
+                line_append_color_reset(dst, cap, &out_len);
+                break;
+            }
+
+            if (src[i] == '$')
+            {
+                j = i + 1u;
+                if (src[j] == '{')
+                {
+                    ++j;
+                    while (src[j] && src[j] != '}' && out_len + 1u < cap)
+                        ++j;
+                    if (src[j] == '}')
+                    {
+                        ++j;
+                        line_append_color_set(dst, cap, &out_len, kUserVar);
+                        line_append_span(dst, cap, &out_len, src + i, j - i);
+                        line_append_color_reset(dst, cap, &out_len);
+                        i = j;
+                        continue;
+                    }
+                }
+                else if (ascii_is_name_start(src[j]))
+                {
+                    ++j;
+                    while (ascii_is_name_char(src[j]))
+                        ++j;
+                    line_append_color_set(dst, cap, &out_len, kUserVar);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+            }
+
+            if (src[i] == '%')
+            {
+                j = i + 1u;
+                if (ascii_is_digit(src[j]))
+                {
+                    while (ascii_is_digit(src[j]))
+                        ++j;
+                    line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+                if (ascii_is_name_start(src[j]))
+                {
+                    ++j;
+                    while (src[j] && src[j] != '%')
+                        ++j;
+                    if (src[j] == '%')
+                    {
+                        ++j;
+                        line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                        line_append_span(dst, cap, &out_len, src + i, j - i);
+                        line_append_color_reset(dst, cap, &out_len);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+
+            if (sac_line_is_leading_colon_label(src, i))
+            {
+                j = i + 1u;
+                while (ascii_is_name_char(src[j]))
+                    ++j;
+                line_append_color_set(dst, cap, &out_len, kLabel);
+                line_append_span(dst, cap, &out_len, src + i, j - i);
+                line_append_color_reset(dst, cap, &out_len);
+                i = j;
+                continue;
+            }
+
+            if (ascii_is_name_start(src[i]))
+            {
+                j = i + 1u;
+                while (ascii_is_name_char(src[j]) || src[j] == ':')
+                    ++j;
+
+                if (sac_keyword_token(src + i, j - i))
+                {
+                    line_append_color_set(dst, cap, &out_len, kKeyword);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+
+                if (token_has_known_namespace(src + i, j - i))
+                {
+                    line_append_color_set(dst, cap, &out_len, kCommand);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+            }
+
+            if ((src[i] == '=' && src[i + 1u] == '=') ||
+                (src[i] == '!' && src[i + 1u] == '=') ||
+                (src[i] == '<' && src[i + 1u] == '=') ||
+                (src[i] == '>' && src[i + 1u] == '=') ||
+                (src[i] == '-' && src[i + 1u] == '>') ||
+                (src[i] == '&' && src[i + 1u] == '&') ||
+                (src[i] == '|' && src[i + 1u] == '|'))
+            {
+                line_append_color_set(dst, cap, &out_len, kOperator);
+                line_append_char(dst, cap, &out_len, src[i]);
+                line_append_char(dst, cap, &out_len, src[i + 1u]);
+                line_append_color_reset(dst, cap, &out_len);
+                i += 2u;
+                continue;
+            }
+
+            if (src[i] == '=' || src[i] == '<' || src[i] == '>' || src[i] == '!' ||
+                src[i] == '+' || src[i] == '-' || src[i] == '*' || src[i] == '/' ||
+                src[i] == '%' || src[i] == '^' || src[i] == '&' || src[i] == '~')
+            {
+                line_append_color_set(dst, cap, &out_len, kOperator);
+                line_append_char(dst, cap, &out_len, src[i]);
+                line_append_color_reset(dst, cap, &out_len);
+                ++i;
+                continue;
+            }
+
+            line_append_char(dst, cap, &out_len, src[i]);
+            ++i;
+        }
+
+        dst[out_len] = 0;
+    }
+
     class TextEditor
     {
     public:
@@ -158,7 +562,7 @@ namespace
             TEXT_CAP = 65536,
             MAX_LINES = TEXT_CAP + 1,
             MAX_VISIBLE_LINES = 96,
-            LINE_RENDER_CAP = 384,
+            LINE_RENDER_CAP = 1024,
             STATUS_CAP = 256,
             PATH_CAP = DIHOS_PATH_CAP + 16,
             CARET_BLINK_FRAMES = 30u,
@@ -224,9 +628,11 @@ namespace
         void SetCursorFromVisualLineX(uint32_t visual_idx, int32_t x);
         void RefreshWrapButton();
         void ToggleWrap();
+        int SacEditingEnabled() const;
         void MarkTextChanged();
         void InsertChar(char ch);
         void InsertText(const char *text);
+        void InsertNewlineSmart();
         void Backspace();
         void DeleteForward();
         void PlaceCursorFromMouse(int32_t mouse_x, int32_t mouse_y);
@@ -497,13 +903,8 @@ namespace
     {
         for (uint32_t i = 0; i < MAX_VISIBLE_LINES; ++i)
         {
-            line_objs_[i] = kgfx_obj_add_text(font_, line_buffers_[i], 6, 4, 1,
-                                              rgb(228, 233, 241), 255, 1u, 1, 0,
-                                              KTEXT_ALIGN_LEFT, 0);
-            kgfx_obj_set_parent(line_objs_[i], viewport_);
-            kgfx_obj_set_clip_to_parent(line_objs_[i], 1u);
-            if (kgfx_obj_ref(line_objs_[i]) && kgfx_obj_ref(line_objs_[i])->kind == KGFX_OBJ_TEXT)
-                kgfx_obj_ref(line_objs_[i])->outline_width = 0u;
+            line_objs_[i].idx = -1;
+            line_buffers_[i][0] = 0;
         }
     }
 
@@ -1240,6 +1641,91 @@ namespace
         view_dirty_ = 1u;
     }
 
+    int TextEditor::SacEditingEnabled() const
+    {
+        if (path_has_ext_ci(current_friendly_, ".sac"))
+            return 1;
+        if (path_has_ext_ci(current_raw_, ".sac"))
+            return 1;
+        return 0;
+    }
+
+    void TextEditor::InsertNewlineSmart()
+    {
+        static const char *kIndentUnit = "    ";
+        char indent[128];
+        char trimmed[LINE_RENDER_CAP];
+        uint32_t line_idx = 0u;
+        uint32_t line_start = 0u;
+        uint32_t line_end = 0u;
+        uint32_t i = 0u;
+        uint32_t indent_len = 0u;
+        uint32_t trim_start = 0u;
+        uint32_t trim_end = 0u;
+        uint32_t trim_len = 0u;
+        uint8_t indent_next = 0u;
+        uint8_t insert_end = 0u;
+        uint32_t body_cursor = 0u;
+
+        if (!SacEditingEnabled())
+        {
+            InsertChar('\n');
+            return;
+        }
+
+        line_idx = CursorLine();
+        line_start = LineStart(line_idx);
+        line_end = LineEnd(line_idx);
+        if (cursor_ < line_end)
+            line_end = cursor_;
+
+        i = line_start;
+        while (i < line_end && (buffer_[i] == ' ' || buffer_[i] == '\t'))
+        {
+            if (indent_len + 1u < sizeof(indent))
+                indent[indent_len++] = buffer_[i];
+            ++i;
+        }
+        indent[indent_len] = 0;
+
+        trim_start = line_start;
+        while (trim_start < line_end && (buffer_[trim_start] == ' ' || buffer_[trim_start] == '\t'))
+            ++trim_start;
+
+        trim_end = line_end;
+        while (trim_end > trim_start && (buffer_[trim_end - 1u] == ' ' || buffer_[trim_end - 1u] == '\t'))
+            --trim_end;
+
+        trim_len = trim_end > trim_start ? (trim_end - trim_start) : 0u;
+        if (trim_len >= sizeof(trimmed))
+            trim_len = sizeof(trimmed) - 1u;
+
+        for (i = 0u; i < trim_len; ++i)
+            trimmed[i] = buffer_[trim_start + i];
+        trimmed[trim_len] = 0;
+
+        sac_newline_behavior(trimmed, &indent_next, &insert_end);
+
+        InsertChar('\n');
+        InsertText(indent);
+        if (indent_next)
+            InsertText(kIndentUnit);
+
+        body_cursor = cursor_;
+
+        if (insert_end)
+        {
+            InsertChar('\n');
+            InsertText(indent);
+            InsertText("end");
+            cursor_ = body_cursor;
+            UpdatePreferredFromCursor();
+            ResetCaretBlink();
+            EnsureCursorVisible();
+            view_dirty_ = 1u;
+        }
+    }
+
     void TextEditor::SyncVisibleLines()
     {
         kgfx_obj *viewport = kgfx_obj_ref(viewport_);
@@ -1248,6 +1734,7 @@ namespace
         uint32_t cursor_visual = CursorVisualLine();
         uint32_t total_visual = TotalVisualLines();
         uint8_t caret_visible = CaretVisible();
+        uint8_t sac_mode = SacEditingEnabled() ? 1u : 0u;
         uint32_t pad_x = 6u;
         uint32_t pad_y = 4u;
         uint32_t available_px = 0u;
@@ -1276,14 +1763,29 @@ namespace
             uint32_t used_px = 0u;
             uint32_t column = 0u;
             uint8_t caret_drawn = 0u;
+            char plain_line[LINE_RENDER_CAP];
             kgfx_obj *obj = 0;
 
             if (visual_idx >= total_visual)
                 break;
 
+            if (line_objs_[i].idx < 0)
+            {
+                line_objs_[i] = kgfx_obj_add_text(font_, line_buffers_[i], 6, 4, 1,
+                                                  rgb(228, 233, 241), 255, 1u, 1, 0,
+                                                  KTEXT_ALIGN_LEFT, 0);
+                if (line_objs_[i].idx >= 0)
+                {
+                    kgfx_obj_set_parent(line_objs_[i], viewport_);
+                    kgfx_obj_set_clip_to_parent(line_objs_[i], 1u);
+                    if (kgfx_obj_ref(line_objs_[i]) && kgfx_obj_ref(line_objs_[i])->kind == KGFX_OBJ_TEXT)
+                        kgfx_obj_ref(line_objs_[i])->outline_width = 0u;
+                }
+            }
+
             obj = kgfx_obj_ref(line_objs_[i]);
             if (!obj || obj->kind != KGFX_OBJ_TEXT)
-                continue;
+                break;
 
             if (!VisualSegmentForLine(visual_idx, &line_idx, &start, &end))
                 break;
@@ -1306,7 +1808,7 @@ namespace
                     uint32_t caret_px = MeasureCharPx('|') + 1u;
                     if (available_px == 0u || out_len == 0u || used_px + caret_px <= available_px)
                     {
-                        line_buffers_[i][out_len++] = '|';
+                        plain_line[out_len++] = '|';
                         used_px += caret_px;
                         caret_drawn = 1u;
                     }
@@ -1320,7 +1822,7 @@ namespace
                     if (available_px > 0u && out_len > 0u && used_px + ch_px > available_px)
                         break;
 
-                    line_buffers_[i][out_len++] = buffer_[src++];
+                    plain_line[out_len++] = buffer_[src++];
                     used_px += ch_px;
                     ++column;
                 }
@@ -1331,10 +1833,15 @@ namespace
                 line_idx == cursor_line && column == cursor_column &&
                 out_len + 1u < LINE_RENDER_CAP)
             {
-                line_buffers_[i][out_len++] = '|';
+                plain_line[out_len++] = '|';
             }
 
-            line_buffers_[i][out_len] = 0;
+            plain_line[out_len] = 0;
+            if (sac_mode)
+                sac_render_highlighted_line(plain_line, line_buffers_[i], LINE_RENDER_CAP);
+            else
+                copy_text(line_buffers_[i], LINE_RENDER_CAP, plain_line);
+
             obj->u.text.font = font_;
             obj->u.text.text = line_buffers_[i];
             obj->u.text.x = (int32_t)pad_x;
@@ -1388,12 +1895,28 @@ namespace
 
     void TextEditor::Backspace()
     {
+        uint32_t remove_count = 1u;
+
         if (cursor_ == 0u || len_ == 0u)
             return;
 
-        memmove(buffer_ + cursor_ - 1u, buffer_ + cursor_, len_ - cursor_ + 1u);
-        --cursor_;
-        --len_;
+        if (cursor_ >= 4u)
+        {
+            uint32_t line_start = LineStart(CursorLine());
+            uint32_t column = cursor_ - line_start;
+            if (column >= 4u &&
+                buffer_[cursor_ - 1u] == ' ' &&
+                buffer_[cursor_ - 2u] == ' ' &&
+                buffer_[cursor_ - 3u] == ' ' &&
+                buffer_[cursor_ - 4u] == ' ')
+            {
+                remove_count = 4u;
+            }
+        }
+
+        memmove(buffer_ + cursor_ - remove_count, buffer_ + cursor_, len_ - cursor_ + 1u);
+        cursor_ -= remove_count;
+        len_ -= remove_count;
         MarkTextChanged();
         ResetCaretBlink();
     }
@@ -1673,7 +2196,7 @@ namespace
         }
 
         if (kinput_key_pressed(KEY_ENTER) || kinput_key_pressed(KEY_KP_ENTER))
-            InsertChar('\n');
+            InsertNewlineSmart();
 
         if (kinput_key_pressed(KEY_TAB))
             InsertText("    ");

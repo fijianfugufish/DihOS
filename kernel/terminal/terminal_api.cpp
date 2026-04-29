@@ -7,7 +7,9 @@ extern "C"
 #include "kwrappers/string.h"
 }
 
-static Terminal g_terminal;
+static const int MAX_TERMINALS = 6;
+static Terminal g_terminals[MAX_TERMINALS];
+static kfont *g_terminal_font = 0;
 static terminal_capture_sink_fn g_capture_sink = 0;
 static void *g_capture_user = 0;
 static uint8_t g_capture_mirror = 0;
@@ -32,22 +34,23 @@ static void terminal_capture_feed(const char *prefix, const char *text, uint8_t 
 
 extern "C" void terminal_initialize(kfont *font)
 {
-    g_terminal.Initialize(font);
+    g_terminal_font = font;
+    g_terminals[0].Initialize(font, "Terminal", 0);
 }
 
 extern "C" void terminal_clear(void)
 {
-    g_terminal.Clear();
+    g_terminals[0].Clear();
 }
 
 extern "C" void terminal_clear_no_flush(void)
 {
-    g_terminal.ClearNoFlush();
+    g_terminals[0].ClearNoFlush();
 }
 
 extern "C" void terminal_flush_log(void)
 {
-    g_terminal.FlushLog();
+    g_terminals[0].FlushLog();
 }
 
 extern "C" void terminal_print(const char *s)
@@ -55,7 +58,7 @@ extern "C" void terminal_print(const char *s)
     terminal_capture_feed("", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminal.Print(s);
+    g_terminals[0].Print(s);
 }
 
 extern "C" void terminal_print_inline(const char *s)
@@ -63,7 +66,7 @@ extern "C" void terminal_print_inline(const char *s)
     terminal_capture_feed("", s, 0u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminal.PrintInline(s);
+    g_terminals[0].PrintInline(s);
 }
 
 extern "C" void terminal_warn(const char *s)
@@ -71,7 +74,7 @@ extern "C" void terminal_warn(const char *s)
     terminal_capture_feed("[WARN] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminal.Warn(s);
+    g_terminals[0].Warn(s);
 }
 
 extern "C" void terminal_error(const char *s)
@@ -79,7 +82,7 @@ extern "C" void terminal_error(const char *s)
     terminal_capture_feed("[ERROR] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminal.Error(s);
+    g_terminals[0].Error(s);
 }
 
 extern "C" void terminal_success(const char *s)
@@ -87,37 +90,96 @@ extern "C" void terminal_success(const char *s)
     terminal_capture_feed("[SUCCESS] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminal.Success(s);
+    g_terminals[0].Success(s);
 }
 
 extern "C" void terminal_update_input(void)
 {
-    g_terminal.UpdateInput();
+    for (int i = 0; i < MAX_TERMINALS; ++i)
+    {
+        if (!g_terminals[i].Initialized())
+            continue;
+        g_terminals[i].UpdateScript();
+        g_terminals[i].UpdateInput();
+    }
 }
 
 extern "C" void terminal_toggle_quiet()
 {
-    g_terminal.ToggleQuiet();
+    g_terminals[0].ToggleQuiet();
 }
 
 extern "C" void terminal_set_quiet()
 {
-    g_terminal.SetQuiet();
+    g_terminals[0].SetQuiet();
 }
 
 extern "C" void terminal_set_loud()
 {
-    g_terminal.SetLoud();
+    g_terminals[0].SetLoud();
 }
 
 extern "C" void terminal_activate(void)
 {
-    g_terminal.Activate();
+    g_terminals[0].Activate();
 }
 
 extern "C" int terminal_visible(void)
 {
-    return g_terminal.Visible();
+    return g_terminals[0].Visible();
+}
+
+extern "C" int terminal_open_script(const char *raw_path, const char *friendly_path)
+{
+    if (!g_terminal_font || !raw_path || !raw_path[0])
+        return -1;
+
+    for (int i = 1; i < MAX_TERMINALS; ++i)
+    {
+        if (!g_terminals[i].Initialized())
+            continue;
+
+        if (g_terminals[i].ScriptActive())
+        {
+            if (!g_terminals[i].Visible())
+            {
+                g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
+                if (!g_terminals[i].Initialized())
+                    continue;
+            }
+            else
+            {
+                continue;
+            }
+        }
+
+        if (g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+            return 0;
+
+        if (!g_terminals[i].Visible())
+        {
+            g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
+            if (g_terminals[i].Initialized() &&
+                !g_terminals[i].ScriptActive() &&
+                g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+                return 0;
+        }
+    }
+
+    for (int i = 1; i < MAX_TERMINALS; ++i)
+    {
+        if (!g_terminals[i].Initialized())
+        {
+            g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
+            if (g_terminals[i].Initialized() &&
+                g_terminals[i].StartScript(raw_path, friendly_path) == 0)
+                return 0;
+        }
+    }
+
+    g_terminals[0].Error("no free SAC terminals");
+
+    return -1;
 }
 
 extern "C" void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user)

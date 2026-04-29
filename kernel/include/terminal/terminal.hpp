@@ -6,6 +6,7 @@ extern "C"
 #include "kwrappers/ktext.h"
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
+#include "shell/dihos_shell.h"
 }
 
 class Terminal
@@ -13,7 +14,7 @@ class Terminal
 public:
     Terminal();
 
-    void Initialize(kfont *font);
+    void Initialize(kfont *font, const char *title, int slot_index);
     void Clear();
     void ClearNoFlush();
     void FlushLog();
@@ -31,6 +32,10 @@ public:
     void SetLoud();
     void Activate();
     int Visible() const;
+    int Initialized() const;
+    int ScriptActive() const;
+    int StartScript(const char *raw_path, const char *friendly_path);
+    void UpdateScript();
 
 private:
     static const int LINE_TEXT_CAP = 512;
@@ -60,6 +65,8 @@ private:
     void WriteStyledText(const char *text, kcolor color, int force_new_line);
 
 private:
+    int initialized;
+    int slot_index;
     int x;
     int y;
     int z;
@@ -92,4 +99,8 @@ private:
 
     TerminalLine lines[LINE_HISTORY_MAX];
     kgfx_obj_handle visible_handles[MAX_VISIBLE_LINES];
+    dihos_shell_session shell;
+    dihos_script_runner script;
+    uint8_t script_active;
+    uint8_t script_done_reported;
 };

@@ -12,6 +12,7 @@
 #include "kwrappers/kbutton.h"
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
+#include "system/dihos_time.h"
 #include "apps/desktop_shell_api.h"
 #include "apps/file_explorer_api.h"
 #include "apps/text_editor_api.h"
@@ -28,6 +29,7 @@ extern uint32_t usbdisk_get_lba_offset_lo(void);
 extern void usbh_dbg_dot(int n, unsigned int rgb);
 
 volatile uint32_t *g_fb32 = 0; // expose to usbdisk.c
+volatile uint64_t g_dihos_tick = 0;
 
 static inline void crumb(kcolor c)
 {
@@ -128,15 +130,17 @@ void kmain(const boot_info *bi)
 
     for (;;)
     {
+        ++g_dihos_tick;
+
         kinput_poll();
         kmouse_update();
-        terminal_update_input();
         kwindow_update_all();
         file_explorer_update();
         text_editor_update();
         desktop_shell_update();
         kbutton_update_all();
         ktextbox_update_all();
+        terminal_update_input();
 
         kgfx_render_all(black);
         frame++;

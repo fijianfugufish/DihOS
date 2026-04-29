@@ -4,6 +4,11 @@
 #include "kwrappers/kui_types.h" // kcolor, ktext_align, struct kfont fwd
 #include "memory/pmem.h"
 
+// Inline color tag control byte (not typeable from normal keyboard input):
+//   \x1F<RRGGBB>  -> set current text fill color
+//   \x1F.         -> reset to the base fill color passed to draw call
+#define KTEXT_INLINE_COLOR_CTRL ((char)0x1F)
+
 #ifdef __cplusplus
 extern "C"
 {

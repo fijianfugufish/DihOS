@@ -133,6 +133,97 @@ static void terminal_input_submit(ktextbox_handle textbox, const char *text, voi
     terminal->SubmitInput(text);
 }
 
+static void terminal_session_print(const char *text, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->Print(text);
+}
+
+static void terminal_session_print_inline(const char *text, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->PrintInline(text);
+}
+
+static void terminal_session_warn(const char *text, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->Warn(text);
+}
+
+static void terminal_session_error(const char *text, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->Error(text);
+}
+
+static void terminal_session_success(const char *text, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->Success(text);
+}
+
+static void terminal_session_clear(void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->ClearNoFlush();
+}
+
+static void terminal_i32_to_dec(int value, char *out, uint32_t cap)
+{
+    char tmp[16];
+    uint32_t len = 0u;
+    uint32_t i = 0u;
+    uint32_t magnitude = 0u;
+
+    if (!out || cap == 0u)
+        return;
+
+    if (value < 0)
+    {
+        out[0] = '-';
+        if (cap <= 1u)
+            return;
+        out++;
+        cap--;
+        magnitude = (uint32_t)(-value);
+    }
+    else
+    {
+        magnitude = (uint32_t)value;
+    }
+
+    if (magnitude == 0u)
+    {
+        if (cap > 1u)
+        {
+            out[0] = '0';
+            out[1] = 0;
+        }
+        else
+        {
+            out[0] = 0;
+        }
+        return;
+    }
+
+    while (magnitude && len < sizeof(tmp))
+    {
+        tmp[len++] = (char)('0' + (magnitude % 10u));
+        magnitude /= 10u;
+    }
+
+    while (len > 0u && i + 1u < cap)
+        out[i++] = tmp[--len];
+    out[i] = 0;
+}
+
 static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
 {
     kcolor c = {r, g, b};
@@ -151,6 +242,8 @@ void Terminal::FlushLog()
 
 void Terminal::ResetState()
 {
+    initialized = 0;
+    slot_index = 0;
     x = 1000;
     y = 10;
     z = 20;
@@ -192,6 +285,10 @@ void Terminal::ResetState()
 
     window.idx = -1;
     input_box.idx = -1;
+    script_active = 0u;
+    script_done_reported = 0u;
+    memset(&shell, 0, sizeof(shell));
+    memset(&script, 0, sizeof(script));
 
     for (int i = 0; i < LINE_HISTORY_MAX; ++i)
     {
@@ -265,7 +362,17 @@ void Terminal::LayoutInputBox(int placeholder_y)
     if (!root || root->kind != KGFX_OBJ_RECT)
         return;
 
-    prompt = dihos_shell_prompt();
+    if (script_active)
+    {
+        if (dihos_script_waiting_input(&script))
+            prompt = dihos_script_input_prompt(&script);
+        else
+            prompt = "";
+    }
+    else
+    {
+        prompt = dihos_shell_session_prompt(&shell);
+    }
     if (prompt && prompt[0])
         prompt_px = ktext_measure_line_px(font_ptr, prompt, (uint32_t)scale, 1);
 
@@ -447,7 +554,29 @@ void Terminal::RefreshVisibleLines()
         return;
 
     (void)SyncLayoutFromWindow();
-    prompt = dihos_shell_prompt();
+    if (script_active)
+    {
+        if (dihos_script_waiting_input(&script))
+            prompt = dihos_script_input_prompt(&script);
+        else
+            prompt = "";
+    }
+    else
+    {
+        prompt = dihos_shell_session_prompt(&shell);
+    }
+
+    if (input_box.idx >= 0)
+    {
+        uint8_t allow_input = (!script_active || dihos_script_waiting_input(&script)) ? 1u : 0u;
+        ktextbox_set_enabled(input_box, allow_input);
+        if (!allow_input)
+        {
+            ktextbox_clear(input_box);
+            if (ktextbox_focused(input_box))
+                ktextbox_set_focus(input_box, 0u);
+        }
+    }
 
     if (view_top_line < 0)
         view_top_line = 0;
@@ -527,12 +656,35 @@ void Terminal::RefreshVisibleLines()
     LayoutInputBox(placeholder_y);
 }
 
-void Terminal::Initialize(kfont *font)
+void Terminal::Initialize(kfont *font, const char *title, int new_slot_index)
 {
+    dihos_shell_io io;
+
     ResetState();
-    dihos_shell_init();
+    slot_index = new_slot_index;
+    x = 1000 - (new_slot_index * 34);
+    y = 10 + (new_slot_index * 34);
+    if (x < 40)
+        x = 40 + (new_slot_index * 12);
+    if (y > 180)
+        y = 30 + (new_slot_index * 18);
+
+    memset(&io, 0, sizeof(io));
+    io.print = terminal_session_print;
+    io.print_inline = terminal_session_print_inline;
+    io.warn = terminal_session_warn;
+    io.error = terminal_session_error;
+    io.success = terminal_session_success;
+    io.clear = terminal_session_clear;
+    io.user = this;
+    dihos_shell_session_init(&shell, &io);
+
     font_ptr = font;
-    window = kwindow_create(x, y, width, height, z, font_ptr, "Terminal", &window_style);
+    window = kwindow_create(x, y, width, height, z + new_slot_index, font_ptr, title ? title : "Terminal", &window_style);
+    if (window.idx < 0)
+        return;
+
+    initialized = 1;
 
     if (font_ptr)
     {
@@ -559,7 +711,8 @@ void Terminal::Initialize(kfont *font)
     RefreshVisibleLines();
 
     KFile f;
-    if (kfile_open(&f, "0:/OS/System/Logs/terminal.txt",
+    if (slot_index == 0 &&
+        kfile_open(&f, "0:/OS/System/Logs/terminal.txt",
                    KFILE_WRITE | KFILE_CREATE | KFILE_TRUNC) == 0)
     {
         kfile_close(&f);
@@ -592,7 +745,8 @@ void Terminal::ClearNoFlush()
 
 void Terminal::SubmitInput(const char *text)
 {
-    const char *prompt = dihos_shell_prompt();
+    const char *prompt = dihos_shell_session_prompt(&shell);
+    const char *script_prompt = 0;
     char echoed[DIHOS_SHELL_PROMPT_CAP + DIHOS_SHELL_LINE_CAP];
     char submitted[DIHOS_SHELL_LINE_CAP];
 
@@ -604,6 +758,21 @@ void Terminal::SubmitInput(const char *text)
 
     if (input_box.idx >= 0)
         ktextbox_clear(input_box);
+
+    if (script_active && dihos_script_waiting_input(&script))
+    {
+        ksb builder;
+        script_prompt = dihos_script_input_prompt(&script);
+        ksb_init(&builder, echoed, sizeof(echoed));
+        if (script_prompt && script_prompt[0])
+            ksb_puts(&builder, script_prompt);
+        ksb_puts(&builder, submitted);
+        Print(echoed);
+
+        (void)dihos_script_submit_input(&script, submitted);
+        RefreshVisibleLines();
+        return;
+    }
 
     if (!submitted[0])
     {
@@ -621,7 +790,7 @@ void Terminal::SubmitInput(const char *text)
 
     Print(echoed);
 
-    (void)dihos_shell_execute_line(submitted);
+    (void)dihos_shell_session_execute_line(&shell, submitted);
     RefreshVisibleLines();
 }
 
@@ -754,6 +923,85 @@ int Terminal::Visible() const
     return kwindow_visible(window);
 }
 
+int Terminal::Initialized() const
+{
+    return initialized;
+}
+
+int Terminal::ScriptActive() const
+{
+    return script_active ? 1 : 0;
+}
+
+int Terminal::StartScript(const char *raw_path, const char *friendly_path)
+{
+    char title[96];
+    ksb builder;
+
+    if (!initialized || window.idx < 0 || !raw_path || !raw_path[0])
+        return -1;
+
+    ksb_init(&builder, title, sizeof(title));
+    ksb_puts(&builder, "SAC Script");
+    if (friendly_path && friendly_path[0])
+    {
+        ksb_puts(&builder, ": ");
+        ksb_puts(&builder, friendly_path);
+    }
+    kwindow_set_title(window, title);
+
+    ClearNoFlush();
+    PrintInline("running ");
+    Print(friendly_path && friendly_path[0] ? friendly_path : raw_path);
+
+    if (dihos_script_load_file(&script, &shell, raw_path, friendly_path) != 0)
+    {
+        script_active = 0u;
+        script_done_reported = 1u;
+        Activate();
+        return 0;
+    }
+
+    script_active = 1u;
+    script_done_reported = 0u;
+    Activate();
+    return 0;
+}
+
+void Terminal::UpdateScript()
+{
+    char status[16];
+    int was_waiting = 0;
+
+    if (!script_active)
+        return;
+
+    was_waiting = dihos_script_waiting_input(&script);
+    (void)dihos_script_step(&script, DIHOS_SCRIPT_STEP_BUDGET);
+    if (!was_waiting && dihos_script_waiting_input(&script))
+        RefreshVisibleLines();
+    if (!dihos_script_finished(&script))
+        return;
+
+    script_active = 0u;
+    if (script_done_reported)
+        return;
+
+    terminal_i32_to_dec(dihos_script_exit_status(&script), status, sizeof(status));
+    if (dihos_script_exit_status(&script) == 0)
+    {
+        Print("script exited status ");
+        Success(status);
+    }
+    else
+    {
+        Print("script exited status ");
+        Error(status);
+    }
+    script_done_reported = 1u;
+    RefreshVisibleLines();
+}
+
 void Terminal::UpdateInput()
 {
     kmouse_state mouse = {0};
@@ -802,17 +1050,18 @@ void Terminal::UpdateInput()
         ktextbox_set_focus(input_box, 1);
     }
 
-    if (input_box.idx >= 0 && ktextbox_focused(input_box))
+    if (input_box.idx >= 0 && ktextbox_focused(input_box) &&
+        (!script_active || !dihos_script_waiting_input(&script)))
     {
         char recalled[DIHOS_SHELL_LINE_CAP];
 
         if (kinput_key_pressed(KEY_UP) &&
-            dihos_shell_history_prev(ktextbox_text(input_box), recalled, sizeof(recalled)))
+            dihos_shell_session_history_prev(&shell, ktextbox_text(input_box), recalled, sizeof(recalled)))
         {
             ktextbox_set_text(input_box, recalled);
         }
         else if (kinput_key_pressed(KEY_DOWN) &&
-                 dihos_shell_history_next(ktextbox_text(input_box), recalled, sizeof(recalled)))
+                 dihos_shell_session_history_next(&shell, ktextbox_text(input_box), recalled, sizeof(recalled)))
         {
             ktextbox_set_text(input_box, recalled);
         }

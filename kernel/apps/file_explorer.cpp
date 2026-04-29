@@ -1,5 +1,6 @@
 #include "apps/file_explorer_api.h"
 #include "apps/text_editor_api.h"
+#include "terminal/terminal_api.h"
 
 extern "C"
 {
@@ -118,6 +119,33 @@ namespace
         return strcmp(a, b) == 0;
     }
 
+    static char lower_ascii(char ch)
+    {
+        if (ch >= 'A' && ch <= 'Z')
+            return (char)(ch - 'A' + 'a');
+        return ch;
+    }
+
+    static int has_sac_extension(const char *name)
+    {
+        uint32_t len = 0u;
+        const char *ext = ".sac";
+
+        if (!name)
+            return 0;
+
+        len = (uint32_t)strlen(name);
+        if (len < 4u)
+            return 0;
+
+        name += len - 4u;
+        for (uint32_t i = 0u; i < 4u; ++i)
+            if (lower_ascii(name[i]) != ext[i])
+                return 0;
+
+        return 1;
+    }
+
     class FileExplorer
     {
     public:
@@ -148,7 +176,8 @@ namespace
             MODAL_CREATE_FOLDER,
             MODAL_CREATE_FILE,
             MODAL_RENAME,
-            MODAL_DELETE_CONFIRM
+            MODAL_DELETE_CONFIRM,
+            MODAL_OPEN_WITH
         };
 
         struct Entry
@@ -206,9 +235,13 @@ namespace
         void OpenCreateFileModal(void);
         void OpenRenameModal(void);
         void OpenDeleteModal(void);
+        void OpenOpenWithModal(void);
         void OpenModal(ModalMode mode, const char *title, const char *body, const char *confirm_text, const char *initial_text);
         void CloseModal(void);
         void CommitModal(void);
+        int SelectedIsSacScript(void) const;
+        void RunSelectedScript(void);
+        void OpenSelectedInTextEditor(void);
         void CommitDialogSelection(void);
         void FinishDialog(int accepted, const char *raw_path, const char *friendly_path);
         int ValidateSegmentName(const char *name);
@@ -233,9 +266,11 @@ namespace
         static void RefreshClickThunk(kbutton_handle button, void *user);
         static void NewFolderClickThunk(kbutton_handle button, void *user);
         static void NewFileClickThunk(kbutton_handle button, void *user);
+        static void OpenWithClickThunk(kbutton_handle button, void *user);
         static void RenameClickThunk(kbutton_handle button, void *user);
         static void DeleteClickThunk(kbutton_handle button, void *user);
         static void ModalConfirmClickThunk(kbutton_handle button, void *user);
+        static void ModalExtraClickThunk(kbutton_handle button, void *user);
         static void ModalCancelClickThunk(kbutton_handle button, void *user);
 
     private:
@@ -249,6 +284,7 @@ namespace
         LabeledButton refresh_button_;
         LabeledButton new_folder_button_;
         LabeledButton new_file_button_;
+        LabeledButton open_with_button_;
         LabeledButton rename_button_;
         LabeledButton delete_button_;
         kgfx_obj_handle list_viewport_;
@@ -264,6 +300,7 @@ namespace
         kgfx_obj_handle modal_body_;
         kgfx_obj_handle modal_error_;
         LabeledButton modal_confirm_button_;
+        LabeledButton modal_extra_button_;
         LabeledButton modal_cancel_button_;
         ModalMode modal_mode_;
         Entry entries_[MAX_ENTRIES];
@@ -482,6 +519,7 @@ namespace
         refresh_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, RefreshClickThunk, this);
         new_folder_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, NewFolderClickThunk, this);
         new_file_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, NewFileClickThunk, this);
+        open_with_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, OpenWithClickThunk, this);
         rename_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, RenameClickThunk, this);
         delete_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, DeleteClickThunk, this);
 
@@ -489,6 +527,7 @@ namespace
         refresh_button_.label = kgfx_obj_add_text(font_, "Refresh", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         new_folder_button_.label = kgfx_obj_add_text(font_, "New Folder", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         new_file_button_.label = kgfx_obj_add_text(font_, "New File", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        open_with_button_.label = kgfx_obj_add_text(font_, "Open With", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         rename_button_.label = kgfx_obj_add_text(font_, "Rename", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         delete_button_.label = kgfx_obj_add_text(font_, "Delete", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
@@ -497,6 +536,7 @@ namespace
             &refresh_button_,
             &new_folder_button_,
             &new_file_button_,
+            &open_with_button_,
             &rename_button_,
             &delete_button_};
 
@@ -576,17 +616,23 @@ namespace
         kgfx_obj_set_clip_to_parent(ktextbox_root(modal_input_), 1);
 
         modal_confirm_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &modal_confirm_style_, ModalConfirmClickThunk, this);
+        modal_extra_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &action_style_, ModalExtraClickThunk, this);
         modal_cancel_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &action_style_, ModalCancelClickThunk, this);
         modal_confirm_button_.label = kgfx_obj_add_text(font_, modal_confirm_label_, 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        modal_extra_button_.label = kgfx_obj_add_text(font_, "Edit", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
         modal_cancel_button_.label = kgfx_obj_add_text(font_, "Cancel", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
         kgfx_obj_set_parent(kbutton_root(modal_confirm_button_.button), modal_panel_);
+        kgfx_obj_set_parent(kbutton_root(modal_extra_button_.button), modal_panel_);
         kgfx_obj_set_parent(kbutton_root(modal_cancel_button_.button), modal_panel_);
         kgfx_obj_set_clip_to_parent(kbutton_root(modal_confirm_button_.button), 1);
+        kgfx_obj_set_clip_to_parent(kbutton_root(modal_extra_button_.button), 1);
         kgfx_obj_set_clip_to_parent(kbutton_root(modal_cancel_button_.button), 1);
         kgfx_obj_set_parent(modal_confirm_button_.label, kbutton_root(modal_confirm_button_.button));
+        kgfx_obj_set_parent(modal_extra_button_.label, kbutton_root(modal_extra_button_.button));
         kgfx_obj_set_parent(modal_cancel_button_.label, kbutton_root(modal_cancel_button_.button));
         kgfx_obj_set_clip_to_parent(modal_confirm_button_.label, 1);
+        kgfx_obj_set_clip_to_parent(modal_extra_button_.label, 1);
         kgfx_obj_set_clip_to_parent(modal_cancel_button_.label, 1);
 
         SetObjectVisible(modal_backdrop_, 0u);
@@ -596,8 +642,10 @@ namespace
         SetObjectVisible(modal_error_, 0u);
         SetTextboxVisible(modal_input_, 0u);
         SetButtonVisible(modal_confirm_button_, 0u);
+        SetButtonVisible(modal_extra_button_, 0u);
         SetButtonVisible(modal_cancel_button_, 0u);
         kbutton_set_enabled(modal_confirm_button_.button, 0u);
+        kbutton_set_enabled(modal_extra_button_.button, 0u);
         kbutton_set_enabled(modal_cancel_button_.button, 0u);
         ktextbox_set_enabled(modal_input_, 0u);
     }
@@ -754,6 +802,7 @@ namespace
 
         SetButtonText(new_file_button_,
                       dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? "New File" : "Cancel");
+        SetButtonText(open_with_button_, "Open With");
         SetButtonText(rename_button_, "Rename");
         SetButtonText(delete_button_, "Delete");
     }
@@ -820,7 +869,7 @@ namespace
         int32_t list_h = 0;
         uint32_t client_w = 0u;
         uint32_t button_gap = 8u;
-        uint32_t button_count = dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? 6u : 4u;
+        uint32_t button_count = dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? 7u : 4u;
         uint32_t button_w = 1u;
         uint32_t used_w = 0u;
         uint32_t visible_rows = 0u;
@@ -868,8 +917,9 @@ namespace
         LayoutButton(new_file_button_, client_x + (int32_t)(button_w + button_gap) * 3, actions_y, button_w, action_h, 1u);
         if (dialog_mode_ == FILE_EXPLORER_DIALOG_NONE)
         {
-            LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, 1u);
-            LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, 1u);
+            LayoutButton(open_with_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, 1u);
+            LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, 1u);
+            LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 6, actions_y, button_w, action_h, 1u);
         }
 
         if (kgfx_obj_ref(list_viewport_) && kgfx_obj_ref(list_viewport_)->kind == KGFX_OBJ_RECT)
@@ -925,7 +975,9 @@ namespace
         if (modal_mode_ != MODAL_NONE)
         {
             uint32_t modal_w = client_w > 460u ? 460u : client_w;
-            uint32_t modal_h = (modal_mode_ == MODAL_DELETE_CONFIRM) ? 162u : 198u;
+            uint8_t choice_modal = (modal_mode_ == MODAL_DELETE_CONFIRM || modal_mode_ == MODAL_OPEN_WITH) ? 1u : 0u;
+            uint8_t three_buttons = (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u;
+            uint32_t modal_h = choice_modal ? 162u : 198u;
             int32_t modal_x = ((int32_t)root->u.rect.w - (int32_t)modal_w) / 2;
             int32_t modal_y = ((int32_t)root->u.rect.h - (int32_t)modal_h) / 2;
 
@@ -957,17 +1009,26 @@ namespace
                 kgfx_obj_ref(modal_body_)->u.text.y = 40;
             }
 
-            if (modal_mode_ != MODAL_DELETE_CONFIRM)
+            if (!choice_modal)
                 ktextbox_set_bounds(modal_input_, 14, 92, modal_w - 28u, text_h + 12u);
 
             if (kgfx_obj_ref(modal_error_) && kgfx_obj_ref(modal_error_)->kind == KGFX_OBJ_TEXT)
             {
                 kgfx_obj_ref(modal_error_)->u.text.x = 14;
-                kgfx_obj_ref(modal_error_)->u.text.y = (modal_mode_ == MODAL_DELETE_CONFIRM) ? 94 : 128;
+                kgfx_obj_ref(modal_error_)->u.text.y = choice_modal ? 94 : 128;
             }
 
-            LayoutButton(modal_confirm_button_, (int32_t)modal_w - 14 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
-            LayoutButton(modal_cancel_button_, (int32_t)modal_w - 14 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+            if (three_buttons)
+            {
+                LayoutButton(modal_confirm_button_, (int32_t)modal_w - 14 - 92 - 8 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+                LayoutButton(modal_extra_button_, (int32_t)modal_w - 14 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+                LayoutButton(modal_cancel_button_, (int32_t)modal_w - 14 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+            }
+            else
+            {
+                LayoutButton(modal_confirm_button_, (int32_t)modal_w - 14 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+                LayoutButton(modal_cancel_button_, (int32_t)modal_w - 14 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+            }
         }
 
         ClampScroll();
@@ -1384,6 +1445,7 @@ namespace
         uint8_t dialog_active = dialog_mode_ != FILE_EXPLORER_DIALOG_NONE;
         uint8_t save_dialog = dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE;
         uint8_t has_selection = (selected_index_ >= 0 && selected_index_ < entry_count_) ? 1u : 0u;
+        uint8_t selected_file = (has_selection && !entries_[selected_index_].is_dir) ? 1u : 0u;
         uint8_t is_root = strings_equal(current_dir_, "/") ? 1u : 0u;
 
         RefreshActionLabels();
@@ -1392,9 +1454,11 @@ namespace
         kbutton_set_enabled(refresh_button_.button, modal_active ? 0u : 1u);
         kbutton_set_enabled(new_folder_button_.button, modal_active ? 0u : 1u);
         kbutton_set_enabled(new_file_button_.button, modal_active ? 0u : 1u);
+        kbutton_set_enabled(open_with_button_.button, (!dialog_active && !modal_active && selected_file) ? 1u : 0u);
         kbutton_set_enabled(rename_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
         kbutton_set_enabled(delete_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
 
+        SetButtonVisible(open_with_button_, dialog_active ? 0u : 1u);
         SetButtonVisible(rename_button_, dialog_active ? 0u : 1u);
         SetButtonVisible(delete_button_, dialog_active ? 0u : 1u);
         SetObjectVisible(dialog_name_label_, save_dialog ? 1u : 0u);
@@ -1417,11 +1481,13 @@ namespace
             SetObjectVisible(modal_body_, 1u);
             SetObjectVisible(modal_error_, modal_error_buffer_[0] ? 1u : 0u);
             SetButtonVisible(modal_confirm_button_, 1u);
+            SetButtonVisible(modal_extra_button_, (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u);
             SetButtonVisible(modal_cancel_button_, 1u);
             kbutton_set_enabled(modal_confirm_button_.button, 1u);
+            kbutton_set_enabled(modal_extra_button_.button, (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u);
             kbutton_set_enabled(modal_cancel_button_.button, 1u);
 
-            if (modal_mode_ == MODAL_DELETE_CONFIRM)
+            if (modal_mode_ == MODAL_DELETE_CONFIRM || modal_mode_ == MODAL_OPEN_WITH)
             {
                 SetTextboxVisible(modal_input_, 0u);
                 ktextbox_set_enabled(modal_input_, 0u);
@@ -1441,9 +1507,11 @@ namespace
             SetObjectVisible(modal_error_, 0u);
             SetTextboxVisible(modal_input_, 0u);
             SetButtonVisible(modal_confirm_button_, 0u);
+            SetButtonVisible(modal_extra_button_, 0u);
             SetButtonVisible(modal_cancel_button_, 0u);
             ktextbox_set_enabled(modal_input_, 0u);
             kbutton_set_enabled(modal_confirm_button_.button, 0u);
+            kbutton_set_enabled(modal_extra_button_.button, 0u);
             kbutton_set_enabled(modal_cancel_button_.button, 0u);
         }
 
@@ -1564,6 +1632,57 @@ namespace
             return;
         }
 
+        if (SelectedIsSacScript())
+        {
+            RunSelectedScript();
+            return;
+        }
+
+        OpenSelectedInTextEditor();
+    }
+
+    int FileExplorer::SelectedIsSacScript(void) const
+    {
+        if (selected_index_ < 0 || selected_index_ >= entry_count_)
+            return 0;
+        if (entries_[selected_index_].is_dir)
+            return 0;
+        return has_sac_extension(entries_[selected_index_].name);
+    }
+
+    void FileExplorer::RunSelectedScript(void)
+    {
+        char raw[DIHOS_PATH_CAP];
+        char friendly[DIHOS_PATH_CAP];
+
+        if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
+            BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
+        {
+            SetStatus("unable to resolve selected script", rgb(255, 140, 140));
+            return;
+        }
+
+        if (terminal_open_script(raw, friendly) != 0)
+        {
+            SetStatus("unable to open SAC script terminal", rgb(255, 140, 140));
+            return;
+        }
+
+        SetStatus("running SAC script", rgb(148, 232, 180));
+    }
+
+    void FileExplorer::OpenSelectedInTextEditor(void)
+    {
+        char raw[DIHOS_PATH_CAP];
+        char friendly[DIHOS_PATH_CAP];
+
+        if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
+            BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
+        {
+            SetStatus("unable to resolve selected file", rgb(255, 140, 140));
+            return;
+        }
+
         if (text_editor_open_path(raw, friendly) != 0)
             SetStatus("unable to open file in text editor", rgb(255, 140, 140));
     }
@@ -1602,7 +1721,7 @@ namespace
         SyncRows();
         SyncActionStates();
 
-        if (mode != MODAL_DELETE_CONFIRM)
+        if (mode != MODAL_DELETE_CONFIRM && mode != MODAL_OPEN_WITH)
             ktextbox_set_focus(modal_input_, 1u);
     }
 
@@ -1673,6 +1792,32 @@ namespace
         append_text(body, sizeof(body), "?\nThis cannot be undone.");
 
         OpenModal(MODAL_DELETE_CONFIRM, "Delete Entry", body, "Delete", 0);
+    }
+
+    void FileExplorer::OpenOpenWithModal(void)
+    {
+        char body[MODAL_TEXT_CAP];
+        kgfx_obj *extra_label = 0;
+
+        if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
+            return;
+        if (selected_index_ < 0 || selected_index_ >= entry_count_ || entries_[selected_index_].is_dir)
+            return;
+
+        body[0] = 0;
+        append_text(body, sizeof(body), "Open ");
+        append_text(body, sizeof(body), entries_[selected_index_].name);
+        append_text(body, sizeof(body), " with:");
+
+        if (SelectedIsSacScript())
+            OpenModal(MODAL_OPEN_WITH, "Open With", body, "Run", 0);
+        else
+            OpenModal(MODAL_OPEN_WITH, "Open With", body, "Text Editor", 0);
+
+        extra_label = kgfx_obj_ref(modal_extra_button_.label);
+        if (extra_label && extra_label->kind == KGFX_OBJ_TEXT)
+            extra_label->u.text.text = "Edit";
+        SyncActionStates();
     }
 
     void FileExplorer::ApplyCreateFolder(void)
@@ -1866,6 +2011,13 @@ namespace
         case MODAL_DELETE_CONFIRM:
             ApplyDelete();
             break;
+        case MODAL_OPEN_WITH:
+            if (SelectedIsSacScript())
+                RunSelectedScript();
+            else
+                OpenSelectedInTextEditor();
+            CloseModal();
+            break;
         default:
             break;
         }
@@ -2048,7 +2200,7 @@ namespace
         (void)textbox;
         (void)text;
 
-        if (!self || self->modal_mode_ == MODAL_DELETE_CONFIRM)
+        if (!self || self->modal_mode_ == MODAL_DELETE_CONFIRM || self->modal_mode_ == MODAL_OPEN_WITH)
             return;
 
         self->CommitModal();
@@ -2141,6 +2293,14 @@ namespace
         }
     }
 
+    void FileExplorer::OpenWithClickThunk(kbutton_handle button, void *user)
+    {
+        FileExplorer *self = (FileExplorer *)user;
+        (void)button;
+        if (self)
+            self->OpenOpenWithModal();
+    }
+
     void FileExplorer::RenameClickThunk(kbutton_handle button, void *user)
     {
         FileExplorer *self = (FileExplorer *)user;
@@ -2163,6 +2323,17 @@ namespace
         (void)button;
         if (self)
             self->CommitModal();
+    }
+
+    void FileExplorer::ModalExtraClickThunk(kbutton_handle button, void *user)
+    {
+        FileExplorer *self = (FileExplorer *)user;
+        (void)button;
+        if (!self || self->modal_mode_ != MODAL_OPEN_WITH)
+            return;
+
+        self->OpenSelectedInTextEditor();
+        self->CloseModal();
     }
 
     void FileExplorer::ModalCancelClickThunk(kbutton_handle button, void *user)
