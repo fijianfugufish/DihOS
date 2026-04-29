@@ -8,6 +8,7 @@ build/
 
 # BUT allow this one
 !build.ps1
+!build_sacx_app.ps1
 
 # Ignore specific files
 efi_main.S
