@@ -1,6 +1,7 @@
 #include "apps/sacx_runtime.h"
 #include "apps/sacx_api.h"
 #include "apps/sacx_format.h"
+#include "apps/file_explorer_api.h"
 
 #include <stddef.h>
 
@@ -105,6 +106,8 @@ typedef struct sacx_task
 
     sacx_entry_fn entry;
     sacx_update_fn update_fn;
+    sacx_file_dialog_fn dialog_callback;
+    void *dialog_user;
     sacx_api api;
 
     uint8_t started;
@@ -120,6 +123,8 @@ typedef struct sacx_task
 
     sacx_runtime_io io;
     char friendly_path[256];
+    char launch_arg_raw[256];
+    char launch_arg_friendly[256];
 
     sacx_file_slot files[SACX_MAX_TASK_FILES];
     sacx_dir_slot dirs[SACX_MAX_TASK_DIRS];
@@ -367,6 +372,7 @@ static const char *G_known_imports[] = {
     "gfx_obj_set_outline_width",
     "gfx_obj_set_outline_alpha",
     "gfx_obj_set_rect",
+    "gfx_obj_get_rect",
     "gfx_obj_set_circle",
     "gfx_text_set",
     "gfx_text_set_align",
@@ -374,6 +380,7 @@ static const char *G_known_imports[] = {
     "gfx_text_set_scale",
     "gfx_text_set_pos",
     "gfx_image_set_size",
+    "gfx_image_set_pos",
     "gfx_image_set_scale_pct",
     "gfx_image_set_sample_mode",
     "button_add_rect",
@@ -432,6 +439,10 @@ static const char *G_known_imports[] = {
     "sched_preempt_guard_leave",
     "sched_quantum_ticks",
     "sched_preemptions",
+    "app_arg_raw_path",
+    "app_arg_friendly_path",
+    "dialog_open_file",
+    "dialog_active",
 };
 
 static int sacx_import_known(const char *name)
@@ -701,6 +712,32 @@ static void sacx_textbox_submit_trampoline(ktextbox_handle textbox, const char *
     G_current_task = saved;
 }
 
+static void sacx_file_dialog_trampoline(int accepted, const char *raw_path, const char *friendly_path, void *user)
+{
+    sacx_task *task = (sacx_task *)user;
+    sacx_task *saved = G_current_task;
+    sacx_file_dialog_fn callback = 0;
+    void *callback_user = 0;
+
+    if (!task || task->state == SACX_TASK_UNUSED || !task->dialog_callback)
+        return;
+    if (!sacx_ptr_in_image(task, (const void *)task->dialog_callback))
+    {
+        task->dialog_callback = 0;
+        task->dialog_user = 0;
+        return;
+    }
+
+    callback = task->dialog_callback;
+    callback_user = task->dialog_user;
+    task->dialog_callback = 0;
+    task->dialog_user = 0;
+
+    G_current_task = task;
+    callback(accepted ? 1 : 0, raw_path ? raw_path : "", friendly_path ? friendly_path : "", callback_user);
+    G_current_task = saved;
+}
+
 static void sacx_task_close_files(sacx_task *task)
 {
     if (!task)
@@ -848,6 +885,8 @@ static void sacx_task_finish(sacx_task *task, int32_t status, const char *messag
     task->image_size = 0u;
     task->entry = 0;
     task->update_fn = 0;
+    task->dialog_callback = 0;
+    task->dialog_user = 0;
     task->started = 0u;
     task->exit_requested = 0u;
     task->sleep_requested = 0u;
@@ -1139,6 +1178,38 @@ static int sacx_api_set_console_visible(uint32_t visible)
     return 0;
 }
 
+static int sacx_api_dialog_open_file(const char *initial_dir,
+                                     const char *suggested_name,
+                                     sacx_file_dialog_fn on_result,
+                                     void *user)
+{
+    if (!G_current_task || !on_result)
+        return -1;
+    if (!sacx_ptr_in_image(G_current_task, (const void *)on_result))
+        return -1;
+    if (file_explorer_dialog_active())
+        return -1;
+
+    G_current_task->dialog_callback = on_result;
+    G_current_task->dialog_user = user;
+    if (file_explorer_begin_dialog(FILE_EXPLORER_DIALOG_OPEN_FILE,
+                                   (initial_dir && initial_dir[0]) ? initial_dir : "/",
+                                   suggested_name,
+                                   sacx_file_dialog_trampoline,
+                                   G_current_task) != 0)
+    {
+        G_current_task->dialog_callback = 0;
+        G_current_task->dialog_user = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static int sacx_api_dialog_active(void)
+{
+    return file_explorer_dialog_active();
+}
+
 static int sacx_api_sched_preempt_guard_enter(void)
 {
     if (!G_current_task)
@@ -1189,6 +1260,20 @@ static void sacx_api_log(const char *text)
         sacx_task_log(G_current_task, text);
     else
         terminal_print(text);
+}
+
+static const char *sacx_api_app_arg_raw_path(void)
+{
+    if (!G_current_task)
+        return "";
+    return G_current_task->launch_arg_raw;
+}
+
+static const char *sacx_api_app_arg_friendly_path(void)
+{
+    if (!G_current_task)
+        return "";
+    return G_current_task->launch_arg_friendly;
 }
 
 static sacx_file_slot *sacx_file_from_handle(sacx_task *task, uint32_t handle)
@@ -1697,6 +1782,31 @@ static int sacx_api_gfx_obj_set_rect(uint32_t obj_handle, int32_t x, int32_t y, 
     return 0;
 }
 
+static int sacx_api_gfx_obj_get_rect(uint32_t obj_handle, int32_t *out_x, int32_t *out_y, uint32_t *out_w, uint32_t *out_h)
+{
+    kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
+    if (!obj || !out_x || !out_y || !out_w || !out_h)
+        return -1;
+
+    if (obj->kind == KGFX_OBJ_RECT)
+    {
+        *out_x = obj->u.rect.x;
+        *out_y = obj->u.rect.y;
+        *out_w = obj->u.rect.w;
+        *out_h = obj->u.rect.h;
+        return 0;
+    }
+    if (obj->kind == KGFX_OBJ_IMAGE)
+    {
+        *out_x = obj->u.image.x;
+        *out_y = obj->u.image.y;
+        *out_w = obj->u.image.w;
+        *out_h = obj->u.image.h;
+        return 0;
+    }
+    return -1;
+}
+
 static int sacx_api_gfx_obj_set_circle(uint32_t obj_handle, int32_t cx, int32_t cy, uint32_t r)
 {
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
@@ -1760,6 +1870,16 @@ static int sacx_api_gfx_image_set_size(uint32_t obj_handle, uint32_t w, uint32_t
     if (!slot || w == 0u || h == 0u)
         return -1;
     kgfx_image_set_size(slot->handle, w, h);
+    return 0;
+}
+
+static int sacx_api_gfx_image_set_pos(uint32_t obj_handle, int32_t x, int32_t y)
+{
+    kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
+    if (!obj || obj->kind != KGFX_OBJ_IMAGE)
+        return -1;
+    obj->u.image.x = x;
+    obj->u.image.y = y;
     return 0;
 }
 
@@ -2466,6 +2586,7 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.gfx_obj_set_outline_width = sacx_api_gfx_obj_set_outline_width;
     task->api.gfx_obj_set_outline_alpha = sacx_api_gfx_obj_set_outline_alpha;
     task->api.gfx_obj_set_rect = sacx_api_gfx_obj_set_rect;
+    task->api.gfx_obj_get_rect = sacx_api_gfx_obj_get_rect;
     task->api.gfx_obj_set_circle = sacx_api_gfx_obj_set_circle;
     task->api.gfx_text_set = sacx_api_gfx_text_set;
     task->api.gfx_text_set_align = sacx_api_gfx_text_set_align;
@@ -2473,6 +2594,7 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.gfx_text_set_scale = sacx_api_gfx_text_set_scale;
     task->api.gfx_text_set_pos = sacx_api_gfx_text_set_pos;
     task->api.gfx_image_set_size = sacx_api_gfx_image_set_size;
+    task->api.gfx_image_set_pos = sacx_api_gfx_image_set_pos;
     task->api.gfx_image_set_scale_pct = sacx_api_gfx_image_set_scale_pct;
     task->api.gfx_image_set_sample_mode = sacx_api_gfx_image_set_sample_mode;
 
@@ -2539,6 +2661,10 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.sched_quantum_ticks = sacx_api_sched_quantum_ticks;
     task->api.sched_preemptions = sacx_api_sched_preemptions;
     task->api.app_set_console_visible = sacx_api_set_console_visible;
+    task->api.app_arg_raw_path = sacx_api_app_arg_raw_path;
+    task->api.app_arg_friendly_path = sacx_api_app_arg_friendly_path;
+    task->api.dialog_open_file = sacx_api_dialog_open_file;
+    task->api.dialog_active = sacx_api_dialog_active;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -2557,10 +2683,12 @@ extern "C" void sacx_runtime_set_font(const kfont *font)
     G_runtime_font = font;
 }
 
-extern "C" int sacx_runtime_launch(const char *raw_path,
-                                   const char *friendly_path,
-                                   const sacx_runtime_io *io,
-                                   uint32_t *out_task_id)
+extern "C" int sacx_runtime_launch_ex(const char *raw_path,
+                                      const char *friendly_path,
+                                      const char *arg_raw_path,
+                                      const char *arg_friendly_path,
+                                      const sacx_runtime_io *io,
+                                      uint32_t *out_task_id)
 {
     sacx_task *task = 0;
     uint8_t *file_data = 0;
@@ -2582,6 +2710,9 @@ extern "C" int sacx_runtime_launch(const char *raw_path,
     task->wake_tick = dihos_time_ticks();
     if (io)
         task->io = *io;
+    sacx_copy_trunc(task->launch_arg_raw, sizeof(task->launch_arg_raw), arg_raw_path ? arg_raw_path : "");
+    sacx_copy_trunc(task->launch_arg_friendly, sizeof(task->launch_arg_friendly),
+                    arg_friendly_path ? arg_friendly_path : "");
 
     if (sacx_read_file_all(raw_path, &file_data, &file_size) != 0)
     {
@@ -2613,6 +2744,14 @@ extern "C" int sacx_runtime_launch(const char *raw_path,
     }
 
     return 0;
+}
+
+extern "C" int sacx_runtime_launch(const char *raw_path,
+                                   const char *friendly_path,
+                                   const sacx_runtime_io *io,
+                                   uint32_t *out_task_id)
+{
+    return sacx_runtime_launch_ex(raw_path, friendly_path, 0, 0, io, out_task_id);
 }
 
 extern "C" void sacx_runtime_update(void)

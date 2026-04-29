@@ -54,6 +54,7 @@ extern "C"
     typedef int (*sacx_entry_fn)(const sacx_api *api);
     typedef void (*sacx_button_on_click_fn)(uint32_t button_handle, void *user);
     typedef void (*sacx_textbox_on_submit_fn)(uint32_t textbox_handle, const char *text, void *user);
+    typedef void (*sacx_file_dialog_fn)(int accepted, const char *raw_path, const char *friendly_path, void *user);
 
     typedef struct sacx_color
     {
@@ -265,6 +266,7 @@ extern "C"
         int (*gfx_obj_set_outline_width)(uint32_t obj_handle, uint32_t width);
         int (*gfx_obj_set_outline_alpha)(uint32_t obj_handle, uint8_t alpha);
         int (*gfx_obj_set_rect)(uint32_t obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t h);
+        int (*gfx_obj_get_rect)(uint32_t obj_handle, int32_t *out_x, int32_t *out_y, uint32_t *out_w, uint32_t *out_h);
         int (*gfx_obj_set_circle)(uint32_t obj_handle, int32_t cx, int32_t cy, uint32_t r);
         int (*gfx_text_set)(uint32_t obj_handle, const char *text);
         int (*gfx_text_set_align)(uint32_t obj_handle, uint32_t align);
@@ -272,6 +274,7 @@ extern "C"
         int (*gfx_text_set_scale)(uint32_t obj_handle, uint32_t scale);
         int (*gfx_text_set_pos)(uint32_t obj_handle, int32_t x, int32_t y);
         int (*gfx_image_set_size)(uint32_t obj_handle, uint32_t w, uint32_t h);
+        int (*gfx_image_set_pos)(uint32_t obj_handle, int32_t x, int32_t y);
         int (*gfx_image_set_scale_pct)(uint32_t obj_handle, uint32_t scale_pct);
         int (*gfx_image_set_sample_mode)(uint32_t obj_handle, uint32_t sample_mode);
 
@@ -349,6 +352,11 @@ extern "C"
         uint32_t (*sched_quantum_ticks)(void);
         uint32_t (*sched_preemptions)(void);
         int (*app_set_console_visible)(uint32_t visible);
+        const char *(*app_arg_raw_path)(void);
+        const char *(*app_arg_friendly_path)(void);
+        int (*dialog_open_file)(const char *initial_dir, const char *suggested_name,
+                                sacx_file_dialog_fn on_result, void *user);
+        int (*dialog_active)(void);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)
@@ -356,6 +364,20 @@ extern "C"
         if (!api || !api->app_set_console_visible)
             return -1;
         return api->app_set_console_visible(visible);
+    }
+
+    static inline const char *sacx_app_arg_raw_path(const sacx_api *api)
+    {
+        if (!api || !api->app_arg_raw_path)
+            return "";
+        return api->app_arg_raw_path();
+    }
+
+    static inline const char *sacx_app_arg_friendly_path(const sacx_api *api)
+    {
+        if (!api || !api->app_arg_friendly_path)
+            return "";
+        return api->app_arg_friendly_path();
     }
 
 #define SACX_APP_NO_CONSOLE(api_ptr) sacx_app_set_console_visible((api_ptr), 0u)

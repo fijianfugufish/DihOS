@@ -207,6 +207,7 @@ static std::vector<std::string> default_imports()
         "gfx_obj_set_outline_width",
         "gfx_obj_set_outline_alpha",
         "gfx_obj_set_rect",
+        "gfx_obj_get_rect",
         "gfx_obj_set_circle",
         "gfx_text_set",
         "gfx_text_set_align",
@@ -214,6 +215,7 @@ static std::vector<std::string> default_imports()
         "gfx_text_set_scale",
         "gfx_text_set_pos",
         "gfx_image_set_size",
+        "gfx_image_set_pos",
         "gfx_image_set_scale_pct",
         "gfx_image_set_sample_mode",
         "button_add_rect",
@@ -272,6 +274,10 @@ static std::vector<std::string> default_imports()
         "sched_preempt_guard_leave",
         "sched_quantum_ticks",
         "sched_preemptions",
+        "app_arg_raw_path",
+        "app_arg_friendly_path",
+        "dialog_open_file",
+        "dialog_active",
     };
 }
 

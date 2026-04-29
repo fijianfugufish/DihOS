@@ -1004,6 +1004,13 @@ int Terminal::ScriptActive() const
 
 int Terminal::StartProgram(const char *raw_path, const char *friendly_path, uint32_t launch_flags)
 {
+    return StartProgramWithArg(raw_path, friendly_path, 0, 0, launch_flags);
+}
+
+int Terminal::StartProgramWithArg(const char *raw_path, const char *friendly_path,
+                                  const char *arg_raw_path, const char *arg_friendly_path,
+                                  uint32_t launch_flags)
+{
     uint32_t task_id = 0u;
     sacx_runtime_io io = {0};
     char title[96];
@@ -1038,7 +1045,7 @@ int Terminal::StartProgram(const char *raw_path, const char *friendly_path, uint
     io.print = terminal_session_print;
     io.set_console_visible = terminal_session_console_visible;
     io.user = this;
-    if (sacx_runtime_launch(raw_path, friendly_path, &io, &task_id) != 0)
+    if (sacx_runtime_launch_ex(raw_path, friendly_path, arg_raw_path, arg_friendly_path, &io, &task_id) != 0)
     {
         Error("unable to launch sacx program");
         sacx_active = 0u;

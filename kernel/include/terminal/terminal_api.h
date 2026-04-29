@@ -42,8 +42,13 @@ extern "C"
     int terminal_visible(void);
     int terminal_open_script_ex(const char *raw_path, const char *friendly_path, uint32_t flags);
     int terminal_open_program_ex(const char *raw_path, const char *friendly_path, uint32_t flags);
+    int terminal_open_program_with_arg_ex(const char *raw_path, const char *friendly_path,
+                                          const char *arg_raw_path, const char *arg_friendly_path,
+                                          uint32_t flags);
     int terminal_open_script(const char *raw_path, const char *friendly_path);
     int terminal_open_program(const char *raw_path, const char *friendly_path);
+    int terminal_open_program_with_arg(const char *raw_path, const char *friendly_path,
+                                       const char *arg_raw_path, const char *arg_friendly_path);
     void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user);
     void terminal_capture_end(void);
 

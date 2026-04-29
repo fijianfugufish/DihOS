@@ -20,6 +20,8 @@ namespace
 {
     static const char *kFolderIcon = "[D]";
     static const char *kFileIcon = "[F]";
+    static const char *kImageViewerRawPath = "0:/OS/System/Programs/image_viewer.sacx";
+    static const char *kImageViewerFriendlyPath = "/OS/System/Programs/image_viewer.sacx";
 
     static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
     {
@@ -179,6 +181,34 @@ namespace
         return 1;
     }
 
+    static int has_extension_ci(const char *name, const char *ext)
+    {
+        uint32_t name_len = 0u;
+        uint32_t ext_len = 0u;
+
+        if (!name || !ext)
+            return 0;
+
+        name_len = (uint32_t)strlen(name);
+        ext_len = (uint32_t)strlen(ext);
+        if (name_len < ext_len || ext_len == 0u)
+            return 0;
+
+        name += name_len - ext_len;
+        for (uint32_t i = 0u; i < ext_len; ++i)
+            if (lower_ascii(name[i]) != lower_ascii(ext[i]))
+                return 0;
+        return 1;
+    }
+
+    static int has_image_extension(const char *name)
+    {
+        return has_extension_ci(name, ".bmp") ||
+               has_extension_ci(name, ".png") ||
+               has_extension_ci(name, ".jpg") ||
+               has_extension_ci(name, ".jpeg");
+    }
+
     class FileExplorer
     {
     public:
@@ -273,7 +303,9 @@ namespace
         void CloseModal(void);
         void CommitModal(void);
         int SelectedIsSacScript(void) const;
+        int SelectedIsImage(void) const;
         void RunSelectedScript(void);
+        void OpenSelectedInImageViewer(void);
         void OpenSelectedInTextEditor(void);
         void CommitDialogSelection(void);
         void FinishDialog(int accepted, const char *raw_path, const char *friendly_path);
@@ -1009,7 +1041,7 @@ namespace
         {
             uint32_t modal_w = client_w > 460u ? 460u : client_w;
             uint8_t choice_modal = (modal_mode_ == MODAL_DELETE_CONFIRM || modal_mode_ == MODAL_OPEN_WITH) ? 1u : 0u;
-            uint8_t three_buttons = (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u;
+            uint8_t three_buttons = (modal_mode_ == MODAL_OPEN_WITH && (SelectedIsSacScript() || SelectedIsImage())) ? 1u : 0u;
             uint32_t modal_h = choice_modal ? 162u : 198u;
             int32_t modal_x = ((int32_t)root->u.rect.w - (int32_t)modal_w) / 2;
             int32_t modal_y = ((int32_t)root->u.rect.h - (int32_t)modal_h) / 2;
@@ -1514,10 +1546,12 @@ namespace
             SetObjectVisible(modal_body_, 1u);
             SetObjectVisible(modal_error_, modal_error_buffer_[0] ? 1u : 0u);
             SetButtonVisible(modal_confirm_button_, 1u);
-            SetButtonVisible(modal_extra_button_, (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u);
+            SetButtonVisible(modal_extra_button_,
+                             (modal_mode_ == MODAL_OPEN_WITH && (SelectedIsSacScript() || SelectedIsImage())) ? 1u : 0u);
             SetButtonVisible(modal_cancel_button_, 1u);
             kbutton_set_enabled(modal_confirm_button_.button, 1u);
-            kbutton_set_enabled(modal_extra_button_.button, (modal_mode_ == MODAL_OPEN_WITH && SelectedIsSacScript()) ? 1u : 0u);
+            kbutton_set_enabled(modal_extra_button_.button,
+                                (modal_mode_ == MODAL_OPEN_WITH && (SelectedIsSacScript() || SelectedIsImage())) ? 1u : 0u);
             kbutton_set_enabled(modal_cancel_button_.button, 1u);
 
             if (modal_mode_ == MODAL_DELETE_CONFIRM || modal_mode_ == MODAL_OPEN_WITH)
@@ -1671,6 +1705,12 @@ namespace
             return;
         }
 
+        if (SelectedIsImage())
+        {
+            OpenSelectedInImageViewer();
+            return;
+        }
+
         OpenSelectedInTextEditor();
     }
 
@@ -1681,6 +1721,15 @@ namespace
         if (entries_[selected_index_].is_dir)
             return 0;
         return has_sac_extension(entries_[selected_index_].name);
+    }
+
+    int FileExplorer::SelectedIsImage(void) const
+    {
+        if (selected_index_ < 0 || selected_index_ >= entry_count_)
+            return 0;
+        if (entries_[selected_index_].is_dir)
+            return 0;
+        return has_image_extension(entries_[selected_index_].name);
     }
 
     void FileExplorer::RunSelectedScript(void)
@@ -1705,6 +1754,28 @@ namespace
         }
 
         SetStatus(is_sacx ? "running SACX app" : "running SAC script", rgb(148, 232, 180));
+    }
+
+    void FileExplorer::OpenSelectedInImageViewer(void)
+    {
+        char raw[DIHOS_PATH_CAP];
+        char friendly[DIHOS_PATH_CAP];
+
+        if (BuildSelectedRawPath(raw, sizeof(raw)) != 0 ||
+            BuildSelectedFriendlyPath(friendly, sizeof(friendly)) != 0)
+        {
+            SetStatus("unable to resolve selected image", rgb(255, 140, 140));
+            return;
+        }
+
+        if (terminal_open_program_with_arg_ex(kImageViewerRawPath, kImageViewerFriendlyPath,
+                                              raw, friendly, TERMINAL_OPEN_FLAG_NO_WINDOW) != 0)
+        {
+            SetStatus("unable to open image viewer", rgb(255, 140, 140));
+            return;
+        }
+
+        SetStatus("opening image viewer", rgb(148, 232, 180));
     }
 
     void FileExplorer::OpenSelectedInTextEditor(void)
@@ -1847,12 +1918,14 @@ namespace
 
         if (SelectedIsSacScript())
             OpenModal(MODAL_OPEN_WITH, "Open With", body, "Run", 0);
+        else if (SelectedIsImage())
+            OpenModal(MODAL_OPEN_WITH, "Open With", body, "Image Viewer", 0);
         else
             OpenModal(MODAL_OPEN_WITH, "Open With", body, "Text Editor", 0);
 
         extra_label = kgfx_obj_ref(modal_extra_button_.label);
         if (extra_label && extra_label->kind == KGFX_OBJ_TEXT)
-            extra_label->u.text.text = "Edit";
+            extra_label->u.text.text = SelectedIsImage() ? "Text" : "Edit";
         SyncActionStates();
     }
 
@@ -2050,6 +2123,8 @@ namespace
         case MODAL_OPEN_WITH:
             if (SelectedIsSacScript())
                 RunSelectedScript();
+            else if (SelectedIsImage())
+                OpenSelectedInImageViewer();
             else
                 OpenSelectedInTextEditor();
             CloseModal();

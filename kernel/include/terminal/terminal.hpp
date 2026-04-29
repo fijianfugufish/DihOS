@@ -39,6 +39,9 @@ public:
     int ProgramActive() const;
     int ScriptActive() const;
     int StartProgram(const char *raw_path, const char *friendly_path, uint32_t launch_flags = 0u);
+    int StartProgramWithArg(const char *raw_path, const char *friendly_path,
+                            const char *arg_raw_path, const char *arg_friendly_path,
+                            uint32_t launch_flags = 0u);
     int StartScript(const char *raw_path, const char *friendly_path, uint32_t launch_flags = 0u);
     void UpdateScript();
     void UpdateSacx();

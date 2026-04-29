@@ -130,7 +130,9 @@ extern "C" int terminal_visible(void)
     return g_terminals[0].Visible();
 }
 
-static int terminal_open_script_internal(const char *raw_path, const char *friendly_path, uint32_t flags)
+static int terminal_open_script_internal(const char *raw_path, const char *friendly_path,
+                                         const char *arg_raw_path, const char *arg_friendly_path,
+                                         uint32_t flags)
 {
     if (!g_terminal_font || !raw_path || !raw_path[0])
         return -1;
@@ -143,15 +145,15 @@ static int terminal_open_script_internal(const char *raw_path, const char *frien
         if (g_terminals[i].ProgramActive())
             continue;
 
-        if (g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
+        if (g_terminals[i].StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
             return 0;
 
         if (!g_terminals[i].Visible())
         {
-            g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
+                g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
             if (g_terminals[i].Initialized() &&
                 !g_terminals[i].ProgramActive() &&
-                g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
+                g_terminals[i].StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
                 return 0;
         }
     }
@@ -162,7 +164,7 @@ static int terminal_open_script_internal(const char *raw_path, const char *frien
         {
             g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
             if (g_terminals[i].Initialized() &&
-                g_terminals[i].StartProgram(raw_path, friendly_path, flags) == 0)
+                g_terminals[i].StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
                 return 0;
         }
     }
@@ -174,22 +176,36 @@ static int terminal_open_script_internal(const char *raw_path, const char *frien
 
 extern "C" int terminal_open_script_ex(const char *raw_path, const char *friendly_path, uint32_t flags)
 {
-    return terminal_open_script_internal(raw_path, friendly_path, flags);
+    return terminal_open_script_internal(raw_path, friendly_path, 0, 0, flags);
 }
 
 extern "C" int terminal_open_program_ex(const char *raw_path, const char *friendly_path, uint32_t flags)
 {
-    return terminal_open_script_internal(raw_path, friendly_path, flags);
+    return terminal_open_script_internal(raw_path, friendly_path, 0, 0, flags);
+}
+
+extern "C" int terminal_open_program_with_arg_ex(const char *raw_path, const char *friendly_path,
+                                                 const char *arg_raw_path, const char *arg_friendly_path,
+                                                 uint32_t flags)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags);
 }
 
 extern "C" int terminal_open_script(const char *raw_path, const char *friendly_path)
 {
-    return terminal_open_script_internal(raw_path, friendly_path, TERMINAL_OPEN_FLAG_NONE);
+    return terminal_open_script_internal(raw_path, friendly_path, 0, 0, TERMINAL_OPEN_FLAG_NONE);
 }
 
 extern "C" int terminal_open_program(const char *raw_path, const char *friendly_path)
 {
-    return terminal_open_script_internal(raw_path, friendly_path, TERMINAL_OPEN_FLAG_NONE);
+    return terminal_open_script_internal(raw_path, friendly_path, 0, 0, TERMINAL_OPEN_FLAG_NONE);
+}
+
+extern "C" int terminal_open_program_with_arg(const char *raw_path, const char *friendly_path,
+                                              const char *arg_raw_path, const char *arg_friendly_path)
+{
+    return terminal_open_script_internal(raw_path, friendly_path, arg_raw_path, arg_friendly_path,
+                                         TERMINAL_OPEN_FLAG_NONE);
 }
 
 extern "C" void terminal_capture_begin(uint8_t mirror_to_terminal, terminal_capture_sink_fn sink, void *user)

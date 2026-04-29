@@ -45,6 +45,12 @@ extern "C"
                             const char *friendly_path,
                             const sacx_runtime_io *io,
                             uint32_t *out_task_id);
+    int sacx_runtime_launch_ex(const char *raw_path,
+                               const char *friendly_path,
+                               const char *arg_raw_path,
+                               const char *arg_friendly_path,
+                               const sacx_runtime_io *io,
+                               uint32_t *out_task_id);
 
     int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_status);
     int sacx_runtime_task_release(uint32_t task_id);
