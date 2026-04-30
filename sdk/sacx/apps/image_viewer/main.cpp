@@ -642,6 +642,8 @@ static int create_ui(void)
 
 static int image_viewer_update(const sacx_api *api)
 {
+    uint8_t focused = 1u;
+
     g_api = api;
 
     if (!api || !g_window)
@@ -653,6 +655,15 @@ static int image_viewer_update(const sacx_api *api)
     }
 
     layout();
+
+    if (api->window_focused)
+        focused = api->window_focused(g_window) ? 1u : 0u;
+    if (!focused)
+    {
+        g_dragging = 0u;
+        return api->app_yield();
+    }
+
     handle_mouse_view();
 
     if (!g_dialog_started)
