@@ -267,6 +267,10 @@ extern "C"
         int (*gfx_obj_set_outline_alpha)(uint32_t obj_handle, uint8_t alpha);
         int (*gfx_obj_set_rect)(uint32_t obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t h);
         int (*gfx_obj_get_rect)(uint32_t obj_handle, int32_t *out_x, int32_t *out_y, uint32_t *out_w, uint32_t *out_h);
+        int (*gfx_obj_set_rotation_deg)(uint32_t obj_handle, int32_t deg);
+        int (*gfx_obj_rotation_deg)(uint32_t obj_handle, int32_t *out_deg);
+        int (*gfx_obj_set_rotation_pivot)(uint32_t obj_handle, int32_t x, int32_t y);
+        int (*gfx_obj_clear_rotation_pivot)(uint32_t obj_handle);
         int (*gfx_obj_set_circle)(uint32_t obj_handle, int32_t cx, int32_t cy, uint32_t r);
         int (*gfx_text_set)(uint32_t obj_handle, const char *text);
         int (*gfx_text_set_align)(uint32_t obj_handle, uint32_t align);
@@ -357,6 +361,7 @@ extern "C"
         int (*dialog_open_file)(const char *initial_dir, const char *suggested_name,
                                 sacx_file_dialog_fn on_result, void *user);
         int (*dialog_active)(void);
+        int (*window_focused)(uint32_t handle);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

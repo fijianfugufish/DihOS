@@ -1157,6 +1157,42 @@ int kwindow_visible(kwindow_handle h)
     return G_windows[h.idx].visible != 0;
 }
 
+int kwindow_focused(kwindow_handle h)
+{
+    kgfx_obj *target = 0;
+    int32_t target_z = 0;
+    int32_t front_z = 0;
+    int found_front = 0;
+
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used || !G_windows[h.idx].visible)
+        return 0;
+
+    target = kgfx_obj_ref(G_windows[h.idx].root);
+    if (!target || !target->visible)
+        return 0;
+
+    target_z = target->z;
+    for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
+        kgfx_obj *root = 0;
+
+        if (!G_windows[i].used || !G_windows[i].visible)
+            continue;
+
+        root = kgfx_obj_ref(G_windows[i].root);
+        if (!root || !root->visible)
+            continue;
+
+        if (!found_front || root->z > front_z)
+        {
+            front_z = root->z;
+            found_front = 1;
+        }
+    }
+
+    return found_front && target_z >= front_z;
+}
+
 int kwindow_raise(kwindow_handle h)
 {
     if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)

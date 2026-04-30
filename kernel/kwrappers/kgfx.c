@@ -460,6 +460,153 @@ static int color_equal(kcolor a, kcolor b)
     return a.r == b.r && a.g == b.g && a.b == b.b;
 }
 
+static int text_world_bounds(const kgfx_text_data *t, uint16_t outline_width, int32_t *x0, int32_t *y0, int32_t *x1, int32_t *y1);
+
+static int32_t norm_deg(int32_t deg)
+{
+    deg %= 360;
+    if (deg < 0)
+        deg += 360;
+    return deg;
+}
+
+static int32_t sin_deg_q14(int32_t deg)
+{
+    int32_t x = norm_deg(deg);
+    int32_t sign = 1;
+    int32_t a = 0;
+    int32_t den = 0;
+
+    if (x > 180)
+    {
+        x -= 180;
+        sign = -1;
+    }
+    if (x > 90)
+        x = 180 - x;
+
+    a = x * (180 - x);
+    den = 40500 - a;
+    if (den == 0)
+        return 0;
+    return sign * (int32_t)(((int64_t)4 * a * 16384) / den);
+}
+
+static int32_t cos_deg_q14(int32_t deg)
+{
+    return sin_deg_q14(deg + 90);
+}
+
+static int obj_rotation_active(const kgfx_obj *o)
+{
+    return o && norm_deg(o->rotation_deg) != 0;
+}
+
+static void obj_local_size(const kgfx_obj *o, int32_t *w, int32_t *h)
+{
+    int32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+    if (!o || !w || !h)
+        return;
+
+    switch (o->kind)
+    {
+    case KGFX_OBJ_RECT:
+        *w = (int32_t)o->u.rect.w;
+        *h = (int32_t)o->u.rect.h;
+        return;
+    case KGFX_OBJ_IMAGE:
+        *w = (int32_t)o->u.image.w;
+        *h = (int32_t)o->u.image.h;
+        return;
+    case KGFX_OBJ_TEXT:
+        if (text_world_bounds(&o->u.text, 0, &x0, &y0, &x1, &y1))
+        {
+            *w = x1 - x0;
+            *h = y1 - y0;
+            return;
+        }
+        break;
+    case KGFX_OBJ_CIRCLE:
+        *w = (int32_t)o->u.circle.r * 2;
+        *h = (int32_t)o->u.circle.r * 2;
+        return;
+    default:
+        break;
+    }
+
+    *w = 0;
+    *h = 0;
+}
+
+static void obj_rotation_pivot(const kgfx_obj *o, int32_t *px, int32_t *py)
+{
+    int32_t w = 0, h = 0;
+
+    if (!o || !px || !py)
+        return;
+    if (o->pivot_set)
+    {
+        *px = o->pivot_x;
+        *py = o->pivot_y;
+        return;
+    }
+    obj_local_size(o, &w, &h);
+    *px = w / 2;
+    *py = h / 2;
+}
+
+static void rotate_point_q14(int32_t x, int32_t y, int32_t px, int32_t py, int32_t sin_q14, int32_t cos_q14,
+                             int32_t *out_x, int32_t *out_y)
+{
+    int32_t dx = x - px;
+    int32_t dy = y - py;
+    *out_x = px + (int32_t)(((int64_t)dx * cos_q14 - (int64_t)dy * sin_q14) >> 14);
+    *out_y = py + (int32_t)(((int64_t)dx * sin_q14 + (int64_t)dy * cos_q14) >> 14);
+}
+
+static void inverse_rotate_point_q14(int32_t x, int32_t y, int32_t px, int32_t py, int32_t sin_q14, int32_t cos_q14,
+                                     int32_t *out_x, int32_t *out_y)
+{
+    int32_t dx = x - px;
+    int32_t dy = y - py;
+    *out_x = px + (int32_t)(((int64_t)dx * cos_q14 + (int64_t)dy * sin_q14) >> 14);
+    *out_y = py + (int32_t)((-((int64_t)dx * sin_q14) + ((int64_t)dy * cos_q14)) >> 14);
+}
+
+static void rotated_box_bounds(int32_t x, int32_t y, int32_t w, int32_t h, int32_t pad,
+                               int32_t pivot_x, int32_t pivot_y, int32_t deg,
+                               kgfx_clip_rect *raw)
+{
+    int32_t sin_q14 = sin_deg_q14(deg);
+    int32_t cos_q14 = cos_deg_q14(deg);
+    int32_t xs[4] = {-pad, w + pad, w + pad, -pad};
+    int32_t ys[4] = {-pad, -pad, h + pad, h + pad};
+    int32_t min_x = 0, min_y = 0, max_x = 0, max_y = 0;
+
+    for (uint32_t i = 0; i < 4u; ++i)
+    {
+        int32_t rx = 0, ry = 0;
+        rotate_point_q14(xs[i], ys[i], pivot_x, pivot_y, sin_q14, cos_q14, &rx, &ry);
+        rx += x;
+        ry += y;
+        if (i == 0u || rx < min_x)
+            min_x = rx;
+        if (i == 0u || ry < min_y)
+            min_y = ry;
+        if (i == 0u || rx > max_x)
+            max_x = rx;
+        if (i == 0u || ry > max_y)
+            max_y = ry;
+    }
+
+    raw->x0 = min_x - 2;
+    raw->y0 = min_y - 2;
+    raw->x1 = max_x + 3;
+    raw->y1 = max_y + 3;
+    raw->enabled = 1;
+}
+
 static kgfx_clip_rect fb_clip_rect(void)
 {
     kgfx_clip_rect clip;
@@ -756,10 +903,20 @@ static int obj_draw_bounds(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_c
             return 0;
         if (o->alpha == 0 && !outline_visible)
             return 0;
-        raw.x0 = r->origin_x - pad;
-        raw.y0 = r->origin_y - pad;
-        raw.x1 = r->origin_x + (int32_t)o->u.rect.w + pad;
-        raw.y1 = r->origin_y + (int32_t)o->u.rect.h + pad;
+        if (obj_rotation_active(o))
+        {
+            int32_t px = 0, py = 0;
+            obj_rotation_pivot(o, &px, &py);
+            rotated_box_bounds(r->origin_x, r->origin_y, (int32_t)o->u.rect.w, (int32_t)o->u.rect.h,
+                               pad, px, py, o->rotation_deg, &raw);
+        }
+        else
+        {
+            raw.x0 = r->origin_x - pad;
+            raw.y0 = r->origin_y - pad;
+            raw.x1 = r->origin_x + (int32_t)o->u.rect.w + pad;
+            raw.y1 = r->origin_y + (int32_t)o->u.rect.h + pad;
+        }
         break;
     case KGFX_OBJ_CIRCLE: {
         int32_t radius = 0;
@@ -779,20 +936,43 @@ static int obj_draw_bounds(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_c
             return 0;
         if (!text_world_bounds(&o->u.text, outline_visible ? o->outline_width : 0, &raw.x0, &raw.y0, &raw.x1, &raw.y1))
             return 0;
-        raw.x0 += r->origin_x - o->u.text.x;
-        raw.y0 += r->origin_y - o->u.text.y;
-        raw.x1 += r->origin_x - o->u.text.x;
-        raw.y1 += r->origin_y - o->u.text.y;
+        if (obj_rotation_active(o))
+        {
+            int32_t px = 0, py = 0;
+            int32_t text_x = raw.x0 + r->origin_x - o->u.text.x;
+            int32_t text_y = raw.y0 + r->origin_y - o->u.text.y;
+            int32_t text_w = raw.x1 - raw.x0;
+            int32_t text_h = raw.y1 - raw.y0;
+            obj_rotation_pivot(o, &px, &py);
+            rotated_box_bounds(text_x, text_y, text_w, text_h, pad, px, py, o->rotation_deg, &raw);
+        }
+        else
+        {
+            raw.x0 += r->origin_x - o->u.text.x;
+            raw.y0 += r->origin_y - o->u.text.y;
+            raw.x1 += r->origin_x - o->u.text.x;
+            raw.y1 += r->origin_y - o->u.text.y;
+        }
         break;
     case KGFX_OBJ_IMAGE:
         if (!o->u.image.argb || !o->u.image.w || !o->u.image.h)
             return 0;
         if (o->alpha == 0 && !outline_visible)
             return 0;
-        raw.x0 = r->origin_x - pad;
-        raw.y0 = r->origin_y - pad;
-        raw.x1 = r->origin_x + (int32_t)o->u.image.w + pad;
-        raw.y1 = r->origin_y + (int32_t)o->u.image.h + pad;
+        if (obj_rotation_active(o))
+        {
+            int32_t px = 0, py = 0;
+            obj_rotation_pivot(o, &px, &py);
+            rotated_box_bounds(r->origin_x, r->origin_y, (int32_t)o->u.image.w, (int32_t)o->u.image.h,
+                               pad, px, py, o->rotation_deg, &raw);
+        }
+        else
+        {
+            raw.x0 = r->origin_x - pad;
+            raw.y0 = r->origin_y - pad;
+            raw.x1 = r->origin_x + (int32_t)o->u.image.w + pad;
+            raw.y1 = r->origin_y + (int32_t)o->u.image.h + pad;
+        }
         break;
     default:
         return 0;
@@ -835,6 +1015,10 @@ static uint64_t obj_visual_hash(const kgfx_obj *o, const kgfx_resolved_obj *r)
     hash_mix_u8(&h, o->outline.g);
     hash_mix_u8(&h, o->outline.b);
     hash_mix_u8(&h, o->outline_alpha);
+    hash_mix_i32(&h, o->rotation_deg);
+    hash_mix_i32(&h, o->pivot_x);
+    hash_mix_i32(&h, o->pivot_y);
+    hash_mix_u8(&h, o->pivot_set);
 
     switch (o->kind)
     {
@@ -1426,6 +1610,272 @@ static void bb_blit_argb32_scaled_clip(int32_t x, int32_t y,
     }
 }
 
+static inline void bb_blend_argb_at(int32_t x, int32_t y, uint32_t sp, uint8_t global_alpha)
+{
+    uint8_t sa = (uint8_t)(sp >> 24);
+    uint8_t a = 0;
+    uint8_t sr = 0, sg = 0, sb = 0;
+    uint32_t *pix = 0;
+
+    if (!BB_ptr || sa == 0 || global_alpha == 0)
+        return;
+    if (x < 0 || y < 0 || x >= (int32_t)FB.width || y >= (int32_t)FB.height)
+        return;
+    if (bb_clip_reject_point(x, y))
+        return;
+
+    a = (uint8_t)(((uint16_t)sa * (uint16_t)global_alpha + 127u) / 255u);
+    if (a == 0)
+        return;
+    sr = (uint8_t)(sp >> 16);
+    sg = (uint8_t)(sp >> 8);
+    sb = (uint8_t)sp;
+    pix = (uint32_t *)(BB_ptr + (uint32_t)y * BB_stride + (uint32_t)x * 4u);
+    *pix = blend_over(*pix, sr, sg, sb, a);
+}
+
+static void bb_rotated_rect_clip(int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                 int32_t pivot_x, int32_t pivot_y, int32_t deg,
+                                 kcolor fill, uint8_t fill_alpha,
+                                 uint32_t outline_w, kcolor outline, uint8_t outline_alpha,
+                                 const kgfx_clip_rect *bounds)
+{
+    int32_t sin_q14 = sin_deg_q14(deg);
+    int32_t cos_q14 = cos_deg_q14(deg);
+
+    if (!bounds || !bounds->enabled)
+        return;
+
+    for (int32_t py = bounds->y0; py < bounds->y1; ++py)
+    {
+        for (int32_t px = bounds->x0; px < bounds->x1; ++px)
+        {
+            int32_t lx = 0, ly = 0;
+            int fill_hit = 0;
+            inverse_rotate_point_q14(px - x, py - y, pivot_x, pivot_y, sin_q14, cos_q14, &lx, &ly);
+            fill_hit = (lx >= 0 && ly >= 0 && lx < (int32_t)w && ly < (int32_t)h);
+            if (fill_hit)
+            {
+                kgfx_put_px_blend(px, py, fill, fill_alpha);
+            }
+            else if (outline_w && outline_alpha &&
+                     lx >= -(int32_t)outline_w && ly >= -(int32_t)outline_w &&
+                     lx < (int32_t)w + (int32_t)outline_w &&
+                     ly < (int32_t)h + (int32_t)outline_w)
+            {
+                kgfx_put_px_blend(px, py, outline, outline_alpha);
+            }
+        }
+    }
+}
+
+static void bb_rotated_image_clip(int32_t x, int32_t y,
+                                  uint32_t dst_w, uint32_t dst_h,
+                                  const uint32_t *src_argb,
+                                  uint32_t src_w, uint32_t src_h,
+                                  uint32_t src_stride_px,
+                                  uint8_t global_alpha,
+                                  uint8_t sample_mode,
+                                  int32_t pivot_x, int32_t pivot_y, int32_t deg,
+                                  uint32_t outline_w, kcolor outline, uint8_t outline_alpha,
+                                  const kgfx_clip_rect *bounds)
+{
+    int32_t sin_q14 = sin_deg_q14(deg);
+    int32_t cos_q14 = cos_deg_q14(deg);
+    uint32_t step_x = 0;
+    uint32_t step_y = 0;
+
+    if (!bounds || !bounds->enabled || !src_argb || !dst_w || !dst_h || !src_w || !src_h || src_stride_px < src_w)
+        return;
+
+    step_x = ((uint64_t)src_w << 16) / dst_w;
+    step_y = ((uint64_t)src_h << 16) / dst_h;
+
+    for (int32_t py = bounds->y0; py < bounds->y1; ++py)
+    {
+        for (int32_t px = bounds->x0; px < bounds->x1; ++px)
+        {
+            int32_t lx = 0, ly = 0;
+            inverse_rotate_point_q14(px - x, py - y, pivot_x, pivot_y, sin_q14, cos_q14, &lx, &ly);
+            if (lx >= 0 && ly >= 0 && lx < (int32_t)dst_w && ly < (int32_t)dst_h)
+            {
+                uint32_t fx16 = (uint32_t)lx * step_x;
+                uint32_t fy16 = (uint32_t)ly * step_y;
+                uint32_t sp = (sample_mode == KGFX_IMAGE_SAMPLE_BILINEAR)
+                                  ? sample_argb32_bilinear(src_argb, src_w, src_h, src_stride_px, fx16, fy16)
+                                  : sample_argb32_nearest(src_argb, src_w, src_h, src_stride_px, fx16, fy16);
+                bb_blend_argb_at(px, py, sp, global_alpha);
+            }
+            else if (outline_w && outline_alpha &&
+                     lx >= -(int32_t)outline_w && ly >= -(int32_t)outline_w &&
+                     lx < (int32_t)dst_w + (int32_t)outline_w &&
+                     ly < (int32_t)dst_h + (int32_t)outline_w)
+            {
+                kgfx_put_px_blend(px, py, outline, outline_alpha);
+            }
+        }
+    }
+}
+
+static uint32_t kgfx_text_scale_tenths(uint32_t scale)
+{
+    if (!scale)
+        return 0;
+    return 10u + scale - 1u;
+}
+
+static void bb_rotated_text_pixel(int32_t text_x, int32_t text_y,
+                                  int32_t pivot_x, int32_t pivot_y,
+                                  int32_t sin_q14, int32_t cos_q14,
+                                  int32_t lx, int32_t ly,
+                                  kcolor color, uint8_t alpha)
+{
+    int32_t rx = 0, ry = 0;
+    rotate_point_q14(lx, ly, pivot_x, pivot_y, sin_q14, cos_q14, &rx, &ry);
+    kgfx_put_px_blend(text_x + rx, text_y + ry, color, alpha);
+}
+
+static void bb_rotated_text_block(int32_t text_x, int32_t text_y,
+                                  int32_t pivot_x, int32_t pivot_y,
+                                  int32_t sin_q14, int32_t cos_q14,
+                                  int32_t lx0, int32_t ly0, int32_t lx1, int32_t ly1,
+                                  kcolor color, uint8_t alpha)
+{
+    for (int32_t yy = ly0; yy < ly1; ++yy)
+        for (int32_t xx = lx0; xx < lx1; ++xx)
+            bb_rotated_text_pixel(text_x, text_y, pivot_x, pivot_y, sin_q14, cos_q14, xx, yy, color, alpha);
+}
+
+static void bb_rotated_text_outline_block(int32_t text_x, int32_t text_y,
+                                          int32_t pivot_x, int32_t pivot_y,
+                                          int32_t sin_q14, int32_t cos_q14,
+                                          int32_t lx0, int32_t ly0, int32_t lx1, int32_t ly1,
+                                          uint32_t outline_w, kcolor outline, uint8_t outline_alpha)
+{
+    int32_t r = (int32_t)outline_w;
+    int32_t r2 = r * r;
+
+    if (!outline_w || !outline_alpha)
+        return;
+
+    for (int32_t oy = -r; oy <= r; ++oy)
+    {
+        for (int32_t ox = -r; ox <= r; ++ox)
+        {
+            if (ox == 0 && oy == 0)
+                continue;
+            if (ox * ox + oy * oy > r2)
+                continue;
+            bb_rotated_text_block(text_x, text_y, pivot_x, pivot_y, sin_q14, cos_q14,
+                                  lx0 + ox, ly0 + oy, lx1 + ox, ly1 + oy,
+                                  outline, outline_alpha);
+        }
+    }
+}
+
+static void bb_rotated_text_clip(const kgfx_obj *o, const kgfx_resolved_obj *r)
+{
+    const kgfx_text_data *t = 0;
+    const kfont *font = 0;
+    const unsigned char *p = 0;
+    int32_t bounds_x0 = 0, bounds_y0 = 0, bounds_x1 = 0, bounds_y1 = 0;
+    int32_t text_x = 0, text_y = 0;
+    int32_t pivot_x = 0, pivot_y = 0;
+    int32_t sin_q14 = 0, cos_q14 = 0;
+    int32_t line_y = 0;
+    uint32_t scale_tenths = 0;
+    uint32_t row_bytes = 0;
+
+    if (!o || !r || o->kind != KGFX_OBJ_TEXT)
+        return;
+    t = &o->u.text;
+    font = t->font;
+    if (!font || !t->text || !t->scale)
+        return;
+    if (!text_world_bounds(t, 0, &bounds_x0, &bounds_y0, &bounds_x1, &bounds_y1))
+        return;
+
+    text_x = bounds_x0 + r->origin_x - t->x;
+    text_y = bounds_y0 + r->origin_y - t->y;
+    obj_rotation_pivot(o, &pivot_x, &pivot_y);
+    sin_q14 = sin_deg_q14(o->rotation_deg);
+    cos_q14 = cos_deg_q14(o->rotation_deg);
+    scale_tenths = kgfx_text_scale_tenths(t->scale);
+    row_bytes = (font->w + 7u) >> 3;
+    p = (const unsigned char *)t->text;
+    line_y = t->y;
+
+    do
+    {
+        uint32_t line_w = ktext_measure_line_px(font, (const char *)p, t->scale, t->char_spacing);
+        int32_t pen_x = t->x;
+
+        if (t->align == KTEXT_ALIGN_CENTER)
+            pen_x -= (int32_t)(line_w / 2u);
+        else if (t->align == KTEXT_ALIGN_RIGHT)
+            pen_x -= (int32_t)line_w;
+
+        while (*p && *p != '\n')
+        {
+            uint32_t gi = (uint32_t)*p++;
+            uint8_t left = 0;
+            uint8_t tw = 0;
+            uint32_t adv = 0;
+
+            if (gi < font->glyph_count)
+            {
+                left = font->tight_left[gi];
+                tw = font->tight_width[gi];
+            }
+            if (tw != 0 && left < font->w)
+                adv = tw;
+            else if (gi == ' ')
+                adv = font->space_advance;
+            else
+                adv = font->w;
+
+            if (tw != 0 && left < font->w)
+            {
+                const uint8_t *glyph = font->glyphs + (uint64_t)gi * font->bytes_per_glyph;
+                for (uint32_t row = 0; row < font->h; ++row)
+                {
+                    int32_t py0 = line_y + (int32_t)(((uint64_t)row * scale_tenths) / 10u) - bounds_y0;
+                    int32_t py1 = line_y + (int32_t)((((uint64_t)row + 1u) * scale_tenths) / 10u) - bounds_y0;
+                    const uint8_t *rowbits = glyph + row * row_bytes;
+                    if (py1 <= py0)
+                        py1 = py0 + 1;
+                    for (uint32_t bit = 0; bit < tw; ++bit)
+                    {
+                        uint32_t xcol = (uint32_t)left + bit;
+                        uint8_t b = rowbits[xcol >> 3];
+                        uint8_t m = (uint8_t)(1u << (7 - (xcol & 7)));
+                        if (b & m)
+                        {
+                            int32_t px0 = pen_x + (int32_t)(((uint64_t)bit * scale_tenths) / 10u) - bounds_x0;
+                            int32_t px1 = pen_x + (int32_t)((((uint64_t)bit + 1u) * scale_tenths) / 10u) - bounds_x0;
+                            if (px1 <= px0)
+                                px1 = px0 + 1;
+                            bb_rotated_text_outline_block(text_x, text_y, pivot_x, pivot_y, sin_q14, cos_q14,
+                                                          px0, py0, px1, py1,
+                                                          o->outline_width, o->outline, o->outline_alpha);
+                            bb_rotated_text_block(text_x, text_y, pivot_x, pivot_y, sin_q14, cos_q14,
+                                                  px0, py0, px1, py1, o->fill, o->alpha);
+                        }
+                    }
+                }
+            }
+
+            pen_x += (int32_t)ktext_scale_mul_px(adv, t->scale) + t->char_spacing;
+        }
+
+        if (*p == '\n')
+        {
+            ++p;
+            line_y += (int32_t)ktext_line_height(font, t->scale, t->line_spacing);
+        }
+    } while (*p);
+}
+
 // integer sqrt for u64 (fast, no lib)
 static inline uint32_t isqrt_u64(uint64_t v)
 {
@@ -1813,10 +2263,23 @@ void kgfx_render_all(kcolor clear_color)
         switch (o->kind)
         {
         case KGFX_OBJ_RECT:
-            bb_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h, o->fill, o->alpha);
-            if (o->outline_width)
-                bb_rect_outline_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
-                                     o->outline_width, o->outline, o->outline_alpha);
+            if (obj_rotation_active(o))
+            {
+                int32_t px = 0, py = 0;
+                obj_rotation_pivot(o, &px, &py);
+                bb_rotated_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
+                                     px, py, o->rotation_deg,
+                                     o->fill, o->alpha,
+                                     o->outline_width, o->outline, o->outline_alpha,
+                                     &current[entries[i].idx].bounds);
+            }
+            else
+            {
+                bb_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h, o->fill, o->alpha);
+                if (o->outline_width)
+                    bb_rect_outline_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
+                                         o->outline_width, o->outline, o->outline_alpha);
+            }
             break;
         case KGFX_OBJ_CIRCLE:
             // fill first
@@ -1829,7 +2292,11 @@ void kgfx_render_all(kcolor clear_color)
             break;
         case KGFX_OBJ_TEXT: {
             const kgfx_text_data *t = &o->u.text;
-            if (t->font && t->text && t->scale)
+            if (obj_rotation_active(o))
+            {
+                bb_rotated_text_clip(o, r);
+            }
+            else if (t->font && t->text && t->scale)
             {
                 // text uses fill/alpha as the glyph color, and outline_* for border
                 ktext_draw_str_align_outline(
@@ -1847,28 +2314,46 @@ void kgfx_render_all(kcolor clear_color)
         case KGFX_OBJ_IMAGE: {
             const kgfx_image_data *im = &o->u.image;
 
-            // draw image first
-            if (im->src_w == im->w && im->src_h == im->h)
+            if (obj_rotation_active(o))
             {
-                bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
-                                    im->argb, im->stride_px,
-                                    o->alpha);
+                int32_t px = 0, py = 0;
+                obj_rotation_pivot(o, &px, &py);
+                bb_rotated_image_clip(r->origin_x, r->origin_y,
+                                      im->w, im->h,
+                                      im->argb,
+                                      im->src_w, im->src_h,
+                                      im->stride_px,
+                                      o->alpha,
+                                      im->sample_mode,
+                                      px, py, o->rotation_deg,
+                                      o->outline_width, o->outline, o->outline_alpha,
+                                      &current[entries[i].idx].bounds);
             }
             else
             {
-                bb_blit_argb32_scaled_clip(r->origin_x, r->origin_y,
-                                           im->w, im->h,
-                                           im->argb,
-                                           im->src_w, im->src_h,
-                                           im->stride_px,
-                                           o->alpha,
-                                           im->sample_mode);
-            }
+                // draw image first
+                if (im->src_w == im->w && im->src_h == im->h)
+                {
+                    bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
+                                        im->argb, im->stride_px,
+                                        o->alpha);
+                }
+                else
+                {
+                    bb_blit_argb32_scaled_clip(r->origin_x, r->origin_y,
+                                               im->w, im->h,
+                                               im->argb,
+                                               im->src_w, im->src_h,
+                                               im->stride_px,
+                                               o->alpha,
+                                               im->sample_mode);
+                }
 
-            // optional border/outline on top (same behaviour as others)
-            if (o->outline_width)
-                bb_rect_outline_clip(r->origin_x, r->origin_y, (int32_t)im->w, (int32_t)im->h,
-                                     o->outline_width, o->outline, o->outline_alpha);
+                // optional border/outline on top (same behaviour as others)
+                if (o->outline_width)
+                    bb_rect_outline_clip(r->origin_x, r->origin_y, (int32_t)im->w, (int32_t)im->h,
+                                         o->outline_width, o->outline, o->outline_alpha);
+            }
 
             break;
         }

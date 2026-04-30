@@ -373,6 +373,10 @@ static const char *G_known_imports[] = {
     "gfx_obj_set_outline_alpha",
     "gfx_obj_set_rect",
     "gfx_obj_get_rect",
+    "gfx_obj_set_rotation_deg",
+    "gfx_obj_rotation_deg",
+    "gfx_obj_set_rotation_pivot",
+    "gfx_obj_clear_rotation_pivot",
     "gfx_obj_set_circle",
     "gfx_text_set",
     "gfx_text_set_align",
@@ -443,6 +447,7 @@ static const char *G_known_imports[] = {
     "app_arg_friendly_path",
     "dialog_open_file",
     "dialog_active",
+    "window_focused",
 };
 
 static int sacx_import_known(const char *name)
@@ -1509,6 +1514,14 @@ static int sacx_api_window_visible(uint32_t handle)
     return kwindow_visible(slot->handle);
 }
 
+static int sacx_api_window_focused(uint32_t handle)
+{
+    sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
+    if (!slot)
+        return 0;
+    return kwindow_focused(slot->handle);
+}
+
 static int sacx_api_window_raise(uint32_t handle)
 {
     sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
@@ -1805,6 +1818,42 @@ static int sacx_api_gfx_obj_get_rect(uint32_t obj_handle, int32_t *out_x, int32_
         return 0;
     }
     return -1;
+}
+
+static int sacx_api_gfx_obj_set_rotation_deg(uint32_t obj_handle, int32_t deg)
+{
+    sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
+    if (!slot)
+        return -1;
+    kgfx_obj_set_rotation_deg(slot->handle, deg);
+    return 0;
+}
+
+static int sacx_api_gfx_obj_rotation_deg(uint32_t obj_handle, int32_t *out_deg)
+{
+    kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
+    if (!obj || !out_deg)
+        return -1;
+    *out_deg = obj->rotation_deg;
+    return 0;
+}
+
+static int sacx_api_gfx_obj_set_rotation_pivot(uint32_t obj_handle, int32_t x, int32_t y)
+{
+    sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
+    if (!slot)
+        return -1;
+    kgfx_obj_set_rotation_pivot(slot->handle, x, y);
+    return 0;
+}
+
+static int sacx_api_gfx_obj_clear_rotation_pivot(uint32_t obj_handle)
+{
+    sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
+    if (!slot)
+        return -1;
+    kgfx_obj_clear_rotation_pivot(slot->handle);
+    return 0;
 }
 
 static int sacx_api_gfx_obj_set_circle(uint32_t obj_handle, int32_t cx, int32_t cy, uint32_t r)
@@ -2587,6 +2636,10 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.gfx_obj_set_outline_alpha = sacx_api_gfx_obj_set_outline_alpha;
     task->api.gfx_obj_set_rect = sacx_api_gfx_obj_set_rect;
     task->api.gfx_obj_get_rect = sacx_api_gfx_obj_get_rect;
+    task->api.gfx_obj_set_rotation_deg = sacx_api_gfx_obj_set_rotation_deg;
+    task->api.gfx_obj_rotation_deg = sacx_api_gfx_obj_rotation_deg;
+    task->api.gfx_obj_set_rotation_pivot = sacx_api_gfx_obj_set_rotation_pivot;
+    task->api.gfx_obj_clear_rotation_pivot = sacx_api_gfx_obj_clear_rotation_pivot;
     task->api.gfx_obj_set_circle = sacx_api_gfx_obj_set_circle;
     task->api.gfx_text_set = sacx_api_gfx_text_set;
     task->api.gfx_text_set_align = sacx_api_gfx_text_set_align;
@@ -2665,6 +2718,7 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.app_arg_friendly_path = sacx_api_app_arg_friendly_path;
     task->api.dialog_open_file = sacx_api_dialog_open_file;
     task->api.dialog_active = sacx_api_dialog_active;
+    task->api.window_focused = sacx_api_window_focused;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)

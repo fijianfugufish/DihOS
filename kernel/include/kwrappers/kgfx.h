@@ -90,6 +90,10 @@ extern "C"
         uint16_t outline_width;
         kcolor outline;
         uint8_t outline_alpha;
+        int32_t rotation_deg;
+        int32_t pivot_x;
+        int32_t pivot_y;
+        uint8_t pivot_set;
 
         union
         {
@@ -243,6 +247,31 @@ extern "C"
         kgfx_obj *o = kgfx_obj_ref(h);
         if (o)
             o->clip_to_parent = enabled ? 1u : 0u;
+    }
+
+    static inline void kgfx_obj_set_rotation_deg(kgfx_obj_handle h, int32_t deg)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o)
+            o->rotation_deg = deg;
+    }
+
+    static inline void kgfx_obj_set_rotation_pivot(kgfx_obj_handle h, int32_t x, int32_t y)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o)
+        {
+            o->pivot_x = x;
+            o->pivot_y = y;
+            o->pivot_set = 1u;
+        }
+    }
+
+    static inline void kgfx_obj_clear_rotation_pivot(kgfx_obj_handle h)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o)
+            o->pivot_set = 0u;
     }
 
     char *kgfx_pmem_strdup(const char *s);

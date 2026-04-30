@@ -208,6 +208,10 @@ static std::vector<std::string> default_imports()
         "gfx_obj_set_outline_alpha",
         "gfx_obj_set_rect",
         "gfx_obj_get_rect",
+        "gfx_obj_set_rotation_deg",
+        "gfx_obj_rotation_deg",
+        "gfx_obj_set_rotation_pivot",
+        "gfx_obj_clear_rotation_pivot",
         "gfx_obj_set_circle",
         "gfx_text_set",
         "gfx_text_set_align",
@@ -278,6 +282,7 @@ static std::vector<std::string> default_imports()
         "app_arg_friendly_path",
         "dialog_open_file",
         "dialog_active",
+        "window_focused",
     };
 }
 
