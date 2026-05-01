@@ -769,11 +769,41 @@ static int is_hidi2cish_id(const char *s)
 
     if (memeq_n(s, "PNP0C50", 7))
         return 1;
+    if (memeq_n(s, "ACPI0C50", 8))
+        return 1;
+    if (memeq_n(s, "MSFT0001", 8))
+        return 1;
+    if (memeq_n(s, "MSFT0002", 8))
+        return 1;
     if (memeq_n(s, "QTEC0001", 8))
         return 1;
     if (memeq_n(s, "QTEC0002", 8))
         return 1;
     if (memeq_n(s, "QTEC", 4))
+        return 1;
+    if (memeq_n(s, "ELAN", 4))
+        return 1;
+    if (memeq_n(s, "SYNA", 4))
+        return 1;
+    if (memeq_n(s, "DLL", 3))
+        return 1;
+    if (memeq_n(s, "WCOM", 4))
+        return 1;
+    if (memeq_n(s, "WAC", 3))
+        return 1;
+    if (memeq_n(s, "ATML", 4))
+        return 1;
+    if (memeq_n(s, "GDIX", 4))
+        return 1;
+    if (memeq_n(s, "GTCH", 4))
+        return 1;
+    if (memeq_n(s, "FTSC", 4))
+        return 1;
+    if (memeq_n(s, "RAYD", 4))
+        return 1;
+    if (memeq_n(s, "NTRG", 4))
+        return 1;
+    if (memeq_n(s, "CYPR", 4))
         return 1;
 
     return 0;
@@ -830,10 +860,15 @@ static uint8_t hidi2c_acpi_kind_hint_from_summary(const hidi2c_acpi_summary_t *s
         return kind;
 
     if (cstr_has_token(s->name, "ECKB") ||
+        cstr_has_token(s->name, "KBC") ||
         cstr_has_token(s->name, "KBD") ||
         cstr_has_token(s->name, "KEY") ||
         cstr_has_token(s->hid, "PNP0303") ||
-        cstr_has_token(s->cid, "PNP0303"))
+        cstr_has_token(s->hid, "PNP030B") ||
+        cstr_has_token(s->hid, "PNP0320") ||
+        cstr_has_token(s->cid, "PNP0303") ||
+        cstr_has_token(s->cid, "PNP030B") ||
+        cstr_has_token(s->cid, "PNP0320"))
     {
         kind |= HIDI2C_ACPI_KIND_KEYBOARD;
     }
@@ -845,6 +880,38 @@ static uint8_t hidi2c_acpi_kind_hint_from_summary(const hidi2c_acpi_summary_t *s
         cstr_has_token(s->name, "MOU") ||
         cstr_has_token(s->name, "PTR") ||
         cstr_has_token(s->name, "TOUCH") ||
+        cstr_has_token(s->name, "ELAN") ||
+        cstr_has_token(s->name, "SYNA") ||
+        cstr_has_token(s->name, "WCOM") ||
+        cstr_has_token(s->name, "WAC") ||
+        cstr_has_token(s->hid, "MSFT0001") ||
+        cstr_has_token(s->hid, "MSFT0002") ||
+        cstr_has_token(s->hid, "ELAN") ||
+        cstr_has_token(s->hid, "SYNA") ||
+        cstr_has_token(s->hid, "DLL") ||
+        cstr_has_token(s->hid, "WCOM") ||
+        cstr_has_token(s->hid, "WAC") ||
+        cstr_has_token(s->hid, "ATML") ||
+        cstr_has_token(s->hid, "GDIX") ||
+        cstr_has_token(s->hid, "GTCH") ||
+        cstr_has_token(s->hid, "FTSC") ||
+        cstr_has_token(s->hid, "RAYD") ||
+        cstr_has_token(s->hid, "NTRG") ||
+        cstr_has_token(s->hid, "CYPR") ||
+        cstr_has_token(s->cid, "MSFT0001") ||
+        cstr_has_token(s->cid, "MSFT0002") ||
+        cstr_has_token(s->cid, "ELAN") ||
+        cstr_has_token(s->cid, "SYNA") ||
+        cstr_has_token(s->cid, "DLL") ||
+        cstr_has_token(s->cid, "WCOM") ||
+        cstr_has_token(s->cid, "WAC") ||
+        cstr_has_token(s->cid, "ATML") ||
+        cstr_has_token(s->cid, "GDIX") ||
+        cstr_has_token(s->cid, "GTCH") ||
+        cstr_has_token(s->cid, "FTSC") ||
+        cstr_has_token(s->cid, "RAYD") ||
+        cstr_has_token(s->cid, "NTRG") ||
+        cstr_has_token(s->cid, "CYPR") ||
         cstr_has_token(s->hid, "PNP0F") ||
         cstr_has_token(s->cid, "PNP0F"))
     {
@@ -856,11 +923,15 @@ static uint8_t hidi2c_acpi_kind_hint_from_summary(const hidi2c_acpi_summary_t *s
 
 static uint8_t hidi2c_acpi_summary_looks_like_candidate(const hidi2c_acpi_summary_t *s)
 {
+    uint8_t kind_hint;
+
     if (!s || !s->sb_found)
         return 0u;
 
     if ((s->sb_slave_addr & 0x7Fu) == 0u)
         return 0u;
+
+    kind_hint = hidi2c_acpi_kind_hint_from_summary(s);
 
     if (memeq_n(s->name, "ECKB", 4) || memeq_n(s->name, "TCPD", 4))
         return 1u;
@@ -869,6 +940,9 @@ static uint8_t hidi2c_acpi_summary_looks_like_candidate(const hidi2c_acpi_summar
         return 1u;
 
     if (s->dsm_hid_desc_ok)
+        return 1u;
+
+    if (kind_hint != HIDI2C_ACPI_KIND_UNKNOWN)
         return 1u;
 
     if (s->crs_has_serialbus &&

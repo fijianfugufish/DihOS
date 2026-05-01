@@ -143,6 +143,14 @@ typedef struct
 /* needed by stage2_load_kernel.c */
 const EFI_GUID FILE_INFO_ID = (EFI_GUID){0x09576E92, 0x6D3F, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 
+#if defined(__x86_64__) || defined(_M_X64)
+#define DIHOS_STAGE2_BANNER L"[CHAIN] Stage2 x64 starting"
+#define DIHOS_KERNEL_PATH L"OS\\x64\\KERNEL.ELF"
+#else
+#define DIHOS_STAGE2_BANNER L"[CHAIN] Stage2 aa64 starting"
+#define DIHOS_KERNEL_PATH L"OS\\aa64\\KERNEL.ELF"
+#endif
+
 static const EFI_GUID ACPI_20_GUID = {0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}};
 static const EFI_GUID ACPI_10_GUID = {0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}};
 static int guid_eq(const EFI_GUID *a, const EFI_GUID *b)
@@ -198,11 +206,19 @@ static uint64_t find_rsdp(EFI_SYSTEM_TABLE *st)
 }
 
 #ifndef TLMM_MMIO_OVERRIDE_BASE
+#if defined(__x86_64__) || defined(_M_X64)
+#define TLMM_MMIO_OVERRIDE_BASE 0ULL
+#else
 #define TLMM_MMIO_OVERRIDE_BASE 0x000000000F100000ULL
+#endif
 #endif
 
 #ifndef TLMM_MMIO_OVERRIDE_SIZE
+#if defined(__x86_64__) || defined(_M_X64)
+#define TLMM_MMIO_OVERRIDE_SIZE 0ULL
+#else
 #define TLMM_MMIO_OVERRIDE_SIZE 0x0000000000F00000ULL
+#endif
 #endif
 
 static uint64_t try_tlmm_override_from_file(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, uint64_t *size_out)
@@ -1044,7 +1060,7 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *, EFI_HANDLE, const boot_info *,
 /* -------------------------------------------------------------------------- */
 EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
-    println(st, L"[CHAIN] Stage2 starting");
+    println(st, DIHOS_STAGE2_BANNER);
 
     EFI_SET_WATCHDOG_TIMER W = BsWatchdog(st->BootServices);
     if (W)
@@ -1133,7 +1149,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Load kernel */
     EFI_PHYSICAL_ADDRESS entry = 0;
-    s = load_kernel_elf(st, image, L"OS\\aa64\\KERNEL.ELF", &entry, &bi);
+    s = load_kernel_elf(st, image, DIHOS_KERNEL_PATH, &entry, &bi);
     if (s)
     {
         println(st, L"Kernel load failed");

@@ -6,7 +6,9 @@ param(
   [string]$Stage2Entry = "EfiMain",
 
   [string]$BootOut       = "build\BOOTAA64.EFI",
+  [string]$BootX64Out    = "build\BOOTX64.EFI",
   [string]$Stage2Out     = "build\STAGE2.EFI",
+  [string]$Stage2X64Out  = "build\STAGE2X64.EFI",
   [string]$KernelOut     = "",
   [string]$KernelAa64Out = "OS\aa64\KERNEL.ELF",
   [string]$KernelX64Out  = "OS\x64\KERNEL.ELF",
@@ -27,11 +29,13 @@ $ldelf = "ld.lld"
 # Dirs
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $BuildDir = Join-Path $ProjectRoot "build"
-$ObjBoot  = Join-Path $BuildDir "obj_boot"
-$ObjS2    = Join-Path $BuildDir "obj_stage2"
+$ObjBootAA64 = Join-Path $BuildDir "obj_boot_aa64"
+$ObjBootX64  = Join-Path $BuildDir "obj_boot_x64"
+$ObjS2AA64   = Join-Path $BuildDir "obj_stage2_aa64"
+$ObjS2X64    = Join-Path $BuildDir "obj_stage2_x64"
 $ObjKAA64 = Join-Path $BuildDir "obj_kernel_aa64"
 $ObjKX64  = Join-Path $BuildDir "obj_kernel_x64"
-New-Item -Force -ItemType Directory -Path $BuildDir,$ObjBoot,$ObjS2,$ObjKAA64,$ObjKX64 | Out-Null
+New-Item -Force -ItemType Directory -Path $BuildDir,$ObjBootAA64,$ObjBootX64,$ObjS2AA64,$ObjS2X64,$ObjKAA64,$ObjKX64 | Out-Null
 
 if ($KernelOut) {
   # Back-compat for older invocations: -KernelOut now means "AA64 kernel output".
@@ -39,13 +43,17 @@ if ($KernelOut) {
 }
 
 $BootOutFull       = Join-Path $ProjectRoot $BootOut
+$BootX64OutFull    = Join-Path $ProjectRoot $BootX64Out
 $Stage2OutFull     = Join-Path $ProjectRoot $Stage2Out
+$Stage2X64OutFull  = Join-Path $ProjectRoot $Stage2X64Out
 $KernelAa64OutFull = Join-Path $ProjectRoot $KernelAa64Out
 $KernelX64OutFull  = Join-Path $ProjectRoot $KernelX64Out
 
 New-Item -Force -ItemType Directory -Path @(
   (Split-Path -Parent $BootOutFull),
+  (Split-Path -Parent $BootX64OutFull),
   (Split-Path -Parent $Stage2OutFull),
+  (Split-Path -Parent $Stage2X64OutFull),
   (Split-Path -Parent $KernelAa64OutFull),
   (Split-Path -Parent $KernelX64OutFull)
 ) | Out-Null
@@ -112,6 +120,9 @@ function New-Kernel-CFlags {
     "-ffreestanding","-fno-builtin","-fno-stack-protector",
     "-fPIE","-std=c11",$opt,"-g"
   )
+  if ($Arch -eq "x64") {
+    $flags += "-mno-red-zone"
+  }
   $flags += Kernel-Arch-Defines -Arch $Arch
   $flags += Include-Flags -Dirs (Kernel-Include-Dirs -Arch $Arch)
   return ,$flags
@@ -130,6 +141,9 @@ function New-Kernel-CppFlags {
     "-fno-exceptions","-fno-rtti",
     $opt,"-g"
   )
+  if ($Arch -eq "x64") {
+    $flags += "-mno-red-zone"
+  }
   $flags += Kernel-Arch-Defines -Arch $Arch
   $flags += Include-Flags -Dirs (Kernel-Include-Dirs -Arch $Arch)
   return ,$flags
@@ -173,13 +187,21 @@ function Get-KernelSourcesForArch {
 
 # ---- CFLAGS ----
 # UEFI (PE/COFF, MSVC ABI)
-$uefi_cflags = @(
-  "-target","aarch64-pc-windows-msvc",
-  "-ffreestanding","-fno-builtin","-fshort-wchar",
-  "-Wall","-Wextra","-Wno-unused-parameter",
-  "-std=c11",$opt
-)
-$uefi_cflags += Include-Flags -Dirs @($IncDir)
+function New-Uefi-CFlags {
+  param([string]$Target)
+
+  $flags = @(
+    "-target",$Target,
+    "-ffreestanding","-fno-builtin","-fshort-wchar",
+    "-Wall","-Wextra","-Wno-unused-parameter",
+    "-std=c11",$opt
+  )
+  $flags += Include-Flags -Dirs @($IncDir)
+  return ,$flags
+}
+
+$uefiAA64CFlags = New-Uefi-CFlags -Target "aarch64-pc-windows-msvc"
+$uefiX64CFlags  = New-Uefi-CFlags -Target "x86_64-pc-windows-msvc"
 
 function Compile-C {
   param(
@@ -210,6 +232,14 @@ function Compile-C {
   return ,$objs
 }
 
+function Remove-ExistingOutput {
+  param([string]$Path)
+
+  if (Test-Path -LiteralPath $Path) {
+    Remove-Item -LiteralPath $Path -Force
+  }
+}
+
 function Build-Kernel {
   param(
     [string]$Arch,
@@ -226,6 +256,7 @@ function Build-Kernel {
   $cppflags = New-Kernel-CppFlags -Arch $Arch -Target $Target
   $objs = Compile-C -Sources $sources -ObjDir $ObjDir -CFlags $cflags -CppFlags $cppflags
 
+  Remove-ExistingOutput -Path $OutFile
   & $ldelf -o $OutFile -T $LinkerScript -pie -nostdlib $objs
   if ($LASTEXITCODE) { throw "ld.lld (kernel $Arch) failed" }
 
@@ -233,18 +264,34 @@ function Build-Kernel {
 }
 
 # ---- BOOT ----
-Write-Host "== BOOT -> $BootOutFull ==" -ForegroundColor Cyan
-$bootObjs = Compile-C -Sources @($bootSrc.FullName) -ObjDir $ObjBoot -CFlags $uefi_cflags
-& $lld /nologo /machine:arm64 /subsystem:efi_application /entry:$BootEntry /nodefaultlib /out:$BootOutFull $bootObjs
-if ($LASTEXITCODE) { throw "lld-link (boot) failed" }
+Write-Host "== BOOT aa64 -> $BootOutFull ==" -ForegroundColor Cyan
+$bootAa64Objs = Compile-C -Sources @($bootSrc.FullName) -ObjDir $ObjBootAA64 -CFlags $uefiAA64CFlags
+Remove-ExistingOutput -Path $BootOutFull
+& $lld /nologo /machine:arm64 /subsystem:efi_application /entry:$BootEntry /nodefaultlib /out:$BootOutFull $bootAa64Objs
+if ($LASTEXITCODE) { throw "lld-link (boot aa64) failed" }
 Write-Host "Built: $BootOutFull" -ForegroundColor Green
 
+Write-Host "== BOOT x64 -> $BootX64OutFull ==" -ForegroundColor Cyan
+$bootX64Objs = Compile-C -Sources @($bootSrc.FullName) -ObjDir $ObjBootX64 -CFlags $uefiX64CFlags
+Remove-ExistingOutput -Path $BootX64OutFull
+& $lld /nologo /machine:x64 /subsystem:efi_application /entry:$BootEntry /nodefaultlib /out:$BootX64OutFull $bootX64Objs
+if ($LASTEXITCODE) { throw "lld-link (boot x64) failed" }
+Write-Host "Built: $BootX64OutFull" -ForegroundColor Green
+
 # ---- STAGE2 ----
-Write-Host "== STAGE2 -> $Stage2OutFull ==" -ForegroundColor Cyan
-$stageObjs = Compile-C -Sources ($stageSrc.FullName) -ObjDir $ObjS2 -CFlags $uefi_cflags
-& $lld /nologo /machine:arm64 /subsystem:efi_application /entry:$Stage2Entry /nodefaultlib /out:$Stage2OutFull $stageObjs
-if ($LASTEXITCODE) { throw "lld-link (stage2) failed" }
+Write-Host "== STAGE2 aa64 -> $Stage2OutFull ==" -ForegroundColor Cyan
+$stageAa64Objs = Compile-C -Sources ($stageSrc.FullName) -ObjDir $ObjS2AA64 -CFlags $uefiAA64CFlags
+Remove-ExistingOutput -Path $Stage2OutFull
+& $lld /nologo /machine:arm64 /subsystem:efi_application /entry:$Stage2Entry /nodefaultlib /out:$Stage2OutFull $stageAa64Objs
+if ($LASTEXITCODE) { throw "lld-link (stage2 aa64) failed" }
 Write-Host "Built: $Stage2OutFull" -ForegroundColor Green
+
+Write-Host "== STAGE2 x64 -> $Stage2X64OutFull ==" -ForegroundColor Cyan
+$stageX64Objs = Compile-C -Sources ($stageSrc.FullName) -ObjDir $ObjS2X64 -CFlags $uefiX64CFlags
+Remove-ExistingOutput -Path $Stage2X64OutFull
+& $lld /nologo /machine:x64 /subsystem:efi_application /entry:$Stage2Entry /nodefaultlib /out:$Stage2X64OutFull $stageX64Objs
+if ($LASTEXITCODE) { throw "lld-link (stage2 x64) failed" }
+Write-Host "Built: $Stage2X64OutFull" -ForegroundColor Green
 
 # ---- KERNELS (PIE ELF) ----
 $ldsAA64 = Join-Path $KerDir "kernel.ld"
@@ -261,13 +308,17 @@ if (Test-Path $UsbRoot) {
   New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64 | Out-Null
 
   Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
+  Copy-Item -Force $BootX64OutFull    (Join-Path $destBoot "BOOTX64.EFI")
   Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
+  Copy-Item -Force $Stage2X64OutFull  (Join-Path $destX64 "STAGE2.EFI")
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
   Copy-Item -Force $KernelX64OutFull  (Join-Path $destX64 "KERNEL.ELF")
 
   Write-Host "Copied outputs to U:\ successfully:" -ForegroundColor Green
   Write-Host "  U:\EFI\BOOT\BOOTAA64.EFI"
+  Write-Host "  U:\EFI\BOOT\BOOTX64.EFI"
   Write-Host "  U:\OS\aa64\STAGE2.EFI"
+  Write-Host "  U:\OS\x64\STAGE2.EFI"
   Write-Host "  U:\OS\aa64\KERNEL.ELF"
   Write-Host "  U:\OS\x64\KERNEL.ELF"
 } else {
@@ -275,7 +326,9 @@ if (Test-Path $UsbRoot) {
   Write-Host ""
   Write-Host "Copy to USB:" -ForegroundColor Yellow
   Write-Host ("  \EFI\BOOT\BOOTAA64.EFI   <= " + $BootOutFull)
+  Write-Host ("  \EFI\BOOT\BOOTX64.EFI    <= " + $BootX64OutFull)
   Write-Host ("  \OS\aa64\STAGE2.EFI       <= " + $Stage2OutFull)
+  Write-Host ("  \OS\x64\STAGE2.EFI        <= " + $Stage2X64OutFull)
   Write-Host ("  \OS\aa64\KERNEL.ELF       <= " + $KernelAa64OutFull)
   Write-Host ("  \OS\x64\KERNEL.ELF        <= " + $KernelX64OutFull)
 }

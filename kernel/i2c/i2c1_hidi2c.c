@@ -2444,6 +2444,65 @@ static void hidi2c_push_unique_reg(uint16_t *tried,
     tried[(*tried_count)++] = reg;
 }
 
+static int hidi2c_try_desc_reg_all_modes(hidi2c_device *dev, uint16_t reg)
+{
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
+        return 0;
+    if (hidi2c_try_desc_reg_combined(dev, reg) == 0)
+        return 0;
+
+    return -1;
+}
+
+static int hidi2c_fetch_desc_generic(hidi2c_device *dev)
+{
+    static const uint16_t fallback_regs[] = {
+        0x0001u, 0x0020u, 0x0010u, 0x0000u,
+        0x0018u, 0x001Au, 0x001Cu, 0x001Eu,
+        0x0022u, 0x0024u
+    };
+    uint16_t tried[12];
+    uint32_t tried_count = 0;
+
+    if (!dev)
+        return -1;
+
+    (void)i2c1_bus_addr_only(dev->i2c_addr_7bit);
+    delay_us_approx(500u);
+
+    if (dev->hid_desc_reg != 0u)
+        hidi2c_push_unique_reg(tried, &tried_count, sizeof(tried) / sizeof(tried[0]), dev->hid_desc_reg);
+
+    for (uint32_t i = 0; i < (sizeof(fallback_regs) / sizeof(fallback_regs[0])); ++i)
+        hidi2c_push_unique_reg(tried, &tried_count, sizeof(tried) / sizeof(tried[0]), fallback_regs[i]);
+
+    terminal_print(dev->name);
+    terminal_print(" generic desc probe count:");
+    terminal_print_hex32(tried_count);
+    terminal_print("\n");
+
+    for (uint32_t i = 0; i < tried_count; ++i)
+    {
+        uint16_t reg = tried[i];
+
+        terminal_print(dev->name);
+        terminal_print(" generic trying reg:");
+        terminal_print_hex32(reg);
+        terminal_print("\n");
+
+        if (hidi2c_try_desc_reg_all_modes(dev, reg) == 0)
+            return 0;
+    }
+
+    return -1;
+}
+
 static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
 {
     static const uint16_t fallback_regs[] = {
@@ -2481,15 +2540,7 @@ static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
         terminal_print_hex32(reg);
         terminal_print("\n");
 
-        if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 0) == 0)
-            return 0;
-        if (hidi2c_try_desc_reg_read_only_after_pointer(dev, reg, 1) == 0)
-            return 0;
-        if (hidi2c_try_desc_reg_split_endian(dev, reg, 0) == 0)
-            return 0;
-        if (hidi2c_try_desc_reg_split_endian(dev, reg, 1) == 0)
-            return 0;
-        if (hidi2c_try_desc_reg_combined(dev, reg) == 0)
+        if (hidi2c_try_desc_reg_all_modes(dev, reg) == 0)
             return 0;
     }
 
@@ -3276,7 +3327,7 @@ static int hidi2c_probe_acpi_candidate(const hidi2c_acpi_device_candidate *cand,
     terminal_print_hex8(cand->desc_trusted);
     terminal_print("\n");
 
-    rc = hidi2c_fetch_desc_keyboard(&g_probe_dev);
+    rc = hidi2c_fetch_desc_generic(&g_probe_dev);
     if (rc != 0)
     {
         terminal_warn("ACPI HID/I2C candidate descriptor probe failed");

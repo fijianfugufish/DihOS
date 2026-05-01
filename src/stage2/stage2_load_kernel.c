@@ -1,5 +1,6 @@
 // src/stage2_load_kernel.c — PIE loader for AArch64 (ELF64 ET_DYN)
 #include <stdint.h>
+#include <stddef.h>
 #include <wchar.h>
 #include "bootinfo.h"
 
@@ -10,6 +11,23 @@ typedef uint64_t UINTN;
 typedef uint64_t EFI_STATUS;
 typedef void *EFI_HANDLE;
 typedef uint64_t EFI_PHYSICAL_ADDRESS;
+
+void *memcpy(void *dst, const void *src, size_t n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s = (const unsigned char *)src;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = s[i];
+    return dst;
+}
+
+void *memset(void *dst, int value, size_t n)
+{
+    unsigned char *d = (unsigned char *)dst;
+    for (size_t i = 0; i < n; ++i)
+        d[i] = (unsigned char)value;
+    return dst;
+}
 
 typedef struct
 {
@@ -115,12 +133,33 @@ extern EFI_STATUS reopen_same_volume(EFI_SYSTEM_TABLE *st,
 /* ---------- forward declaration to avoid implicit-decl error ---------- */
 static EFI_STATUS dbg_open_kernel(EFI_SYSTEM_TABLE *st,
                                   EFI_FILE_PROTOCOL *Root,
+                                  const wchar_t *path,
                                   EFI_FILE_PROTOCOL **out_file);
 
+#if defined(__x86_64__) || defined(_M_X64)
+#define DIHOS_KERNEL_ARCH_DIR L"x64"
+#define DIHOS_KERNEL_PATH_ABS L"\\OS\\x64\\KERNEL.ELF"
+#define DIHOS_KERNEL_PATH_REL L"OS\\x64\\KERNEL.ELF"
+#define DIHOS_KERNEL_PATH_ABS_LOWER L"\\os\\x64\\kernel.elf"
+#define DIHOS_KERNEL_PATH_REL_LOWER L"os\\x64\\kernel.elf"
+#else
+#define DIHOS_KERNEL_ARCH_DIR L"aa64"
+#define DIHOS_KERNEL_PATH_ABS L"\\OS\\aa64\\KERNEL.ELF"
+#define DIHOS_KERNEL_PATH_REL L"OS\\aa64\\KERNEL.ELF"
+#define DIHOS_KERNEL_PATH_ABS_LOWER L"\\os\\aa64\\kernel.elf"
+#define DIHOS_KERNEL_PATH_REL_LOWER L"os\\aa64\\kernel.elf"
+#endif
+
+#if defined(__clang__) || defined(__GNUC__)
+#define DIHOS_UNUSED_FN __attribute__((unused))
+#else
+#define DIHOS_UNUSED_FN
+#endif
+
 /* --- robust path-open helper (kept for reference; not used by dbg_…) --- */
-static EFI_STATUS open_kernel_with_fallback(EFI_FILE_PROTOCOL *Root,
-                                            const wchar_t *path,
-                                            EFI_FILE_PROTOCOL **out)
+static DIHOS_UNUSED_FN EFI_STATUS open_kernel_with_fallback(EFI_FILE_PROTOCOL *Root,
+                                                            const wchar_t *path,
+                                                            EFI_FILE_PROTOCOL **out)
 {
     typedef EFI_STATUS (*T_OPEN)(EFI_FILE_PROTOCOL *, EFI_FILE_PROTOCOL **,
                                  const wchar_t *, uint64_t, uint64_t);
@@ -155,19 +194,17 @@ static EFI_STATUS open_kernel_with_fallback(EFI_FILE_PROTOCOL *Root,
 static EFI_STATUS file_read_all_local(EFI_SYSTEM_TABLE *st, EFI_FILE_PROTOCOL *root,
                                       const wchar_t *path, void **out_buf, UINTN *out_size)
 {
-    typedef EFI_STATUS (*T_OPEN)(EFI_FILE_PROTOCOL *, EFI_FILE_PROTOCOL **, const wchar_t *, uint64_t, uint64_t);
     typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
     typedef EFI_STATUS (*T_READ)(EFI_FILE_PROTOCOL *, UINTN *, void *);
     typedef EFI_STATUS (*T_GETINFO)(EFI_FILE_PROTOCOL *, const EFI_GUID *, UINTN *, void *);
 
-    T_OPEN FileOpen = *(void **)((char *)root + 0x08);
     T_CLOSE FileClose = *(void **)((char *)root + 0x10);
     T_READ FileRead = *(void **)((char *)root + 0x20);
     T_GETINFO GetInfo = *(void **)((char *)root + 0x40);
     EFI_ALLOCATE_POOL AllocPool = BsAllocPool(st->BootServices);
 
     EFI_FILE_PROTOCOL *fp = 0;
-    EFI_STATUS s = dbg_open_kernel(st, root, &fp);
+    EFI_STATUS s = dbg_open_kernel(st, root, path, &fp);
     if (s)
     {
         println(st, L"[S2] read kernel fail");
@@ -215,6 +252,7 @@ typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
 // We try a few direct variants, then walk OS -> aa64 -> KERNEL.ELF.
 static EFI_STATUS dbg_open_kernel(EFI_SYSTEM_TABLE *st,
                                   EFI_FILE_PROTOCOL *Root,
+                                  const wchar_t *path,
                                   EFI_FILE_PROTOCOL **out_file)
 {
     *out_file = 0;
@@ -227,10 +265,20 @@ static EFI_STATUS dbg_open_kernel(EFI_SYSTEM_TABLE *st,
 
     // 0) quick direct tries
     static const wchar_t *directs[] = {
-        L"\\OS\\aa64\\KERNEL.ELF",
-        L"OS\\aa64\\KERNEL.ELF",
-        L"\\os\\aa64\\kernel.elf",
-        L"os\\aa64\\kernel.elf"};
+        DIHOS_KERNEL_PATH_ABS,
+        DIHOS_KERNEL_PATH_REL,
+        DIHOS_KERNEL_PATH_ABS_LOWER,
+        DIHOS_KERNEL_PATH_REL_LOWER};
+    if (path && path[0])
+    {
+        EFI_FILE_PROTOCOL *fp = 0;
+        EFI_STATUS s = FileOpen(Root, &fp, path, /*READ*/ 1, 0);
+        if (!s && fp)
+        {
+            *out_file = fp;
+            return 0;
+        }
+    }
     for (unsigned i = 0; i < sizeof(directs) / sizeof(directs[0]); ++i)
     {
         EFI_FILE_PROTOCOL *fp = 0;
@@ -253,10 +301,10 @@ static EFI_STATUS dbg_open_kernel(EFI_SYSTEM_TABLE *st,
     }
 
     EFI_FILE_PROTOCOL *dir2 = 0;
-    s = FileOpen(dir, &dir2, L"aa64", /*READ*/ 1, 0);
+    s = FileOpen(dir, &dir2, DIHOS_KERNEL_ARCH_DIR, /*READ*/ 1, 0);
     if (s || !dir2)
     {
-        print(st, L"[S2] FileOpen(aa64) status=");
+        print(st, L"[S2] FileOpen(kernel arch dir) status=");
         hex64(st, s);
         T_CLOSE Close = *(void **)((char *)dir + 0x10);
         if (Close)
@@ -321,12 +369,33 @@ typedef struct
 #define DT_RELA 7
 #define DT_RELASZ 8
 #define DT_RELAENT 9
+#define EM_X86_64 62
+#define EM_AARCH64 183
+#define R_X86_64_RELATIVE 8
 #define R_AARCH64_RELATIVE 1027
 #define ELF64_R_TYPE(i) ((uint32_t)((i) & 0xffffffff))
 
-/* icache sync */
-static void a64_sync_icache(void *start, void *end)
+static uint16_t expected_elf_machine(void)
 {
+#if defined(__x86_64__) || defined(_M_X64)
+    return EM_X86_64;
+#else
+    return EM_AARCH64;
+#endif
+}
+
+static int is_relative_reloc(uint16_t machine, uint32_t type)
+{
+    if (machine == EM_AARCH64)
+        return type == R_AARCH64_RELATIVE;
+    if (machine == EM_X86_64)
+        return type == R_X86_64_RELATIVE;
+    return 0;
+}
+
+static void sync_executable_range(void *start, void *end)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     uintptr_t p = ((uintptr_t)start) & ~63ull, e = (((uintptr_t)end) + 63ull) & ~63ull;
     for (uintptr_t q = p; q < e; q += 64)
         __asm__ volatile("dc cvau,%0" ::"r"(q) : "memory");
@@ -334,6 +403,11 @@ static void a64_sync_icache(void *start, void *end)
     for (uintptr_t q = p; q < e; q += 64)
         __asm__ volatile("ic ivau,%0" ::"r"(q) : "memory");
     __asm__ volatile("dsb ish; isb" ::: "memory");
+#else
+    (void)start;
+    (void)end;
+    __asm__ volatile("" ::: "memory");
+#endif
 }
 
 /* ---------- PIE loader ---------- */
@@ -363,9 +437,11 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
         println(st, L"[S2] not ELF");
         return 1;
     }
-    if (eh->e_machine != 0xB7)
+    if (eh->e_machine != expected_elf_machine())
     {
         println(st, L"[S2] wrong machine");
+        print(st, L"[S2] ELF machine = ");
+        hex64(st, eh->e_machine);
         return 1;
     }
 
@@ -436,12 +512,11 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
         }
         if (rela_off && rela_sz && rela_ent)
         {
-            uint8_t *dyn_base = dst_base + (ph->p_vaddr - lo);
-            Elf64_Rela *rela = (Elf64_Rela *)(dyn_base + (rela_off - ph->p_vaddr));
+            Elf64_Rela *rela = (Elf64_Rela *)(dst_base + (rela_off - lo));
             uint64_t count = rela_sz / rela_ent;
             for (uint64_t r = 0; r < count; r++)
             {
-                if (ELF64_R_TYPE(rela[r].r_info) == R_AARCH64_RELATIVE)
+                if (is_relative_reloc(eh->e_machine, ELF64_R_TYPE(rela[r].r_info)))
                 {
                     uint64_t *where = (uint64_t *)(dst_base + (rela[r].r_offset - lo));
                     *where = base + rela[r].r_addend;
@@ -450,7 +525,7 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
         }
     }
 
-    a64_sync_icache((void *)(uintptr_t)min_dst, (void *)(uintptr_t)max_dst);
+    sync_executable_range((void *)(uintptr_t)min_dst, (void *)(uintptr_t)max_dst);
     *entry_out = (EFI_PHYSICAL_ADDRESS)(base + (eh->e_entry - lo));
 
     if (bi_out)
@@ -502,6 +577,43 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
 
 typedef void (*kernel_entry_t)(const boot_info *);
 
+static void flush_written_line(volatile void *addr)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uintptr_t line = ((uintptr_t)addr) & ~63ull;
+    __asm__ volatile("dc cvac,%0" ::"r"(line) : "memory");
+    __asm__ volatile("dsb ish; isb" ::: "memory");
+#elif defined(__x86_64__) || defined(_M_X64)
+    (void)addr;
+    __asm__ volatile("sfence" ::: "memory");
+#else
+    (void)addr;
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
+static void jump_to_kernel(EFI_PHYSICAL_ADDRESS entry, const boot_info *bi)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    uintptr_t target = (uintptr_t)entry;
+    const boot_info *arg = bi;
+    __asm__ volatile(
+        "call *%0\n\t"
+        "cli\n\t"
+        "1: hlt\n\t"
+        "jmp 1b\n\t"
+        :
+        : "r"(target), "D"(arg)
+        : "rax", "rcx", "rdx", "rsi", "r8", "r9", "r10", "r11", "memory");
+    __builtin_unreachable();
+#else
+    ((kernel_entry_t)(uintptr_t)entry)(bi);
+    for (;;)
+    {
+    }
+#endif
+}
+
 EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
                               EFI_HANDLE image,
                               const boot_info *bi,
@@ -510,7 +622,6 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
     EFI_GET_MEMORY_MAP GetMMap = BsGetMMap(st->BootServices);
     EFI_EXIT_BOOT_SERVICES ExitBS = BsExitBS(st->BootServices);
     EFI_ALLOCATE_POOL Alloc = BsAllocPool(st->BootServices);
-    EFI_FREE_POOL Free = BsFreePool(st->BootServices);
 
     EFI_SET_WATCHDOG_TIMER SetWatchdog = BsSetWatchdog(st->BootServices);
     SetWatchdog(0, 0, 0, NULL);
@@ -520,9 +631,7 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
     if (fb)
     {
         fb[0] = 0x00FF0000;
-        uintptr_t a = ((uintptr_t)&fb[0]) & ~63ull;
-        __asm__ volatile("dc cvac,%0" ::"r"(a) : "memory");
-        __asm__ volatile("dsb ish; isb" ::: "memory");
+        flush_written_line((volatile void *)&fb[0]);
     }
 
     UINTN map_sz = 0, key = 0, dsz = 0;
@@ -560,9 +669,7 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
     if (fb && pitch_px)
     {
         fb[pitch_px + 1] = 0x000000FF;
-        uintptr_t b = ((uintptr_t)&fb[pitch_px + 1]) & ~63ull;
-        __asm__ volatile("dc cvac,%0" ::"r"(b) : "memory");
-        __asm__ volatile("dsb ish; isb" ::: "memory");
+        flush_written_line((volatile void *)&fb[pitch_px + 1]);
     }
 
     boot_info bi_copy = *bi;
@@ -571,7 +678,7 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
     bi_copy.mmap_desc_size = dsz;
     bi_copy.mmap_desc_version = dver;
 
-    ((kernel_entry_t)(uintptr_t)entry)(&bi_copy);
+    jump_to_kernel(entry, &bi_copy);
     for (;;)
     {
     }

@@ -89,6 +89,14 @@ static const EFI_GUID LOADED_IMAGE_GUID = {0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x
 static const EFI_GUID SIMPLE_FS_GUID = {0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID EFI_FILE_INFO_GUID = {0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 
+#if defined(__x86_64__) || defined(_M_X64)
+#define DIHOS_BOOT_BANNER L"[CHAIN] BOOTX64 -> \\OS\\x64\\STAGE2.EFI"
+#define DIHOS_STAGE2_PATH L"\\OS\\x64\\STAGE2.EFI"
+#else
+#define DIHOS_BOOT_BANNER L"[CHAIN] BOOTAA64 -> \\OS\\aa64\\STAGE2.EFI"
+#define DIHOS_STAGE2_PATH L"\\OS\\aa64\\STAGE2.EFI"
+#endif
+
 /* ---------- Loaded Image (trimmed view) ---------- */
 typedef struct
 {
@@ -114,7 +122,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         st->ConOut->Reset(st->ConOut, 1);
         st->ConOut->ClearScreen(st->ConOut);
     }
-    println(st, L"[CHAIN] BOOTAA64 -> \\OS\\aa64\\STAGE2.EFI");
+    println(st, DIHOS_BOOT_BANNER);
 
     void *BS = st ? st->BootServices : 0;
     if (!BS)
@@ -168,8 +176,8 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
     }
 
-    /* 4) Root->Open file \\OS\\aa64\\STAGE2.EFI */
-    static const wchar_t path[] = L"\\OS\\aa64\\STAGE2.EFI";
+    /* 4) Root->Open stage2 for this firmware architecture. */
+    static const wchar_t path[] = DIHOS_STAGE2_PATH;
     EFI_FILE_PROTOCOL *file = 0;
     s = root->Open(root, &file, path, /*READ*/ 1, 0);
     if (s || !file)
