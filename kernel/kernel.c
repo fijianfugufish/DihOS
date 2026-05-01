@@ -18,6 +18,7 @@
 #include "apps/sacx_runtime.h"
 #include "apps/text_editor_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
+#include "hardware_probes/acpi_probe_xhci.h"
 #include "asm/asm.h"
 
 #include "terminal/terminal_api.h"
@@ -90,7 +91,7 @@ static uint32_t xhci_build_hint_order(const boot_info *bi, uint64_t *hints, uint
     return count;
 }
 
-void kmain(const boot_info *bi)
+void kmain(boot_info *bi)
 {
     k_bootinfo_ptr = bi;
 
@@ -110,14 +111,56 @@ void kmain(const boot_info *bi)
     crumb((kcolor){20, 20, 20});
 
     uint64_t xhci_mmio_order[BOOTINFO_XHCI_MMIO_MAX] = {0};
-    uint32_t xhci_mmio_count = xhci_build_hint_order(bi, xhci_mmio_order, BOOTINFO_XHCI_MMIO_MAX);
-    const uint64_t *xhci_mmio_bases = xhci_mmio_count ? xhci_mmio_order : 0;
+    uint32_t xhci_mmio_count =
+        xhci_build_hint_order(bi, xhci_mmio_order, BOOTINFO_XHCI_MMIO_MAX);
 
-    // Try USB only if we have *some* hint
+    const uint64_t *xhci_mmio_bases =
+        xhci_mmio_count ? xhci_mmio_order : 0;
+
+    uint64_t acpi_xhci_bases[BOOTINFO_XHCI_MMIO_MAX] = {0};
+    uint32_t acpi_xhci_count =
+        acpi_xhci_get_mmios_from_rsdp(
+            bi->acpi_rsdp,
+            acpi_xhci_bases,
+            BOOTINFO_XHCI_MMIO_MAX);
+    
+    uint32_t xhci_mmio_sources[BOOTINFO_XHCI_MMIO_MAX] = {0};
+    uint32_t acpi_probe_thinks_good = 0;
+
+    if (acpi_xhci_count)
+    {
+        xhci_mmio_bases = acpi_xhci_bases;
+        xhci_mmio_count = acpi_xhci_count;
+        acpi_probe_thinks_good = 1;
+
+        bi->xhci_mmio_count = acpi_xhci_count;
+        bi->xhci_mmio_base = acpi_xhci_bases[0];
+
+        for (uint32_t i = 0; i < BOOTINFO_XHCI_MMIO_MAX; ++i)
+        {
+            if (i < acpi_xhci_count)
+            {
+                xhci_mmio_sources[i] = BOOTINFO_XHCI_SOURCE_DISCOVERED;
+                bi->xhci_mmio_bases[i] = acpi_xhci_bases[i];
+                bi->xhci_mmio_sources[i] = BOOTINFO_XHCI_SOURCE_DISCOVERED;
+            }
+            else
+            {
+                xhci_mmio_sources[i] = 0;
+                bi->xhci_mmio_bases[i] = 0;
+                bi->xhci_mmio_sources[i] = 0;
+            }
+        }
+    }
+
     int usb_ok = -1;
+
     if (xhci_mmio_count || bi->acpi_rsdp)
     {
-        usb_ok = usbdisk_bind_and_enumerate_multi(xhci_mmio_bases, xhci_mmio_count, bi->acpi_rsdp);
+        usb_ok = usbdisk_bind_and_enumerate_multi(
+            xhci_mmio_bases,
+            xhci_mmio_count,
+            bi->acpi_rsdp);
     }
 
     // Mount only when enumeration succeeded
@@ -150,6 +193,17 @@ void kmain(const boot_info *bi)
     terminal_initialize(&font);
     terminal_print("terminal online");
     terminal_success("sacx runtime online");
+
+    terminal_print("ACPI xHCI discovered count: ");
+    terminal_print_inline_hex64(acpi_xhci_count);
+
+    for (uint32_t i = 0;
+        i < acpi_xhci_count && i < BOOTINFO_XHCI_MMIO_MAX;
+        ++i)
+    {
+        terminal_print("ACPI xHCI base: ");
+        terminal_print_inline_hex64(acpi_xhci_bases[i]);
+    }
 
     kinput_init_multi(xhci_mmio_bases, xhci_mmio_count, bi->acpi_rsdp);
 

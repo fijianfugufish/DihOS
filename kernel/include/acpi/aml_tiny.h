@@ -96,6 +96,7 @@ extern "C"
     {
         aml_tiny_host host;
         aml_tiny_method method;
+        aml_tiny_value return_obj;
 
         const uint8_t *p;
         const uint8_t *end;
@@ -117,6 +118,11 @@ extern "C"
     int aml_tiny_trace_names(
         const aml_tiny_method *method,
         const aml_tiny_host *host);
+    
+    int aml_tiny_exec_value(
+        const aml_tiny_method *method,
+        const aml_tiny_host *host,
+        aml_tiny_value *out_value);
 
 #ifdef __cplusplus
 }

@@ -686,6 +686,79 @@ static uint32_t find_xhci_mmio_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa, XHCI
     return out ? (out->count - before) : 0;
 }
 
+static uint32_t scan_xhci_mmio_acpi_raw(EFI_SYSTEM_TABLE *st,
+                                        uint64_t rsdp_pa,
+                                        XHCI_MMIO_LIST *out)
+{
+    uint32_t before = out ? out->count : 0;
+
+    if (!out || !rsdp_pa || !sane(rsdp_pa))
+        return 0;
+
+    ACPI_RSDP *R = (ACPI_RSDP *)(uintptr_t)rsdp_pa;
+    if (!R->Xsdt || !sane(R->Xsdt))
+        return 0;
+
+    ACPI_XSDT_FBK *X = (ACPI_XSDT_FBK *)(uintptr_t)R->Xsdt;
+    if (!sane((uint64_t)(uintptr_t)X) || X->Hdr.Length < sizeof(ACPI_SDT_FBK))
+        return 0;
+
+    uint32_t entries = (X->Hdr.Length - (uint32_t)sizeof(ACPI_SDT_FBK)) / 8u;
+
+    println(st, L"[S2:xHCI] scan: ACPI raw MMIO candidates");
+
+    for (uint32_t i = 0; i < entries; ++i)
+    {
+        uint64_t spa = X->Entry[i];
+        if (!sane(spa))
+            continue;
+
+        ACPI_SDT_FBK *H = (ACPI_SDT_FBK *)(uintptr_t)spa;
+        if (!sane((uint64_t)(uintptr_t)H))
+            continue;
+
+        if (H->Length < sizeof(ACPI_SDT_FBK) || H->Length > (1024u * 1024u))
+            continue;
+
+        const uint8_t *b = (const uint8_t *)(uintptr_t)spa;
+
+        /*
+          Scan raw ACPI table bytes for little-endian 32-bit addresses.
+          This is not full AML/_CRS parsing, but it catches platform MMIO
+          constants embedded in DSDT/SSDT resource templates.
+        */
+        for (uint32_t off = 0; off + 4u <= H->Length; ++off)
+        {
+            uint32_t v32 =
+                ((uint32_t)b[off + 0u]) |
+                ((uint32_t)b[off + 1u] << 8) |
+                ((uint32_t)b[off + 2u] << 16) |
+                ((uint32_t)b[off + 3u] << 24);
+
+            uint64_t mmio = (uint64_t)v32;
+
+            /*
+              Qualcomm-ish low MMIO window. Keep this tight so we do not
+              randomly probe dangerous garbage.
+            */
+            if (mmio < 0x08000000ull || mmio > 0x0FFFFFFFull)
+                continue;
+
+            if ((mmio & 0xFFFu) != 0)
+                continue;
+
+            (void)xhci_list_try_add(st,
+                                    out,
+                                    mmio,
+                                    L"ACPI/raw",
+                                    BOOTINFO_XHCI_SOURCE_DISCOVERED,
+                                    1);
+        }
+    }
+
+    return out->count - before;
+}
+
 static uint64_t xhci_mmio_from_bars(uint32_t bar0, uint32_t bar1)
 {
     if (bar0 == 0 || bar0 == 0xFFFFFFFFu)
@@ -813,6 +886,8 @@ static uint32_t find_xhci_mmios(EFI_SYSTEM_TABLE *st,
 
     println(st, L"[S2:xHCI] scan: MCFG/ECAM");
     (void)find_xhci_mmio_ecam(st, rsdp_pa, out);
+
+    (void)scan_xhci_mmio_acpi_raw(st, rsdp_pa, out);
 
     if (out->count)
     {

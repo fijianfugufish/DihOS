@@ -12,8 +12,10 @@ static uint32_t rd32(const uint8_t *p) { return (uint32_t)(p[0] | ((uint32_t)p[1
 
 static void aml_log(aml_tiny_ctx *ctx, const char *msg)
 {
+    /* disable log for now
     if (ctx && ctx->host.log)
         ctx->host.log(ctx->host.user, msg);
+    */
 }
 
 static void aml_log_hex32(aml_tiny_ctx *ctx, const char *prefix, uint32_t v)
@@ -1687,7 +1689,8 @@ static int aml_exec_store(aml_tiny_ctx *ctx)
 static int aml_exec_return(aml_tiny_ctx *ctx)
 {
     aml_tiny_value v;
-    uint64_t iv;
+    aml_tiny_value concrete;
+    uint64_t iv = 0;
     int rc;
 
     ctx->p++;
@@ -1696,12 +1699,18 @@ static int aml_exec_return(aml_tiny_ctx *ctx)
     if (rc != AML_TINY_OK)
         return rc;
 
-    rc = aml_value_as_int(ctx, &v, &iv);
+    rc = aml_materialize_value(ctx, &v, &concrete);
     if (rc != AML_TINY_OK)
-        return rc;
+        aml_value_copy(&concrete, &v);
+
+    ctx->return_obj = concrete;
+
+    if (aml_value_as_int(ctx, &concrete, &iv) == AML_TINY_OK)
+        ctx->return_value = iv;
+    else
+        ctx->return_value = concrete.ivalue;
 
     ctx->returned = 1;
-    ctx->return_value = iv;
     return AML_TINY_OK;
 }
 
@@ -2169,6 +2178,72 @@ int aml_tiny_trace_names(
         rc = aml_exec_one_term(&ctx);
         if (rc != AML_TINY_OK)
             return rc;
+    }
+
+    return AML_TINY_OK;
+}
+
+int aml_tiny_exec_value(
+    const aml_tiny_method *method,
+    const aml_tiny_host *host,
+    aml_tiny_value *out_value)
+{
+    aml_tiny_ctx ctx;
+    int rc;
+    uint32_t i;
+
+    if (!method || !method->aml || !host || !out_value)
+        return AML_TINY_ERR_BAD_ARG;
+
+    aml_value_zero(out_value);
+
+    ctx.host = *host;
+    ctx.method = *method;
+
+    if (!ctx.method.use_typed_args)
+    {
+        for (i = 0; i < 7u; ++i)
+        {
+            ctx.method.typed_args[i].type = 0;
+            ctx.method.typed_args[i].ivalue = ctx.method.args[i];
+            ctx.method.typed_args[i].name[0] = 0;
+            ctx.method.typed_args[i].buf_len = 0;
+            ctx.method.typed_args[i].pkg_count = 0;
+        }
+    }
+
+    ctx.p = method->aml;
+    ctx.end = method->aml + method->aml_len;
+    ctx.returned = 0;
+    ctx.return_value = 0;
+    ctx.last_error = AML_TINY_OK;
+
+    for (i = 0; i < 8u; ++i)
+        aml_value_zero(&ctx.locals[i]);
+
+    for (i = 0; i < 8u; ++i)
+    {
+        ctx.named_objs[i].used = 0;
+        ctx.named_objs[i].name[0] = 0;
+        aml_value_zero(&ctx.named_objs[i].value);
+    }
+
+    rc = aml_exec_term_list(&ctx, ctx.end);
+
+    if ((rc == AML_TINY_ERR_EOF || rc == AML_TINY_ERR_PARSE) && ctx.p >= ctx.end)
+        rc = AML_TINY_OK;
+
+    if (rc != AML_TINY_OK)
+        return rc;
+
+    if (ctx.returned)
+    {
+        /*
+          You need ctx.return_obj / ctx.return_value_object here.
+          If your Return() handler currently only stores ctx.return_value,
+          patch aml_exec_return() to preserve the full aml_tiny_value too.
+        */
+        *out_value = ctx.return_obj;
     }
 
     return AML_TINY_OK;
