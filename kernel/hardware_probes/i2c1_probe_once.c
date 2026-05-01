@@ -1,5 +1,6 @@
 #include "hardware_probes/i2c1_probe_once.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 
 /*
     One-use raw MMIO probe for your laptop's ACPI-decoded I2C1 controller.
@@ -36,8 +37,7 @@ static inline void mmio_write32(uint32_t off, uint32_t value)
 /* Tiny barrier helpers for ordered MMIO access on ARM. */
 static inline void mmio_barrier(void)
 {
-    __asm__ __volatile__("dsb sy" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static int off_ok(uint32_t off)

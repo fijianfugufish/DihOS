@@ -178,6 +178,7 @@ extern "C"
     } kinput_mouse_state;
 
     void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys);
+    void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count, uint64_t rsdp_phys);
     void kinput_poll(void);
 
     int kinput_key_down(uint8_t usage);

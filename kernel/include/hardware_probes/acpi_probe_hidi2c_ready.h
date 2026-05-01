@@ -9,9 +9,45 @@ extern "C"
 #endif
 
 #define HIDI2C_ACPI_MAX_METHOD_BODY 128
+#define HIDI2C_ACPI_MAX_DEVICES 8
+
+#define HIDI2C_ACPI_KIND_UNKNOWN 0u
+#define HIDI2C_ACPI_KIND_KEYBOARD 0x01u
+#define HIDI2C_ACPI_KIND_POINTER 0x02u
 
     typedef struct
     {
+        char name[5];
+        char hid[16];
+        char cid[16];
+
+        uint8_t kind_hint;
+        uint8_t addr;
+        uint16_t desc_reg;
+        uint8_t desc_trusted;
+
+        uint8_t gpio_valid;
+        uint16_t gpio_pin;
+        uint16_t gpio_flags;
+        char gpio_source[32];
+        uint8_t gpio_conn_type;
+        uint8_t gpio_pin_cfg;
+        uint8_t gpio_pin_guessed;
+        uint8_t gpio_from_legacy;
+        uint8_t gpio_count;
+
+        uint8_t has_crs;
+        uint8_t has_dsm;
+        uint8_t ref_i2c1;
+        uint8_t dep_refs_i2c1;
+        uint8_t sb_found;
+    } hidi2c_acpi_device_candidate;
+
+    typedef struct
+    {
+        uint8_t device_count;
+        hidi2c_acpi_device_candidate devices[HIDI2C_ACPI_MAX_DEVICES];
+
         uint8_t have_eckb;
         uint8_t have_tcpd;
 

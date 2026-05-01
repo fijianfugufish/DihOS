@@ -2,6 +2,7 @@
 #include "kwrappers/kgfx.h"
 #include "kwrappers/ktext.h"
 #include "memory/pmem.h" // for pmem_alloc_pages
+#include "asm/asm.h"
 
 static kfb FB;
 
@@ -82,16 +83,13 @@ char *kgfx_pmem_strdup(const char *s)
 
 static inline void kgfx_flush_range_raw(uintptr_t start, uintptr_t end)
 {
-    const uintptr_t line = 64;
-    start &= ~(line - 1);
-    end = (end + line - 1) & ~(line - 1);
-    for (uintptr_t p = start; p < end; p += line)
-        __asm__ __volatile__("dc cvac, %0" ::"r"(p) : "memory");
+    if (end > start)
+        asm_dma_clean_range((const void *)start, (uint64_t)(end - start));
 }
 
 static inline void kgfx_flush_commit(void)
 {
-    __asm__ __volatile__("dsb ish; isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static inline void kgfx_flush_range(uintptr_t start, uintptr_t end)

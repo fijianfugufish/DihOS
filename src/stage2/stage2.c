@@ -76,14 +76,19 @@ static void hex64(EFI_SYSTEM_TABLE *st, uint64_t v)
 /* -------------------------------------------------------------------------- */
 typedef EFI_STATUS (*EFI_OPEN_PROTOCOL)(EFI_HANDLE, const EFI_GUID *, void **, EFI_HANDLE, EFI_HANDLE, uint32_t);
 typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL)(const EFI_GUID *, void *, void **);
+typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(UINTN, const EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
+typedef EFI_STATUS (*EFI_FREE_POOL)(void *);
 typedef EFI_STATUS (*EFI_SET_WATCHDOG_TIMER)(UINTN, UINTN, UINTN, const wchar_t *);
 
 static inline EFI_OPEN_PROTOCOL BsOpenProto(void *BS) { return *(EFI_OPEN_PROTOCOL *)((char *)BS + 0x118); }
+static inline EFI_FREE_POOL BsFreePool(void *BS) { return *(EFI_FREE_POOL *)((char *)BS + 0x48); }
+static inline EFI_LOCATE_HANDLE_BUFFER BsLocateHandles(void *BS) { return *(EFI_LOCATE_HANDLE_BUFFER *)((char *)BS + 0x138); }
 static inline EFI_LOCATE_PROTOCOL BsLocate(void *BS) { return *(EFI_LOCATE_PROTOCOL *)((char *)BS + 0x140); }
 static inline EFI_SET_WATCHDOG_TIMER BsWatchdog(void *BS) { return *(EFI_SET_WATCHDOG_TIMER *)((char *)BS + 0x100); }
 enum
 {
-    EFI_OPEN_PROTOCOL_GET_PROTOCOL = 2
+    EFI_OPEN_PROTOCOL_GET_PROTOCOL = 2,
+    EFI_LOCATE_BY_PROTOCOL = 2
 };
 
 /* -------------------------------------------------------------------------- */
@@ -190,33 +195,6 @@ static uint64_t find_rsdp(EFI_SYSTEM_TABLE *st)
             return (uint64_t)(uintptr_t)ct[i].VendorTable;
     }
     return 0;
-}
-
-/* --- tiny helpers to read \OS\xhci.txt with an ASCII hex address --- */
-static int hex_nibble(wchar_t c)
-{
-    if (c >= L'0' && c <= L'9')
-        return (int)(c - L'0');
-    if (c >= L'a' && c <= L'f')
-        return 10 + (int)(c - L'a');
-    if (c >= L'A' && c <= L'F')
-        return 10 + (int)(c - L'A');
-    return -1;
-}
-static uint64_t parse_hex64_w(const wchar_t *s)
-{
-    /* accepts "0x..." or plain hex; stops on first non-hex */
-    uint64_t v = 0;
-    if (s[0] == L'0' && (s[1] == L'x' || s[1] == L'X'))
-        s += 2;
-    for (; *s; ++s)
-    {
-        int n = hex_nibble(*s);
-        if (n < 0)
-            break;
-        v = (v << 4) | (uint64_t)n;
-    }
-    return v;
 }
 
 #ifndef TLMM_MMIO_OVERRIDE_BASE
@@ -404,111 +382,28 @@ static void find_tlmm_mmio(EFI_SYSTEM_TABLE *st,
     println(st, L"[S2:TLMM] no TLMM MMIO provided");
 }
 
-/* Try to open \OS\xhci.txt and parse an MMIO address. Returns 0 if not found. */
-static uint64_t try_xhci_override_from_file(EFI_SYSTEM_TABLE *st, EFI_HANDLE image)
+typedef struct
 {
-    typedef struct EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
-    typedef EFI_STATUS (*T_OPEN)(EFI_FILE_PROTOCOL *, EFI_FILE_PROTOCOL **, const wchar_t *, UINTN, UINTN);
-    typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
-    typedef EFI_STATUS (*T_READ)(EFI_FILE_PROTOCOL *, UINTN *, void *);
-    typedef EFI_STATUS (*T_SET_POS)(EFI_FILE_PROTOCOL *, uint64_t);
+    uint64_t base[BOOTINFO_XHCI_MMIO_MAX];
+    uint32_t source[BOOTINFO_XHCI_MMIO_MAX];
+    uint32_t count;
+} XHCI_MMIO_LIST;
 
-    uint64_t result = 0;
-
-    EFI_FILE_PROTOCOL *root = 0;
-    if (fs_open_root(st, image, &root) != 0 || !root)
-    {
-        println(st, L"[S2:xHCI] override: root open failed");
-        return 0;
-    }
-
-    /* vtbl slots (same scheme you used elsewhere) */
-    T_OPEN FileOpen = *(void **)((char *)root + 0x08);
-    T_CLOSE FileClose = *(void **)((char *)root + 0x10);
-
-    /* open \OS\xhci.txt (matches your existing layout) */
-    EFI_FILE_PROTOCOL *os = 0;
-    if (FileOpen && !FileOpen(root, &os, L"OS", 0, 0) && os)
-    {
-        T_OPEN DirOpen = *(void **)((char *)os + 0x08);
-        T_CLOSE DirClose = *(void **)((char *)os + 0x10);
-
-        EFI_FILE_PROTOCOL *f = 0;
-        if (DirOpen && !DirOpen(os, &f, L"xhci.txt", 0, 0) && f)
-        {
-            T_READ FileRead = *(void **)((char *)f + 0x20);
-            T_SET_POS SetPos = *(void **)((char *)f + 0x18);
-
-            unsigned char buf[128];
-            UINTN sz = sizeof(buf) - 1;
-
-            if (SetPos)
-                SetPos(f, 0);
-
-            if (FileRead && !FileRead(f, &sz, buf))
-            {
-                buf[sz] = 0;
-
-                /* parse ASCII/UTF-8 hex: optional 0x, skips whitespace */
-                const unsigned char *p = buf;
-                while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
-                    ++p;
-                if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-                    p += 2;
-
-                uint64_t v = 0;
-                int any = 0;
-                for (;; ++p)
-                {
-                    unsigned char c = *p;
-                    int n = -1;
-
-                    if (c >= '0' && c <= '9')
-                        n = (int)(c - '0');
-                    else if (c >= 'a' && c <= 'f')
-                        n = (int)(c - 'a') + 10;
-                    else if (c >= 'A' && c <= 'F')
-                        n = (int)(c - 'A') + 10;
-                    else
-                        break;
-
-                    v = (v << 4) | (uint64_t)n;
-                    any = 1;
-                }
-
-                if (any && v)
-                {
-                    result = v;
-                    println(st, L"[S2:xHCI] override: loaded from \\OS\\xhci.txt");
-                    hex64(st, result);
-                }
-                else
-                {
-                    println(st, L"[S2:xHCI] override file present but parse failed");
-                }
-            }
-
-            if (FileClose)
-                FileClose(f);
-        }
-
-        if (DirClose)
-            DirClose(os);
-    }
-
-    if (FileClose)
-        FileClose(root);
-
-    return result;
-}
+static int xhci_list_try_add(EFI_SYSTEM_TABLE *st,
+                             XHCI_MMIO_LIST *list,
+                             uint64_t mmio,
+                             const wchar_t *source_label,
+                             uint32_t source,
+                             int validate_caps);
 
 /* -------------------------------------------------------------------------- */
 /*  xHCI discovery (PCI Root Bridge I/O first; falls back to MCFG/ECAM)       */
 /* -------------------------------------------------------------------------- */
-/* Set this to a known MMIO to bypass scanning (or pass -DXHCI_MMIO_OVERRIDE=0xXXXXXXXX) */
-#ifndef XHCI_MMIO_OVERRIDE
-#define XHCI_MMIO_OVERRIDE 0x000000000A600000ULL
-#endif
+static const uint64_t XHCI_BUILTIN_FALLBACK_MMIO[] = {
+    0x000000000A600000ULL,
+    0x000000000A000000ULL,
+    0x000000000A800000ULL,
+};
 
 static inline int sane(uint64_t p) { return (p >= 0x100000ULL) && (p < 0xFFFFFFFFFULL); }
 
@@ -571,6 +466,61 @@ static int xhci_caps_ok(EFI_SYSTEM_TABLE *st, uint64_t mmio)
     }
 
     println(st, L"[S2:xHCI]   accepted (caps sanity)");
+    return 1;
+}
+
+static int xhci_list_contains(const XHCI_MMIO_LIST *list, uint64_t mmio)
+{
+    for (uint32_t i = 0; list && i < list->count; ++i)
+    {
+        if ((list->base[i] & ~0xFULL) == (mmio & ~0xFULL))
+            return 1;
+    }
+    return 0;
+}
+
+static int xhci_list_try_add(EFI_SYSTEM_TABLE *st,
+                             XHCI_MMIO_LIST *list,
+                             uint64_t mmio,
+                             const wchar_t *source_label,
+                             uint32_t source,
+                             int validate_caps)
+{
+    if (!list || !mmio || !sane(mmio))
+        return 0;
+
+    mmio &= ~0xFULL;
+
+    if (xhci_list_contains(list, mmio))
+    {
+        print(st, L"[S2:xHCI] duplicate ");
+        print(st, source_label);
+        print(st, L" MMIO = ");
+        hex64(st, mmio);
+        return 0;
+    }
+
+    print(st, L"[S2:xHCI] candidate ");
+    print(st, source_label);
+    print(st, L" MMIO = ");
+    hex64(st, mmio);
+
+    if (validate_caps && !xhci_caps_ok(st, mmio))
+        return 0;
+    if (!validate_caps)
+        println(st, L"[S2:xHCI]   accepted (fallback, caps not probed)");
+
+    if (list->count >= BOOTINFO_XHCI_MMIO_MAX)
+    {
+        println(st, L"[S2:xHCI] candidate accepted but list is full");
+        return 0;
+    }
+
+    list->base[list->count] = mmio;
+    list->source[list->count] = source;
+    list->count++;
+    print(st, L"[S2:xHCI] stored MMIO = ");
+    hex64(st, mmio);
     return 1;
 }
 
@@ -646,10 +596,10 @@ typedef struct
 } ACPI_MCFG_FBK;
 #pragma pack(pop)
 
-/* Scan ACPI MCFG ECAM space for an xHCI controller BAR (returns MMIO base or 0) */
-static uint64_t find_xhci_mmio_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa)
+/* Scan ACPI MCFG ECAM space for xHCI controller BARs. */
+static uint32_t find_xhci_mmio_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa, XHCI_MMIO_LIST *out)
 {
-    (void)st;
+    uint32_t before = out ? out->count : 0;
 
     if (!rsdp_pa || !sane(rsdp_pa))
         return 0;
@@ -680,7 +630,7 @@ static uint64_t find_xhci_mmio_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa)
 
         ACPI_MCFG_FBK *M = (ACPI_MCFG_FBK *)(uintptr_t)spa;
         if (M->Hdr.Length < sizeof(ACPI_MCFG_FBK))
-            return 0;
+            continue;
 
         uint32_t seg_count = (M->Hdr.Length - (uint32_t)sizeof(ACPI_MCFG_FBK)) / (uint32_t)sizeof(M->entry[0]);
 
@@ -726,118 +676,168 @@ static uint64_t find_xhci_mmio_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa)
                         else
                             mmio = (uint64_t)(bar0 & ~0xFu);
 
-                        if (mmio && sane(mmio))
-                            return mmio;
+                        (void)xhci_list_try_add(st, out, mmio, L"MCFG/ECAM", BOOTINFO_XHCI_SOURCE_DISCOVERED, 1);
                     }
                 }
             }
         }
-
-        return 0;
     }
 
-    return 0;
+    return out ? (out->count - before) : 0;
+}
+
+static uint64_t xhci_mmio_from_bars(uint32_t bar0, uint32_t bar1)
+{
+    if (bar0 == 0 || bar0 == 0xFFFFFFFFu)
+        return 0;
+    if (bar0 & 1u)
+        return 0;
+
+    if (bar_is_64_mmio(bar0, bar1))
+        return ((uint64_t)bar1 << 32) | (uint64_t)(bar0 & ~0xFULL);
+
+    return (uint64_t)(bar0 & ~0xFULL);
+}
+
+static void scan_xhci_rbio_instance(EFI_SYSTEM_TABLE *st,
+                                    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb,
+                                    XHCI_MMIO_LIST *out)
+{
+    if (!rb || !rb->Pci.Read)
+        return;
+
+    for (uint32_t bus = 0; bus < 256; ++bus)
+    {
+        for (uint32_t dev = 0; dev < 32; ++dev)
+        {
+            for (uint32_t fn = 0; fn < 8; ++fn)
+            {
+                uint32_t id = 0xFFFFFFFFu;
+                if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x00), 1, &id))
+                    continue;
+                if (id == 0xFFFFFFFFu || id == 0x00000000u)
+                    continue;
+
+                uint32_t cc = 0;
+                if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x08), 1, &cc))
+                    continue;
+
+                uint8_t base = (uint8_t)(cc >> 24);
+                uint8_t sub = (uint8_t)(cc >> 16);
+                uint8_t prog = (uint8_t)(cc >> 8);
+
+                /* USB xHCI: class 0x0C, subclass 0x03, progIF 0x30 */
+                if (base != 0x0C || sub != 0x03 || prog != 0x30)
+                    continue;
+
+                uint32_t bar0 = 0, bar1 = 0;
+                (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x10), 1, &bar0);
+                (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x14), 1, &bar1);
+
+                (void)xhci_list_try_add(st, out, xhci_mmio_from_bars(bar0, bar1), L"RBIO", BOOTINFO_XHCI_SOURCE_DISCOVERED, 1);
+            }
+        }
+    }
+}
+
+static uint32_t scan_xhci_mmio_rbio(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, XHCI_MMIO_LIST *out)
+{
+    uint32_t before = out ? out->count : 0;
+    void *BS = st->BootServices;
+    EFI_LOCATE_HANDLE_BUFFER LocateHandles = BsLocateHandles(BS);
+    EFI_LOCATE_PROTOCOL Locate = BsLocate(BS);
+    EFI_OPEN_PROTOCOL Open = BsOpenProto(BS);
+    EFI_FREE_POOL FreePool = BsFreePool(BS);
+    EFI_HANDLE *handles = 0;
+    UINTN handle_count = 0;
+
+    if (LocateHandles &&
+        LocateHandles(EFI_LOCATE_BY_PROTOCOL,
+                      &PCI_ROOT_BRIDGE_IO_GUID,
+                      NULL,
+                      &handle_count,
+                      &handles) == 0 &&
+        handles &&
+        handle_count)
+    {
+        for (UINTN i = 0; i < handle_count; ++i)
+        {
+            EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb = 0;
+            if (Open &&
+                Open(handles[i],
+                     &PCI_ROOT_BRIDGE_IO_GUID,
+                     (void **)&rb,
+                     image,
+                     0,
+                     EFI_OPEN_PROTOCOL_GET_PROTOCOL) == 0)
+            {
+                scan_xhci_rbio_instance(st, rb, out);
+            }
+        }
+
+        if (FreePool)
+            FreePool(handles);
+    }
+    else
+    {
+        EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb = 0;
+        if (Locate &&
+            Locate(&PCI_ROOT_BRIDGE_IO_GUID, NULL, (void **)&rb) == 0)
+        {
+            scan_xhci_rbio_instance(st, rb, out);
+        }
+    }
+
+    return out ? (out->count - before) : 0;
 }
 
 /* ---------- main finder ---------- */
-static uint64_t find_xhci_mmio(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, uint64_t rsdp_pa)
+static uint32_t find_xhci_mmios(EFI_SYSTEM_TABLE *st,
+                                EFI_HANDLE image,
+                                uint64_t rsdp_pa,
+                                XHCI_MMIO_LIST *out)
 {
-    uint64_t mmio = 0;
+    if (!out)
+        return 0;
 
-    /* ------------------------------------------------------------
-       PRIMARY: Scan first (RBIO scan, then MCFG/ECAM scan)
-       ------------------------------------------------------------ */
-
-    /* 1) Try EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL scan (single instance) */
-    println(st, L"[S2:xHCI] scan: RBIO");
-    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb = 0;
-    EFI_LOCATE_PROTOCOL Locate = BsLocate(st->BootServices);
-
-    if (Locate &&
-        Locate(&PCI_ROOT_BRIDGE_IO_GUID, NULL, (void **)&rb) == 0 &&
-        rb && rb->Pci.Read)
+    out->count = 0;
+    for (uint32_t i = 0; i < BOOTINFO_XHCI_MMIO_MAX; ++i)
     {
-        for (uint32_t bus = 0; bus < 256; ++bus)
+        out->base[i] = 0;
+        out->source[i] = 0;
+    }
+
+    /* PRIMARY: search first. Built-ins are used only when discovery fails. */
+    println(st, L"[S2:xHCI] scan: RBIO");
+    (void)scan_xhci_mmio_rbio(st, image, out);
+
+    println(st, L"[S2:xHCI] scan: MCFG/ECAM");
+    (void)find_xhci_mmio_ecam(st, rsdp_pa, out);
+
+    if (out->count)
+    {
+        print(st, L"[S2:xHCI] discovered count = ");
+        hex64(st, out->count);
+        return out->count;
+    }
+
+    println(st, L"[S2:xHCI] scan found none; trying built-in fallback bases");
+    {
+        for (uint32_t i = 0; i < (uint32_t)(sizeof(XHCI_BUILTIN_FALLBACK_MMIO) / sizeof(XHCI_BUILTIN_FALLBACK_MMIO[0])); ++i)
         {
-            for (uint32_t dev = 0; dev < 32; ++dev)
-            {
-                for (uint32_t fn = 0; fn < 8; ++fn)
-                {
-                    uint32_t id = 0xFFFFFFFFu;
-                    if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x00), 1, &id))
-                        continue;
-                    if (id == 0xFFFFFFFFu || id == 0x00000000u)
-                        continue;
-
-                    uint32_t cc = 0;
-                    if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x08), 1, &cc))
-                        continue;
-
-                    uint8_t base = (uint8_t)(cc >> 24);
-                    uint8_t sub = (uint8_t)(cc >> 16);
-                    uint8_t prog = (uint8_t)(cc >> 8);
-
-                    /* USB xHCI: class 0x0C, subclass 0x03, progIF 0x30 */
-                    if (base != 0x0C || sub != 0x03 || prog != 0x30)
-                        continue;
-
-                    uint32_t bar0 = 0, bar1 = 0;
-                    (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x10), 1, &bar0);
-                    (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x14), 1, &bar1);
-
-                    if (bar0 == 0 || bar0 == 0xFFFFFFFFu)
-                        continue;
-
-                    if (bar_is_64_mmio(bar0, bar1))
-                        mmio = ((uint64_t)bar1 << 32) | (uint64_t)(bar0 & ~0xFu);
-                    else
-                        mmio = (uint64_t)(bar0 & ~0xFu);
-
-                    if (mmio)
-                    {
-                        hex64(st, mmio);
-                        if (xhci_caps_ok(st, mmio))
-                            return mmio;
-                    }
-                }
-            }
+            (void)xhci_list_try_add(st,
+                                    out,
+                                    XHCI_BUILTIN_FALLBACK_MMIO[i],
+                                    L"fallback(builtin)",
+                                    BOOTINFO_XHCI_SOURCE_FALLBACK_BUILTIN,
+                                    0);
         }
     }
 
-    /* 2) Try ACPI MCFG/ECAM scan */
-    println(st, L"[S2:xHCI] scan: MCFG/ECAM");
-    mmio = find_xhci_mmio_ecam(st, rsdp_pa);
-    if (mmio && xhci_caps_ok(st, mmio))
-        return mmio;
+    if (!out->count)
+        println(st, L"[S2:xHCI] no valid xHCI found");
 
-    /* ------------------------------------------------------------
-       FALLBACK: Only if scan failed, try file override then macro
-       ------------------------------------------------------------ */
-
-    /* file override (\OS\xhci.txt) */
-    mmio = try_xhci_override_from_file(st, image);
-    if (mmio)
-    {
-        println(st, L"[S2:xHCI] override(file):");
-        hex64(st, mmio);
-        if (xhci_caps_ok(st, mmio))
-            return mmio;
-        println(st, L"[S2:xHCI] override(file) rejected");
-    }
-
-    /* compile-time override */
-    if (XHCI_MMIO_OVERRIDE)
-    {
-        mmio = XHCI_MMIO_OVERRIDE;
-        println(st, L"[S2:xHCI] override(macro):");
-        hex64(st, mmio);
-        if (xhci_caps_ok(st, mmio))
-            return mmio;
-        println(st, L"[S2:xHCI] override(macro) rejected");
-    }
-
-    println(st, L"[S2:xHCI] no valid xHCI found");
-    return 0;
+    return out->count;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1006,25 +1006,48 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     print(st, L"[S2] RSDP = ");
     hex64(st, bi.acpi_rsdp);
 
-    bi.xhci_mmio_base = find_xhci_mmio(st, image, bi.acpi_rsdp);
-    print(st, L"[S2] xHCI MMIO = ");
-    hex64(st, bi.xhci_mmio_base);
+    XHCI_MMIO_LIST xhci_mmios;
+    bi.xhci_mmio_count = find_xhci_mmios(st, image, bi.acpi_rsdp, &xhci_mmios);
+    if (bi.xhci_mmio_count > BOOTINFO_XHCI_MMIO_MAX)
+        bi.xhci_mmio_count = BOOTINFO_XHCI_MMIO_MAX;
 
-    if (!bi.xhci_mmio_base)
+    for (uint32_t i = 0; i < bi.xhci_mmio_count; ++i)
     {
-        println(st, L"[S2] WARNING: xHCI not found via MCFG/override (continuing without USB hint)");
+        bi.xhci_mmio_bases[i] = xhci_mmios.base[i];
+        bi.xhci_mmio_sources[i] = xhci_mmios.source[i];
     }
-    else
+
+    bi.xhci_mmio_base = bi.xhci_mmio_count ? bi.xhci_mmio_bases[0] : 0;
+
+    print(st, L"[S2] xHCI MMIO count = ");
+    hex64(st, bi.xhci_mmio_count);
+    for (uint32_t i = 0; i < bi.xhci_mmio_count; ++i)
+    {
+        print(st, L"[S2] xHCI MMIO = ");
+        hex64(st, bi.xhci_mmio_bases[i]);
+        print(st, L"[S2] xHCI source = ");
+        hex64(st, bi.xhci_mmio_sources[i]);
+    }
+
+    if (!bi.xhci_mmio_count)
+    {
+        println(st, L"[S2] WARNING: xHCI not found via search/override (continuing without USB hint)");
+    }
+    else if (bi.xhci_mmio_sources[0] == BOOTINFO_XHCI_SOURCE_DISCOVERED)
     {
         /* Safe probe (only when MMIO is non-zero) */
-        volatile uint8_t caplen = *(volatile uint8_t *)(uintptr_t)(bi.xhci_mmio_base + 0x00);
-        volatile uint16_t hciver = *(volatile uint16_t *)(uintptr_t)(bi.xhci_mmio_base + 0x02);
+        volatile uint8_t caplen = *(volatile uint8_t *)(uintptr_t)(bi.xhci_mmio_bases[0] + 0x00);
+        volatile uint16_t hciver = *(volatile uint16_t *)(uintptr_t)(bi.xhci_mmio_bases[0] + 0x02);
 
         println(st, L"[S2:xHCI] probe:");
         print(st, L"  CAPLENGTH=");
         hex64(st, caplen);
         print(st, L"  HCIVERSION=");
         hex64(st, hciver);
+    }
+    else
+    {
+        println(st, L"[S2:xHCI] probe skipped for fallback MMIO");
     }
 
     find_tlmm_mmio(st, image, &bi.tlmm_mmio_base, &bi.tlmm_mmio_size);

@@ -1,6 +1,10 @@
 #pragma once
 #include <stdint.h>
 
+#define BOOTINFO_XHCI_MMIO_MAX 8u
+#define BOOTINFO_XHCI_SOURCE_DISCOVERED 1u
+#define BOOTINFO_XHCI_SOURCE_FALLBACK_BUILTIN 2u
+
 typedef struct
 {
     uint64_t fb_base; // physical address
@@ -34,4 +38,9 @@ typedef struct
 
     uint64_t sacx_exec_pool_base_phys;  /* executable app arena pool, reserved by stage2 */
     uint64_t sacx_exec_pool_size_bytes; /* bytes available for .sacx arenas */
+
+    uint32_t xhci_mmio_count; /* number of valid entries in xhci_mmio_bases */
+    uint32_t _pad3;
+    uint64_t xhci_mmio_bases[BOOTINFO_XHCI_MMIO_MAX];
+    uint32_t xhci_mmio_sources[BOOTINFO_XHCI_MMIO_MAX];
 } boot_info;

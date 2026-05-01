@@ -4,6 +4,7 @@
 #include "acpi/aml_tiny.h"
 #include "gpio/gpio.h"
 #include "kwrappers/string.h"
+#include "asm/asm.h"
 #include <stdint.h>
 
 #define TCPD_ADDR_ACPI 0x2Cu
@@ -24,6 +25,10 @@
 
 static hidi2c_device g_kbd;
 static hidi2c_device g_tpd;
+static hidi2c_device g_probe_dev;
+static char g_kbd_name[5] = "ECKB";
+static char g_tpd_name[5] = "TCPD";
+static char g_probe_name[5] = "HID?";
 static uint8_t g_bus_ready = 0;
 static uint32_t g_aml_gpio_pin = 0u;
 
@@ -55,6 +60,62 @@ typedef struct
 static tcpd_feature_value_layout g_tcpd_input_mode = {0};
 static tcpd_selective_layout g_tcpd_selective = {0};
 
+static void hidi2c_clear_report_desc(hidi2c_device *dev);
+
+static void hidi2c_copy_name4(char dst[5], const char *src, const char *fallback)
+{
+    uint32_t i;
+
+    if (!dst)
+        return;
+
+    if (!src || !src[0])
+        src = fallback ? fallback : "HID?";
+
+    for (i = 0; i < 4u && src[i]; ++i)
+        dst[i] = src[i];
+
+    for (; i < 4u; ++i)
+        dst[i] = 0;
+
+    dst[4] = 0;
+}
+
+static void hidi2c_init_device_slot(hidi2c_device *dev,
+                                    char name_storage[5],
+                                    const char *name,
+                                    uint8_t addr,
+                                    uint32_t gpio_pin,
+                                    uint16_t hid_desc_reg)
+{
+    if (!dev || !name_storage)
+        return;
+
+    hidi2c_copy_name4(name_storage, name, "HID?");
+
+    dev->name = name_storage;
+    dev->i2c_addr_7bit = addr;
+    dev->gpio_pin = gpio_pin;
+    dev->hid_desc_reg = hid_desc_reg;
+    dev->online = 0u;
+    dev->last_report.available = 0u;
+    dev->last_report.len = 0u;
+    memset(&dev->desc, 0, sizeof(dev->desc));
+    hidi2c_clear_report_desc(dev);
+}
+
+static void hidi2c_adopt_device(hidi2c_device *dst,
+                                char name_storage[5],
+                                const hidi2c_device *src)
+{
+    if (!dst || !src || !name_storage)
+        return;
+
+    *dst = *src;
+    hidi2c_copy_name4(name_storage, src->name, "HID?");
+    dst->name = name_storage;
+}
+
 extern int i2c1_bus_init(void);
 extern int i2c1_bus_write(uint8_t addr7, const void *tx, uint32_t tx_len);
 extern int i2c1_bus_read(uint8_t addr7, void *rx, uint32_t rx_len);
@@ -84,7 +145,7 @@ static void short_delay(uint32_t n)
 {
     volatile uint32_t i;
     for (i = 0; i < n; ++i)
-        __asm__ __volatile__("" ::: "memory");
+        asm_relax();
 }
 
 static void delay_us_approx(uint32_t us)
@@ -1804,6 +1865,186 @@ static int tcpd_try_enable_ptp_mode(hidi2c_device *dev)
     return -1;
 }
 
+static uint8_t hidi2c_usage_flags(uint32_t usage_page, uint32_t usage)
+{
+    uint8_t flags = HIDI2C_ACPI_KIND_UNKNOWN;
+
+    if (usage_page == 0x01u)
+    {
+        if (usage == 0x06u)
+            flags |= HIDI2C_ACPI_KIND_KEYBOARD;
+        else if (usage == 0x02u)
+            flags |= HIDI2C_ACPI_KIND_POINTER;
+    }
+    else if (usage_page == 0x07u)
+    {
+        flags |= HIDI2C_ACPI_KIND_KEYBOARD;
+    }
+    else if (usage_page == 0x0Du)
+    {
+        if (usage == 0x05u)
+            flags |= HIDI2C_ACPI_KIND_POINTER;
+    }
+
+    return flags;
+}
+
+static uint8_t hidi2c_report_desc_kind(const uint8_t *desc, uint16_t len)
+{
+    struct
+    {
+        uint32_t usage_page;
+        uint32_t report_size;
+        uint32_t report_count;
+    } g, g_stack[4];
+    uint32_t usages[16];
+    uint8_t usage_count = 0u;
+    uint8_t have_usage_range = 0u;
+    uint32_t usage_min = 0u;
+    uint32_t usage_max = 0u;
+    uint8_t stack_depth = 0u;
+    uint8_t flags = HIDI2C_ACPI_KIND_UNKNOWN;
+    uint16_t i = 0u;
+
+    if (!desc || len == 0u)
+        return flags;
+
+    g.usage_page = 0u;
+    g.report_size = 0u;
+    g.report_count = 0u;
+
+    while (i < len)
+    {
+        uint8_t b = desc[i++];
+        uint8_t size_code;
+        uint8_t size;
+        uint8_t type;
+        uint8_t tag;
+        uint32_t val;
+
+        if (b == 0xFEu)
+        {
+            uint8_t long_size;
+
+            if (i + 1u >= len)
+                break;
+
+            long_size = desc[i];
+            i = (uint16_t)(i + 2u);
+            if ((uint32_t)i + long_size > len)
+                break;
+
+            i = (uint16_t)(i + long_size);
+            continue;
+        }
+
+        size_code = b & 0x03u;
+        size = (size_code == 3u) ? 4u : size_code;
+        type = (b >> 2) & 0x03u;
+        tag = (b >> 4) & 0x0Fu;
+
+        if ((uint32_t)i + size > len)
+            break;
+
+        val = hid_item_u32(&desc[i], size);
+
+        if (type == 0u)
+        {
+            if (tag == 8u || tag == 9u || tag == 11u)
+            {
+                uint32_t count = g.report_count ? g.report_count : 1u;
+
+                if (usage_count == 0u && have_usage_range)
+                {
+                    flags |= hidi2c_usage_flags(g.usage_page, usage_min);
+                    flags |= hidi2c_usage_flags(g.usage_page, usage_max);
+                }
+                else
+                {
+                    for (uint32_t u = 0; u < usage_count; ++u)
+                    {
+                        uint32_t usage = usages[u];
+                        uint32_t usage_page = g.usage_page;
+
+                        if (usage > 0xFFFFu)
+                        {
+                            usage_page = usage >> 16;
+                            usage &= 0xFFFFu;
+                        }
+
+                        flags |= hidi2c_usage_flags(usage_page, usage);
+                    }
+                }
+
+                if (g.usage_page == 0x07u && count != 0u)
+                    flags |= HIDI2C_ACPI_KIND_KEYBOARD;
+            }
+            else if (tag == 10u)
+            {
+                uint32_t usage = 0u;
+                uint32_t usage_page = g.usage_page;
+
+                if (usage_count > 0u)
+                    usage = usages[usage_count - 1u];
+                else if (have_usage_range)
+                    usage = usage_min;
+
+                if (usage > 0xFFFFu)
+                {
+                    usage_page = usage >> 16;
+                    usage &= 0xFFFFu;
+                }
+
+                flags |= hidi2c_usage_flags(usage_page, usage);
+            }
+
+            usage_count = 0u;
+            have_usage_range = 0u;
+        }
+        else if (type == 1u)
+        {
+            if (tag == 0u)
+                g.usage_page = val;
+            else if (tag == 7u)
+                g.report_size = val;
+            else if (tag == 9u)
+                g.report_count = val;
+            else if (tag == 10u)
+            {
+                if (stack_depth < 4u)
+                    g_stack[stack_depth++] = g;
+            }
+            else if (tag == 11u)
+            {
+                if (stack_depth > 0u)
+                    g = g_stack[--stack_depth];
+            }
+        }
+        else if (type == 2u)
+        {
+            if (tag == 0u)
+            {
+                if (usage_count < 16u)
+                    usages[usage_count++] = val;
+            }
+            else if (tag == 1u)
+            {
+                usage_min = val;
+                have_usage_range = 1u;
+            }
+            else if (tag == 2u)
+            {
+                usage_max = val;
+                have_usage_range = 1u;
+            }
+        }
+
+        i = (uint16_t)(i + size);
+    }
+
+    return flags;
+}
+
 static int hidi2c_try_desc_reg_split(hidi2c_device *dev, uint16_t reg)
 {
     uint8_t tx[2];
@@ -2226,7 +2467,8 @@ static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
     for (uint32_t i = 0; i < (sizeof(fallback_regs) / sizeof(fallback_regs[0])); ++i)
         hidi2c_push_unique_reg(tried, &tried_count, sizeof(tried) / sizeof(tried[0]), fallback_regs[i]);
 
-    terminal_print("ECKB desc probe count:");
+    terminal_print(dev->name);
+    terminal_print(" desc probe count:");
     terminal_print_hex32(tried_count);
     terminal_print("\n");
 
@@ -2234,7 +2476,8 @@ static int hidi2c_fetch_desc_keyboard(hidi2c_device *dev)
     {
         uint16_t reg = tried[i];
 
-        terminal_print("ECKB trying reg:");
+        terminal_print(dev->name);
+        terminal_print(" trying reg:");
         terminal_print_hex32(reg);
         terminal_print("\n");
 
@@ -3001,30 +3244,140 @@ static int tcpd_controlled_gpio_test(const hidi2c_acpi_regs *regs, hidi2c_device
                                                   "gpio-controlled-low");
 }
 
+static int hidi2c_probe_acpi_candidate(const hidi2c_acpi_device_candidate *cand,
+                                       uint8_t *kind_out)
+{
+    uint8_t kind = HIDI2C_ACPI_KIND_UNKNOWN;
+    uint8_t actual_kind = HIDI2C_ACPI_KIND_UNKNOWN;
+    int rc;
+
+    if (kind_out)
+        *kind_out = HIDI2C_ACPI_KIND_UNKNOWN;
+
+    if (!cand || cand->addr == 0u)
+        return -1;
+
+    hidi2c_init_device_slot(&g_probe_dev,
+                            g_probe_name,
+                            cand->name,
+                            cand->addr,
+                            cand->gpio_valid ? cand->gpio_pin : 0u,
+                            cand->desc_reg);
+
+    terminal_print("ACPI HID/I2C candidate ");
+    terminal_print(g_probe_dev.name);
+    terminal_print(" addr:");
+    terminal_print_hex8(g_probe_dev.i2c_addr_7bit);
+    terminal_print(" reg:");
+    terminal_print_hex32(g_probe_dev.hid_desc_reg);
+    terminal_print(" hint:");
+    terminal_print_hex8(cand->kind_hint);
+    terminal_print(" trust:");
+    terminal_print_hex8(cand->desc_trusted);
+    terminal_print("\n");
+
+    rc = hidi2c_fetch_desc_keyboard(&g_probe_dev);
+    if (rc != 0)
+    {
+        terminal_warn("ACPI HID/I2C candidate descriptor probe failed");
+        return -1;
+    }
+
+    if (hidi2c_post_desc_init(&g_probe_dev) != 0)
+    {
+        terminal_warn("ACPI HID/I2C candidate post-desc init failed");
+        return -1;
+    }
+
+    if (hidi2c_fetch_report_desc(&g_probe_dev) == 0)
+        actual_kind = hidi2c_report_desc_kind(g_probe_dev.report_desc, g_probe_dev.report_desc_len);
+
+    kind = actual_kind;
+
+    terminal_print("ACPI HID/I2C candidate kind actual:");
+    terminal_print_hex8(actual_kind);
+    terminal_print(" hint:");
+    terminal_print_hex8(cand->kind_hint);
+    terminal_print(" final:");
+    terminal_print_hex8(kind);
+    terminal_print("\n");
+
+    if ((kind & (HIDI2C_ACPI_KIND_KEYBOARD | HIDI2C_ACPI_KIND_POINTER)) == 0u)
+    {
+        terminal_warn("ACPI HID/I2C candidate report descriptor is not keyboard-like or pointer-like");
+        return -1;
+    }
+
+    g_probe_dev.online = 1u;
+    g_probe_dev.last_report.available = 0u;
+    g_probe_dev.last_report.len = 0u;
+
+    if (kind_out)
+        *kind_out = kind;
+
+    return 0;
+}
+
+static uint8_t hidi2c_candidate_already_online(const hidi2c_acpi_device_candidate *cand)
+{
+    if (!cand)
+        return 1u;
+
+    if (g_kbd.online && g_kbd.i2c_addr_7bit == cand->addr)
+        return 1u;
+    if (g_tpd.online && g_tpd.i2c_addr_7bit == cand->addr)
+        return 1u;
+
+    return 0u;
+}
+
+static void hidi2c_try_acpi_candidates(const hidi2c_acpi_regs *regs)
+{
+    if (!regs || regs->device_count == 0u)
+        return;
+
+    terminal_print("ACPI HID/I2C generic candidates:");
+    terminal_print_hex8(regs->device_count);
+    terminal_print("\n");
+
+    for (uint32_t i = 0; i < regs->device_count; ++i)
+    {
+        const hidi2c_acpi_device_candidate *cand = &regs->devices[i];
+        uint8_t kind = HIDI2C_ACPI_KIND_UNKNOWN;
+
+        if (g_kbd.online && g_tpd.online)
+            break;
+
+        if (hidi2c_candidate_already_online(cand))
+            continue;
+
+        if (hidi2c_probe_acpi_candidate(cand, &kind) != 0)
+            continue;
+
+        if ((kind & HIDI2C_ACPI_KIND_KEYBOARD) && !g_kbd.online)
+        {
+            hidi2c_adopt_device(&g_kbd, g_kbd_name, &g_probe_dev);
+            terminal_success("ACPI HID/I2C keyboard-like device online");
+            continue;
+        }
+
+        if ((kind & HIDI2C_ACPI_KIND_POINTER) && !g_tpd.online)
+        {
+            hidi2c_adopt_device(&g_tpd, g_tpd_name, &g_probe_dev);
+            (void)tcpd_try_enable_ptp_mode(&g_tpd);
+            terminal_success("ACPI HID/I2C pointer-like device online");
+            continue;
+        }
+    }
+}
+
 void i2c1_hidi2c_init(uint64_t rsdp_phys)
 {
     hidi2c_acpi_regs regs;
     int have_regs = 0;
 
-    g_kbd.name = "ECKB";
-    g_kbd.i2c_addr_7bit = 0x3A;
-    g_kbd.gpio_pin = 0u;
-    g_kbd.hid_desc_reg = 0u;
-    g_kbd.online = 0;
-    g_kbd.last_report.available = 0;
-    g_kbd.last_report.len = 0;
-    g_kbd.desc.valid = 0;
-    hidi2c_clear_report_desc(&g_kbd);
-
-    g_tpd.name = "TCPD";
-    g_tpd.i2c_addr_7bit = TCPD_ADDR_ACPI;
-    g_tpd.gpio_pin = 0u;
-    g_tpd.hid_desc_reg = 0u;
-    g_tpd.online = 0;
-    g_tpd.last_report.available = 0;
-    g_tpd.last_report.len = 0;
-    g_tpd.desc.valid = 0;
-    hidi2c_clear_report_desc(&g_tpd);
+    hidi2c_init_device_slot(&g_kbd, g_kbd_name, "ECKB", ECKB_I2C_ADDR, 0u, 0u);
+    hidi2c_init_device_slot(&g_tpd, g_tpd_name, "TCPD", TCPD_I2C_ADDR, 0u, 0u);
     g_tcpd_desc_reg_hint = 0u;
 
     if (i2c1_bus_init() != 0)
@@ -3127,13 +3480,15 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
         terminal_print("\n");
 
         dump_tcpd_gpio_desc(&regs);
+
+        hidi2c_try_acpi_candidates(&regs);
     }
     else
     {
         terminal_set_loud();
     }
 
-    if (have_regs && regs.have_eckb)
+    if (!g_kbd.online && have_regs && regs.have_eckb)
     {
         if (regs.eckb_desc_reg != 0u)
             g_kbd.hid_desc_reg = regs.eckb_desc_reg;
@@ -3264,12 +3619,12 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
             }
         }
     }
-    else
+    else if (!g_kbd.online)
     {
         terminal_warn("ECKB ACPI path missing; skipping");
     }
 
-    if (have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
+    if (!g_tpd.online && have_regs && regs.have_tcpd && regs.tcpd_desc_reg != 0u)
     {
         int ok = 0;
         g_aml_gpio_pin = g_tpd.gpio_pin;

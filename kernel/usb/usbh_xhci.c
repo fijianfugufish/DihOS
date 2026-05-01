@@ -8,6 +8,7 @@
 #include "terminal/terminal_api.h"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/colors.h"
+#include "asm/asm.h"
 
 /* --- TRB constants (kept here so it compiles even if your header is thin) --- */
 #ifndef TRB_TYPE_LINK
@@ -18,6 +19,9 @@
 #endif
 #ifndef TRB_TYPE_ENABLE_SLOT
 #define TRB_TYPE_ENABLE_SLOT 9
+#endif
+#ifndef TRB_TYPE_DISABLE_SLOT
+#define TRB_TYPE_DISABLE_SLOT 10
 #endif
 #ifdef TRB_TYPE_ADDR_DEVICE
 #undef TRB_TYPE_ADDR_DEVICE
@@ -258,13 +262,13 @@ static void xhci_dbg_dump_cfg_brief(const uint8_t *cfg, uint16_t len)
 
 static inline void mmio_wmb(void)
 {
-    __asm__ __volatile__("dsb sy; isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static inline void udelay(int n)
 {
     for (volatile int i = 0; i < n * 1000; i++)
-        __asm__ __volatile__("");
+        asm_relax();
 }
 static inline void mdelay(int n)
 {
@@ -298,17 +302,11 @@ void *usbh_alloc_dma(uint32_t bytes)
 
 static inline void dma_flush(void *p, uint64_t nbytes)
 {
-    uintptr_t a = (uintptr_t)p & ~63ull, e = ((uintptr_t)p + nbytes + 63ull) & ~63ull;
-    for (; a < e; a += 64)
-        __asm__ __volatile__("dc cvac, %0" ::"r"(a) : "memory");
-    __asm__ __volatile__("dsb ishst; isb" ::: "memory");
+    asm_dma_clean_range(p, nbytes);
 }
 static inline void dma_invalidate(void *p, uint64_t nbytes)
 {
-    uintptr_t a = (uintptr_t)p & ~63ull, e = ((uintptr_t)p + nbytes + 63ull) & ~63ull;
-    for (; a < e; a += 64)
-        __asm__ __volatile__("dc ivac, %0" ::"r"(a) : "memory");
-    __asm__ __volatile__("dsb ish; isb" ::: "memory");
+    asm_dma_invalidate_range(p, nbytes);
 }
 
 /* ---------- global xHCI state ---------- */
@@ -347,6 +345,7 @@ typedef struct
 } xhci_saved_state_t;
 
 static xhci_t G;
+static uint8_t g_xhci_initialized = 0;
 static uint8_t g_claimed_ports[256];
 static xhci_saved_state_t g_saved_states[8];
 static uint32_t G_ctx_dwords = 16; /* default 64B contexts */
@@ -519,12 +518,7 @@ static trb_t *ring_next(trb_t *ring, uint32_t size, uint32_t *enq, uint8_t *cycl
 
 static inline void mmio_fence(void)
 {
-#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    __asm__ volatile("dsb sy" ::: "memory");
-    __asm__ volatile("isb" ::: "memory");
-#else
-    __asm__ volatile("" ::: "memory");
-#endif
+    asm_mmio_barrier();
 }
 
 static void ring_cmd_db(void)
@@ -594,7 +588,7 @@ static inline void evring_write_erdp(void)
     uint64_t deq = (uint64_t)(uintptr_t)G.ev.evt_base + ((uint64_t)G.ev.deq * sizeof(trb_t));
 
     *ERDP = deq | (1ull << 3); /* EHB=1 */
-    __asm__ __volatile__("dsb ishst; isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 /* --- sanity check: send a No-Op Command to confirm DMA + rings --- */
@@ -970,7 +964,7 @@ static int find_xhci_mmio_from_acpi(uint64_t rsdp_pa, uint64_t *mmio_out)
             for (uint32_t dev = 0; dev < 32; dev++)
                 for (uint32_t fn = 0; fn < 8; fn++)
                 {
-                    uintptr_t cfg = (uintptr_t)(ecam + ((uint64_t)bus << 20) + ((uint64_t)dev << 15) + ((uint64_t)fn << 12));
+                    uintptr_t cfg = (uintptr_t)(ecam + ((uint64_t)(bus - M->entry[e].BusStart) << 20) + ((uint64_t)dev << 15) + ((uint64_t)fn << 12));
                     uint32_t vid = *(volatile uint32_t *)(cfg + 0x00);
                     if ((vid & 0xFFFF) == 0xFFFF)
                         continue;
@@ -978,8 +972,21 @@ static int find_xhci_mmio_from_acpi(uint64_t rsdp_pa, uint64_t *mmio_out)
                     if (((classdw >> 24) & 0xFF) == 0x0C && ((classdw >> 16) & 0xFF) == 0x03 && ((classdw >> 8) & 0xFF) == 0x30)
                     {
                         uint32_t bar0 = *(volatile uint32_t *)(cfg + 0x10), bar1 = *(volatile uint32_t *)(cfg + 0x14);
-                        *mmio_out = ((uint64_t)bar1 << 32) | (bar0 & ~0xFu);
-                        return 0;
+                        uint64_t mmio = 0;
+
+                        if (!(bar0 & 1u) && bar0 != 0 && bar0 != 0xFFFFFFFFu)
+                        {
+                            if ((bar0 & 0x6u) == 0x4u)
+                                mmio = ((uint64_t)bar1 << 32) | (uint64_t)(bar0 & ~0xFu);
+                            else
+                                mmio = (uint64_t)(bar0 & ~0xFu);
+                        }
+
+                        if (mmio)
+                        {
+                            *mmio_out = mmio;
+                            return 0;
+                        }
                     }
                 }
     }
@@ -1005,6 +1012,7 @@ static int xhci_map_regs(uint64_t mmio)
     (void)rtsoff; /* runtime calc is done later */
     return 0;
 }
+
 #ifndef USBSTS_HCH
 #define USBSTS_HCH (1u << 0)
 #endif
@@ -1336,7 +1344,7 @@ static int pci_enable_busmaster_for_mmio(uint64_t rsdp_pa, uint64_t want_mmio)
             for (uint32_t dev = 0; dev < 32; dev++)
                 for (uint32_t fn = 0; fn < 8; fn++)
                 {
-                    uintptr_t cfg = (uintptr_t)(ecam + ((uint64_t)bus << 20) + ((uint64_t)dev << 15) + ((uint64_t)fn << 12));
+                    uintptr_t cfg = (uintptr_t)(ecam + ((uint64_t)(bus - b0) << 20) + ((uint64_t)dev << 15) + ((uint64_t)fn << 12));
 
                     uint32_t id = *(volatile uint32_t *)(cfg + 0x00);
                     if ((id & 0xFFFFu) == 0xFFFFu)
@@ -1355,7 +1363,7 @@ static int pci_enable_busmaster_for_mmio(uint64_t rsdp_pa, uint64_t want_mmio)
                     *cmd = v;
 
                     /* make sure the write lands */
-                    __asm__ __volatile__("dsb sy; isb" ::: "memory");
+                    asm_mmio_barrier();
                     return 0;
                 }
     }
@@ -1435,11 +1443,13 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
         return -1;
     }
 
-    if (G.mmio_base == mmio && G.cmd.base && G.ev.evt_base && G.dcbaa)
+    if (g_xhci_initialized && G.mmio_base == mmio && G.cmd.base && G.ev.evt_base && G.dcbaa)
     {
         dot(7, C_OK);
         return 0;
     }
+
+    g_xhci_initialized = 0;
 
     /* quick sanity: CAPLENGTH in [0x20..0x40], HCIVERSION major == 0x01 */
     {
@@ -1484,7 +1494,7 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     if (init_dcbaa_and_scratch())
         return -1;
 
-    /* enable enough slots for boot media + one HID device, then run */
+    /* Keep the pre-run slot request conservative; enable_irqs_and_run() widens it. */
     {
         uint32_t max_slots = G.R.cap->HCSPARAMS1 & 0xFFu;
         uint32_t cfg_slots;
@@ -1509,7 +1519,49 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 
     dot(7, C_OK);
     dot(9, 0x00A0FFu);
+    g_xhci_initialized = 1;
     return 0;
+}
+
+int usbh_init_any(const uint64_t *xhci_mmio_hints, uint32_t hint_count, uint64_t acpi_rsdp_hint)
+{
+    uint64_t tried[BOOTINFO_XHCI_MMIO_MAX];
+    uint32_t tried_count = 0;
+
+    if (hint_count > BOOTINFO_XHCI_MMIO_MAX)
+        hint_count = BOOTINFO_XHCI_MMIO_MAX;
+
+    for (uint32_t i = 0; xhci_mmio_hints && i < hint_count; ++i)
+    {
+        uint64_t mmio = xhci_mmio_hints[i] & ~0xFULL;
+        int duplicate = 0;
+
+        if (!mmio)
+            continue;
+
+        for (uint32_t t = 0; t < tried_count; ++t)
+        {
+            if (tried[t] == mmio)
+            {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if (duplicate)
+            continue;
+
+        if (tried_count < BOOTINFO_XHCI_MMIO_MAX)
+            tried[tried_count++] = mmio;
+
+        if (usbh_init(mmio, acpi_rsdp_hint) == 0)
+            return 0;
+    }
+
+    if (!hint_count && acpi_rsdp_hint)
+        return usbh_init(0, acpi_rsdp_hint);
+
+    return -1;
 }
 
 /* Evaluate Context to change EP0 MPS (uses ICC=64B layout) */
@@ -1815,6 +1867,34 @@ static int issue_enable_slot(int *slot_id_out)
     return 0;
 }
 
+static void issue_disable_slot(uint8_t slot_id)
+{
+    if (!slot_id || !G.cmd.base)
+        return;
+
+    trb_t *cr = (trb_t *)(uintptr_t)G.cmd.base;
+    trb_t *t = ring_next(cr, G.cmd.size, &G.cmd.enq, &G.cmd.cycle);
+    *t = (trb_t){0, 0, 0,
+                 (TRB_TYPE_DISABLE_SLOT << 10) |
+                     (G.cmd.cycle & 1u) |
+                     ((uint32_t)slot_id << 24)};
+
+    dma_flush((void *)(uintptr_t)G.cmd.base, (uint64_t)G.cmd.size * sizeof(trb_t));
+    mmio_wmb();
+    ring_cmd_db();
+
+    (void)wait_cmd_complete(1000, 0);
+
+    if (G.dcbaa)
+    {
+        ((uint64_t *)(uintptr_t)G.dcbaa)[slot_id] = 0;
+        dma_flush((void *)(uintptr_t)G.dcbaa, 256 * sizeof(uint64_t));
+    }
+
+    if (G.slot_id == slot_id)
+        G.slot_id = 0;
+}
+
 /* Single-step Address Device (BSR=0) with correct ICC=64B layout */
 static int address_device(void)
 {
@@ -1869,6 +1949,11 @@ static int address_device(void)
     /* Fresh EP0 ring + TR Dequeue (DCS=1) */
     uint32_t n;
     ring_init_xfer_or_cmd(&G.ctrl_tr, &n);
+    if (!G.ctrl_tr || !n)
+    {
+        dot(19, C_ER);
+        return -1;
+    }
     G.ctrl_enq = 0;
     G.ctrl_cycle = 1;
     uint64_t dq = G.ctrl_tr | 1u;
@@ -1911,6 +1996,12 @@ static inline uint64_t pack_setup(uint8_t bm, uint8_t bReq, uint16_t wValue, uin
 static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex,
                         void *data, uint16_t wLen)
 {
+    if (!G.ctrl_tr || !G.slot_id || (wLen && !data))
+    {
+        dot(19, C_ER);
+        return -1;
+    }
+
     /* xHCI Setup Stage TRT encodings */
     const uint32_t TRT_NO_DATA = 0;
     const uint32_t TRT_OUT = 2;
@@ -3144,6 +3235,31 @@ int usbh_enumerate_first_hid_mouse(usbh_dev_t *D)
 }
 
 /* ===== public enumeration (drives the dots) ===== */
+static void usbh_dev_clear(usbh_dev_t *D)
+{
+    if (D)
+        *D = (usbh_dev_t){0};
+}
+
+static uint32_t xhci_power_port_and_read(int port_id)
+{
+    if (port_id <= 0 || port_id > (int)G.n_ports)
+        return 0;
+
+    volatile uint32_t *PORTSC = &G.R.ports[port_id - 1].PORTSC;
+    uint32_t v = *PORTSC;
+
+    if (!(v & PORTSC_PP))
+    {
+        *PORTSC = v | PORTSC_PP;
+        mmio_wmb();
+        mdelay(20);
+        v = *PORTSC;
+    }
+
+    return v;
+}
+
 static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
 {
     if (port_id > 0)
@@ -3198,8 +3314,10 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
         dd8[i] = 0;
 
     dot(93, 0xFFFF00u); /* GET_DESCRIPTOR dev(8) */
+    dot(24, C_YL);
     if (control_xfer(0x80, 6, (DESC_DEV << 8) | 0, 0, dd8, 8))
         return -1;
+    dot(24, C_OK);
     dot(94, 0x00FF00u); /* got dev(8) */
 
     uint8_t mps0 = dd8[7];
@@ -3207,8 +3325,10 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
         mps0 = 8;
 
     dot(95, 0xFFFF00u); /* set EP0 MPS */
+    dot(25, C_YL);
     if (ep0_evaluate_context_set_mps(mps0))
         return -1;
+    dot(25, C_OK);
     dot(96, 0x00FF00u); /* EP0 MPS set ok */
 
     dot(99, 0xFFFF00u); /* about to alloc dev18 */
@@ -3221,8 +3341,10 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
         dev[i] = 0;
 
     dot(101, 0xFFFF00u); /* GET_DESCRIPTOR dev(18) */
+    dot(26, C_YL);
     if (control_xfer(0x80, 6, (DESC_DEV << 8) | 0, 0, dev, 18))
         return -1;
+    dot(26, C_OK);
     dot(102, 0x00FF00u); /* got dev(18) */
 
     dot(103, 0xFFFF00u); /* about to alloc cfg9 */
@@ -3235,8 +3357,10 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
         cfg9[i] = 0;
 
     dot(105, 0xFFFF00u); /* GET_DESCRIPTOR cfg(9) */
+    dot(27, C_YL);
     if (control_xfer(0x80, 6, (DESC_CONFIG << 8) | 0, 0, cfg9, 9))
         return -1;
+    dot(27, C_OK);
     dot(106, 0x00FF00u); /* got cfg(9) */
 
     uint16_t tot = (uint16_t)cfg9[2] | ((uint16_t)cfg9[3] << 8);
@@ -3253,14 +3377,18 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
         cfg[i] = 0;
 
     dot(109, 0xFFFF00u); /* GET_DESCRIPTOR cfg(tot) */
+    dot(28, C_YL);
     if (control_xfer(0x80, 6, (DESC_CONFIG << 8) | 0, 0, cfg, tot))
         return -1;
+    dot(28, C_OK);
     dot(110, 0x00FF00u); /* got full cfg */
 
     dot(111, 0xFFFF00u); /* SET_CONFIGURATION */
     uint8_t cfgval = cfg9[5];
+    dot(29, C_YL);
     if (control_xfer(0x00, 9, cfgval, 0, 0, 0))
         return -1;
+    dot(29, C_OK);
     dot(112, 0x00FF00u); /* SET_CONFIGURATION ok */
 
     dot(113, 0xFFFF00u); /* parse_config_for_msc */
@@ -3293,39 +3421,15 @@ static int enumerate_msc_on_port(usbh_dev_t *D, int port_id)
 
 int usbh_enumerate_first_msc(usbh_dev_t *D)
 {
-    dot(80, 0x00FF00u); /* entered usbh_------------enumerate_first_msc */
+    dot(80, 0x00FF00u);
 
     if (!D)
         return -1;
 
-    D->configured = 0;
-    D->addr = 0;
-    D->slot_id = 0;
-    D->port_id = 0;
-    D->msc_if_num = 0;
-    D->ep_bulk_in = 0;
-    D->ep_bulk_out = 0;
-    D->mps_bulk_in = 0;
-    D->mps_bulk_out = 0;
-    D->devctx = 0;
-    D->input_ctx = 0;
-    D->ctrl_tr = 0;
-    D->bulk_in_tr = 0;
-    D->bulk_out_tr = 0;
-    D->intr_in_tr = 0;
-    D->intr_buf = 0;
-    D->intr_buf_len = 0;
-    D->intr_pending_trbptr = 0;
-    D->intr_pending_active = 0;
-    D->ctrl_enq = 0;
-    D->bin_enq = 0;
-    D->bout_enq = 0;
-    D->iin_enq = 0;
-    D->ctrl_cycle = 0;
-    D->bin_cycle = 0;
-    D->bout_cycle = 0;
-    D->iin_cycle = 0;
+    usbh_dev_clear(D);
 
+    // Restore old known-working behaviour:
+    // do NOT scan ports manually here.
     return enumerate_msc_on_port(D, 0);
 }
 
@@ -3679,6 +3783,6 @@ int usbh_msc_bot_recover(usbh_dev_t *d)
 int usbh_poll(void)
 {
     for (volatile uint32_t i = 0; i < 500000; i++)
-        __asm__ volatile("nop");
+        asm_relax();
     return 0;
 }

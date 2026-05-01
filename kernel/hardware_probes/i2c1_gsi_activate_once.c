@@ -1,6 +1,7 @@
 /* i2c1_gsi_activate_once.c */
 #include "hardware_probes/i2c1_gsi_activate_once.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 
 #define I2C1_MMIO_BASE 0x00B80000u
 
@@ -20,8 +21,7 @@ static inline void wr32(uint32_t off, uint32_t v)
 
 static inline void mmio_barrier(void)
 {
-    __asm__ __volatile__("dsb sy" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static void log_reg(const char *tag, uint32_t off)

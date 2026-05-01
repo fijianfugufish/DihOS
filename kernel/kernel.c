@@ -18,12 +18,16 @@
 #include "apps/sacx_runtime.h"
 #include "apps/text_editor_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
+#include "asm/asm.h"
 
 #include "terminal/terminal_api.h"
 
 const boot_info *k_bootinfo_ptr = 0;
 
 extern int usbdisk_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint);
+extern int usbdisk_bind_and_enumerate_multi(const uint64_t *xhci_mmio_hints,
+                                            uint32_t hint_count,
+                                            uint64_t acpi_rsdp_hint);
 extern blockdev_t g_usb_bd;
 extern uint32_t usbdisk_get_lba_offset_lo(void);
 
@@ -38,6 +42,54 @@ static inline void crumb(kcolor c)
     kgfx_flush();
 }
 
+static void xhci_hint_add(uint64_t *hints, uint32_t *count, uint32_t cap, uint64_t mmio)
+{
+    if (!hints || !count)
+        return;
+
+    mmio &= ~0xFULL;
+    if (!mmio)
+        return;
+
+    for (uint32_t i = 0; i < *count; ++i)
+    {
+        if ((hints[i] & ~0xFULL) == mmio)
+            return;
+    }
+
+    if (*count < cap)
+        hints[(*count)++] = mmio;
+}
+
+static uint32_t xhci_build_hint_order(const boot_info *bi, uint64_t *hints, uint32_t cap)
+{
+    uint32_t count = 0;
+    uint32_t src_count = 0;
+    const uint64_t preferred_fallback = 0x000000000A600000ULL;
+
+    if (!bi || !hints || cap == 0u)
+        return 0;
+
+    src_count = bi->xhci_mmio_count;
+    if (src_count > BOOTINFO_XHCI_MMIO_MAX)
+        src_count = BOOTINFO_XHCI_MMIO_MAX;
+
+    /* The storage port on this machine is behind the A6 fallback. Try it first. */
+    for (uint32_t i = 0; i < src_count; ++i)
+    {
+        if ((bi->xhci_mmio_bases[i] & ~0xFULL) == preferred_fallback)
+            xhci_hint_add(hints, &count, cap, bi->xhci_mmio_bases[i]);
+    }
+
+    for (uint32_t i = 0; i < src_count; ++i)
+        xhci_hint_add(hints, &count, cap, bi->xhci_mmio_bases[i]);
+
+    if (!count)
+        xhci_hint_add(hints, &count, cap, bi->xhci_mmio_base);
+
+    return count;
+}
+
 void kmain(const boot_info *bi)
 {
     k_bootinfo_ptr = bi;
@@ -45,7 +97,7 @@ void kmain(const boot_info *bi)
     // init graphics & pmem
     if (kgfx_init(bi) != 0)
         for (;;)
-            __asm__ __volatile__("wfe");
+            asm_wait();
 
     pmem_init(bi);
 
@@ -57,11 +109,15 @@ void kmain(const boot_info *bi)
 
     crumb((kcolor){20, 20, 20});
 
+    uint64_t xhci_mmio_order[BOOTINFO_XHCI_MMIO_MAX] = {0};
+    uint32_t xhci_mmio_count = xhci_build_hint_order(bi, xhci_mmio_order, BOOTINFO_XHCI_MMIO_MAX);
+    const uint64_t *xhci_mmio_bases = xhci_mmio_count ? xhci_mmio_order : 0;
+
     // Try USB only if we have *some* hint
     int usb_ok = -1;
-    if (bi->xhci_mmio_base || bi->acpi_rsdp)
+    if (xhci_mmio_count || bi->acpi_rsdp)
     {
-        usb_ok = usbdisk_bind_and_enumerate(bi->xhci_mmio_base, bi->acpi_rsdp);
+        usb_ok = usbdisk_bind_and_enumerate_multi(xhci_mmio_bases, xhci_mmio_count, bi->acpi_rsdp);
     }
 
     // Mount only when enumeration succeeded
@@ -76,7 +132,7 @@ void kmain(const boot_info *bi)
     // Prepare backbuffer/scene after breadcrumbs (they draw to front buffer)
     if (kgfx_scene_init() != 0 || !mounted)
         for (;;)
-            __asm__ __volatile__("wfe");
+            asm_wait();
 
     // Try to load a PSF font only if mounted
     kfont font = (kfont){0};
@@ -95,7 +151,7 @@ void kmain(const boot_info *bi)
     terminal_print("terminal online");
     terminal_success("sacx runtime online");
 
-    kinput_init(bi->xhci_mmio_base, bi->acpi_rsdp);
+    kinput_init_multi(xhci_mmio_bases, xhci_mmio_count, bi->acpi_rsdp);
 
     terminal_print("^^ i sure hope this log is good ^^");
 

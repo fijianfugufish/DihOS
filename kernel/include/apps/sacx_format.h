@@ -9,6 +9,13 @@ extern "C"
 
 #define SACX_MAGIC 0x58434153u /* "SACX" */
 #define SACX_VERSION 1u
+#define SACX_FAT_VERSION 2u
+
+#define SACX_ARCH_UNKNOWN 0u
+#define SACX_ARCH_AA64 0x0000AA64u
+#define SACX_ARCH_X64 0x00008664u
+
+#define SACX_SLICE_KIND_NATIVE 1u
 
     enum
     {
@@ -43,6 +50,31 @@ extern "C"
         uint32_t reserved0;
     } sacx_header;
 
+    typedef struct sacx_fat_header
+    {
+        uint32_t magic;
+        uint16_t version;
+        uint16_t header_size;
+        uint32_t flags;
+        uint32_t crc32; /* checksum over full container with this field set to 0 */
+
+        uint32_t slice_offset;
+        uint32_t slice_count;
+
+        uint32_t reserved0;
+        uint32_t reserved1;
+    } sacx_fat_header;
+
+    typedef struct sacx_slice
+    {
+        uint32_t arch;
+        uint32_t kind;
+        uint32_t file_offset;
+        uint32_t file_size;
+        uint32_t flags;
+        uint32_t reserved0;
+    } sacx_slice;
+
     typedef struct sacx_segment
     {
         uint32_t rva;
@@ -69,4 +101,3 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
-

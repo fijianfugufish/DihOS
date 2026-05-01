@@ -2,13 +2,14 @@
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "gpio/gpio.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 #include <stdint.h>
 
 static void delay_loops(uint32_t n)
 {
     volatile uint32_t i;
     for (i = 0; i < n; ++i)
-        __asm__ volatile("");
+        asm_relax();
 }
 
 static void mdelay(uint32_t ms)

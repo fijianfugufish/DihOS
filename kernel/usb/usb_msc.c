@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "kwrappers/string.h"
+#include "asm/asm.h"
 
 // DMA-safe allocator (below 4GB)
 extern void *alloc_dma(uint32_t pages);
@@ -38,7 +39,7 @@ static uint32_t mktag(void)
 static void tiny_delay(void)
 {
     for (volatile uint32_t i = 0; i < 500000; ++i)
-        __asm__ volatile("nop");
+        asm_relax();
 }
 
 // --- DMA-safe scratch buffers ---

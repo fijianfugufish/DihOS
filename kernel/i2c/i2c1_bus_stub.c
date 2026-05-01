@@ -1,5 +1,6 @@
 #include "i2c/i2c1_hidi2c.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -124,15 +125,14 @@ static inline void wr32(uint32_t off, uint32_t v)
 
 static inline void io_barrier(void)
 {
-    __asm__ __volatile__("dsb sy" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static void tiny_delay(uint32_t n)
 {
     volatile uint32_t i;
     for (i = 0; i < n; ++i)
-        __asm__ __volatile__("" ::: "memory");
+        asm_relax();
 }
 
 static uint32_t build_cmd(uint32_t opcode, uint8_t addr7, uint32_t m_param_bits)

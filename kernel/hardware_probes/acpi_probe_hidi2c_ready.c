@@ -798,6 +798,177 @@ static int dsm_is_trusted(const hidi2c_acpi_summary_t *s)
            s->dsm_has_uuid_buffer;
 }
 
+static void copy_cstr_bounded(char *dst, uint32_t cap, const char *src)
+{
+    uint32_t i;
+
+    if (!dst || cap == 0u)
+        return;
+
+    if (!src)
+        src = "";
+
+    for (i = 0; i + 1u < cap && src[i]; ++i)
+        dst[i] = src[i];
+
+    dst[i] = 0;
+}
+
+static uint8_t cstr_has_token(const char *s, const char *needle)
+{
+    if (!s || !needle || !needle[0])
+        return 0u;
+
+    return strstr(s, needle) ? 1u : 0u;
+}
+
+static uint8_t hidi2c_acpi_kind_hint_from_summary(const hidi2c_acpi_summary_t *s)
+{
+    uint8_t kind = HIDI2C_ACPI_KIND_UNKNOWN;
+
+    if (!s)
+        return kind;
+
+    if (cstr_has_token(s->name, "ECKB") ||
+        cstr_has_token(s->name, "KBD") ||
+        cstr_has_token(s->name, "KEY") ||
+        cstr_has_token(s->hid, "PNP0303") ||
+        cstr_has_token(s->cid, "PNP0303"))
+    {
+        kind |= HIDI2C_ACPI_KIND_KEYBOARD;
+    }
+
+    if (cstr_has_token(s->name, "TCPD") ||
+        cstr_has_token(s->name, "TPD") ||
+        cstr_has_token(s->name, "PTP") ||
+        cstr_has_token(s->name, "PAD") ||
+        cstr_has_token(s->name, "MOU") ||
+        cstr_has_token(s->name, "PTR") ||
+        cstr_has_token(s->name, "TOUCH") ||
+        cstr_has_token(s->hid, "PNP0F") ||
+        cstr_has_token(s->cid, "PNP0F"))
+    {
+        kind |= HIDI2C_ACPI_KIND_POINTER;
+    }
+
+    return kind;
+}
+
+static uint8_t hidi2c_acpi_summary_looks_like_candidate(const hidi2c_acpi_summary_t *s)
+{
+    if (!s || !s->sb_found)
+        return 0u;
+
+    if ((s->sb_slave_addr & 0x7Fu) == 0u)
+        return 0u;
+
+    if (memeq_n(s->name, "ECKB", 4) || memeq_n(s->name, "TCPD", 4))
+        return 1u;
+
+    if (is_hidi2cish_id(s->hid) || is_hidi2cish_id(s->cid))
+        return 1u;
+
+    if (s->dsm_hid_desc_ok)
+        return 1u;
+
+    if (s->crs_has_serialbus &&
+        (s->crs_has_gpio || s->body_has_gpioint || s->gpio_found) &&
+        (s->ref_i2c1 || s->dep_refs_i2c1 ||
+         cstr_has_token(s->sb_source, "I2C1") ||
+         s->body_has_i2c_serialbus))
+    {
+        return 1u;
+    }
+
+    return 0u;
+}
+
+static hidi2c_acpi_device_candidate *hidi2c_acpi_find_or_alloc_candidate(const hidi2c_acpi_summary_t *s)
+{
+    uint8_t addr;
+
+    if (!s)
+        return 0;
+
+    addr = (uint8_t)(s->sb_slave_addr & 0x7Fu);
+
+    for (uint32_t i = 0; i < g_hidi2c_regs.device_count; ++i)
+    {
+        hidi2c_acpi_device_candidate *c = &g_hidi2c_regs.devices[i];
+
+        if (c->addr == addr && memeq_n(c->name, s->name, 4))
+            return c;
+    }
+
+    if (g_hidi2c_regs.device_count >= HIDI2C_ACPI_MAX_DEVICES)
+        return 0;
+
+    return &g_hidi2c_regs.devices[g_hidi2c_regs.device_count++];
+}
+
+static int hidi2c_acpi_maybe_export_candidate(const hidi2c_acpi_summary_t *s)
+{
+    hidi2c_acpi_device_candidate *c;
+    parsed_gpio_desc_t g0;
+    uint32_t gpio_count;
+
+    if (!hidi2c_acpi_summary_looks_like_candidate(s))
+        return 0;
+
+    c = hidi2c_acpi_find_or_alloc_candidate(s);
+    if (!c)
+        return 1;
+
+    memset(c, 0, sizeof(*c));
+
+    copy_cstr_bounded(c->name, sizeof(c->name), s->name);
+    copy_cstr_bounded(c->hid, sizeof(c->hid), s->hid);
+    copy_cstr_bounded(c->cid, sizeof(c->cid), s->cid);
+
+    c->kind_hint = hidi2c_acpi_kind_hint_from_summary(s);
+    c->addr = (uint8_t)(s->sb_slave_addr & 0x7Fu);
+
+    if (s->dsm_hid_desc_ok)
+    {
+        c->desc_reg = (uint16_t)(s->dsm_hid_desc_addr & 0xFFFFu);
+        c->desc_trusted = dsm_is_trusted(s) ? 1u : 0u;
+    }
+
+    gpio_count = decode_all_gpio_descriptors(s, &g0, 0);
+
+    c->gpio_count = (uint8_t)gpio_count;
+    if (gpio_count >= 1u)
+    {
+        c->gpio_valid = (g0.first_pin != 0u) ? 1u : 0u;
+        c->gpio_pin = g0.first_pin;
+        c->gpio_flags = g0.flags;
+        c->gpio_conn_type = g0.conn_type;
+        c->gpio_pin_cfg = g0.pin_cfg;
+        c->gpio_pin_guessed = g0.pin_guessed;
+        copy_cstr_bounded(c->gpio_source, sizeof(c->gpio_source), g0.source);
+    }
+    else if (s->gpio_found)
+    {
+        c->gpio_count = 1u;
+        c->gpio_valid = (s->gpio_first_pin != 0u) ? 1u : 0u;
+        c->gpio_pin = s->gpio_first_pin;
+        c->gpio_flags = s->gpio_flags;
+        c->gpio_conn_type = s->gpio_conn_type;
+        c->gpio_pin_cfg = s->gpio_pin_cfg;
+        c->gpio_pin_guessed = s->gpio_pin_guessed;
+        c->gpio_from_legacy = s->gpio_from_legacy;
+        copy_cstr_bounded(c->gpio_source, sizeof(c->gpio_source), s->gpio_source);
+    }
+
+    c->has_crs = s->has_crs;
+    c->has_dsm = s->has_dsm;
+    c->ref_i2c1 = s->ref_i2c1;
+    c->dep_refs_i2c1 = s->dep_refs_i2c1;
+    c->sb_found = s->sb_found;
+
+    return 1;
+}
+
 static void print_flag(const char *name, uint8_t v)
 {
     terminal_print(name);
@@ -2506,8 +2677,12 @@ extern int i2c1_bus_write_read_combined(uint8_t addr7, const void *tx, uint32_t 
 static int classify_and_export_device(const uint8_t *aml,
                                       const hidi2c_acpi_summary_t *s)
 {
+    int generic_hit;
+
     if (!aml || !s)
         return 0;
+
+    generic_hit = hidi2c_acpi_maybe_export_candidate(s);
 
     if (memeq_n(s->name, "ECKB", 4))
     {
@@ -2768,6 +2943,8 @@ static int classify_and_export_device(const uint8_t *aml,
     if (is_hidi2cish_id(s->hid))
         return 1;
     if (is_hidi2cish_id(s->cid))
+        return 1;
+    if (generic_hit)
         return 1;
 
     return 0;
@@ -4340,6 +4517,10 @@ static void probe_i2c1_children(const acpi_sdt_header_t *dsdt)
         terminal_print_hex32(hits);
         terminal_print("\n");
     }
+
+    terminal_print("hidacpi candidates:");
+    terminal_print_hex32(g_hidi2c_regs.device_count);
+    terminal_print("\n");
 }
 
 void acpi_probe_hidi2c_ready_from_rsdp(uint64_t rsdp_phys)
@@ -4351,6 +4532,8 @@ void acpi_probe_hidi2c_ready_from_rsdp(uint64_t rsdp_phys)
     char rootsig[5];
 
     terminal_print("hidacpi probe start\n");
+
+    memset(&g_hidi2c_regs, 0, sizeof(g_hidi2c_regs));
 
     if (!rsdp_phys)
     {
@@ -4406,6 +4589,8 @@ int acpi_hidi2c_get_regs_from_rsdp(uint64_t rsdp_phys, hidi2c_acpi_regs *out)
 
     if (!out || !rsdp_phys)
         return -1;
+
+    memset(&g_hidi2c_regs, 0, sizeof(g_hidi2c_regs));
 
     g_hidi2c_regs.have_eckb = 0u;
     g_hidi2c_regs.have_tcpd = 0u;

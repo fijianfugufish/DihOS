@@ -2,6 +2,7 @@
 #include "apps/sacx_api.h"
 #include "apps/sacx_format.h"
 #include "apps/file_explorer_api.h"
+#include "asm/asm.h"
 
 #include <stddef.h>
 
@@ -34,8 +35,9 @@ extern "C"
 #define SACX_MAX_SEGMENTS 128u
 #define SACX_MAX_RELOCS 8192u
 #define SACX_MAX_IMPORTS 256u
+#define SACX_MAX_SLICES 8u
 #define SACX_MAX_FILE_BYTES (32u * 1024u * 1024u)
-#define SACX_APP_ARENA_BYTES (8u * 1024u * 1024u)
+#define SACX_APP_ARENA_BYTES (64u * 1024u * 1024u)
 #define SACX_APP_ARENA_PAGES (SACX_APP_ARENA_BYTES / 4096u)
 #define SACX_SCHED_DEFAULT_QUANTUM_TICKS 1u
 
@@ -103,6 +105,8 @@ typedef struct sacx_task
     uint32_t arena_size;
     uint8_t *image_base;
     uint32_t image_size;
+    uint32_t loaded_arch;
+    uint8_t loaded_from_fat;
 
     sacx_entry_fn entry;
     sacx_update_fn update_fn;
@@ -141,55 +145,9 @@ static uint32_t G_next_task_id = 1u;
 static uint32_t G_rr_cursor = 0u;
 static const kfont *G_runtime_font = 0;
 
-static uint32_t sacx_cache_line_bytes_from_ctr_field(uint32_t field)
-{
-    uint32_t bytes = 4u << (field & 0xFu);
-    if (bytes < 16u || bytes > 4096u)
-        bytes = 64u;
-    return bytes;
-}
-
 static void sacx_sync_executable_range(const void *base, uint32_t size)
 {
-#if defined(__aarch64__)
-    uint64_t ctr = 0u;
-    uint32_t ic_line = 64u;
-    uint32_t dc_line = 64u;
-    uintptr_t start = 0u;
-    uintptr_t end = 0u;
-    uintptr_t p = 0u;
-
-    if (!base || size == 0u)
-        return;
-
-    start = (uintptr_t)base;
-    end = start + (uintptr_t)size;
-    if (end < start)
-        return;
-
-    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
-    ic_line = sacx_cache_line_bytes_from_ctr_field((uint32_t)(ctr & 0xFu));
-    dc_line = sacx_cache_line_bytes_from_ctr_field((uint32_t)((ctr >> 16) & 0xFu));
-
-    p = start & ~(uintptr_t)(dc_line - 1u);
-    while (p < end)
-    {
-        __asm__ __volatile__("dc cvau, %0" ::"r"(p) : "memory");
-        p += dc_line;
-    }
-    __asm__ __volatile__("dsb ish" ::: "memory");
-
-    p = start & ~(uintptr_t)(ic_line - 1u);
-    while (p < end)
-    {
-        __asm__ __volatile__("ic ivau, %0" ::"r"(p) : "memory");
-        p += ic_line;
-    }
-    __asm__ __volatile__("dsb ish; isb" ::: "memory");
-#else
-    (void)base;
-    (void)size;
-#endif
+    asm_sync_executable_range(base, (uint64_t)size);
 }
 
 static int sacx_ptr_in_image(const sacx_task *task, const void *ptr)
@@ -314,7 +272,9 @@ static int sacx_range_ok(uint32_t off, uint32_t len, uint32_t total)
 static int sacx_table_ok(uint32_t off, uint32_t count, uint32_t elem_size, uint32_t total)
 {
     uint64_t len = (uint64_t)count * (uint64_t)elem_size;
-    return sacx_range_ok(off, (uint32_t)len, total) && len <= 0xFFFFFFFFull;
+    if (len > 0xFFFFFFFFull)
+        return 0;
+    return sacx_range_ok(off, (uint32_t)len, total);
 }
 
 static const char *G_known_imports[] = {
@@ -1024,7 +984,113 @@ static int sacx_read_file_all(const char *path, uint8_t **out_buf, uint32_t *out
     return 0;
 }
 
-static int sacx_load_image(sacx_task *task, const uint8_t *file_data, uint32_t file_size, const char *friendly_path)
+typedef struct sacx_selected_image
+{
+    const uint8_t *data;
+    uint32_t size;
+    uint32_t arch;
+    uint8_t from_fat;
+} sacx_selected_image;
+
+static uint32_t sacx_runtime_arch(void)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    return SACX_ARCH_AA64;
+#elif defined(__x86_64__) || defined(_M_X64)
+    return SACX_ARCH_X64;
+#else
+    return SACX_ARCH_UNKNOWN;
+#endif
+}
+
+static const char *sacx_arch_name(uint32_t arch)
+{
+    if (arch == SACX_ARCH_AA64)
+        return "aa64";
+    if (arch == SACX_ARCH_X64)
+        return "x64";
+    return "unknown";
+}
+
+static int sacx_select_fat_image(const uint8_t *file_data, uint32_t file_size, sacx_selected_image *out)
+{
+    const sacx_fat_header *fat = 0;
+    const uint8_t *slice_bytes = 0;
+    uint32_t runtime_arch = sacx_runtime_arch();
+
+    if (!file_data || !out || file_size < sizeof(sacx_fat_header) || runtime_arch == SACX_ARCH_UNKNOWN)
+        return -1;
+
+    fat = (const sacx_fat_header *)file_data;
+    if (fat->magic != SACX_MAGIC ||
+        fat->version != SACX_FAT_VERSION ||
+        fat->header_size < sizeof(sacx_fat_header) ||
+        fat->slice_offset < fat->header_size ||
+        fat->slice_count == 0u ||
+        fat->slice_count > SACX_MAX_SLICES)
+        return -1;
+
+    if (!sacx_table_ok(fat->slice_offset, fat->slice_count, sizeof(sacx_slice), file_size))
+        return -1;
+
+    if (sacx_crc32_zero_range(file_data, file_size, (uint32_t)offsetof(sacx_fat_header, crc32), 4u) != fat->crc32)
+        return -1;
+
+    slice_bytes = file_data + fat->slice_offset;
+    for (uint32_t i = 0u; i < fat->slice_count; ++i)
+    {
+        sacx_slice slice;
+        memcpy(&slice, slice_bytes + (uint64_t)i * sizeof(sacx_slice), sizeof(slice));
+
+        if (slice.kind != SACX_SLICE_KIND_NATIVE)
+            continue;
+        if (slice.file_size < sizeof(sacx_header) || !sacx_range_ok(slice.file_offset, slice.file_size, file_size))
+            return -1;
+        if (slice.arch != runtime_arch)
+            continue;
+
+        out->data = file_data + slice.file_offset;
+        out->size = slice.file_size;
+        out->arch = slice.arch;
+        out->from_fat = 1u;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int sacx_select_image(const uint8_t *file_data, uint32_t file_size, sacx_selected_image *out)
+{
+    const sacx_header *hdr = 0;
+
+    if (!file_data || !out || file_size < sizeof(sacx_header))
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+    hdr = (const sacx_header *)file_data;
+    if (hdr->magic != SACX_MAGIC)
+        return -1;
+
+    if (hdr->version == SACX_FAT_VERSION)
+        return sacx_select_fat_image(file_data, file_size, out);
+
+    if (hdr->version == SACX_VERSION)
+    {
+        /* Legacy v1 SACX files were produced as AArch64-only images. */
+        if (sacx_runtime_arch() != SACX_ARCH_AA64)
+            return -1;
+
+        out->data = file_data;
+        out->size = file_size;
+        out->arch = SACX_ARCH_AA64;
+        out->from_fat = 0u;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, uint32_t file_size, const char *friendly_path)
 {
     const sacx_header *hdr = 0;
     const uint8_t *segment_bytes = 0;
@@ -1131,6 +1197,23 @@ static int sacx_load_image(sacx_task *task, const uint8_t *file_data, uint32_t f
     task->entry = (sacx_entry_fn)(uintptr_t)(task->image_base + hdr->entry_rva);
     sacx_copy_trunc(task->friendly_path, sizeof(task->friendly_path), friendly_path ? friendly_path : "");
     return 0;
+}
+
+static int sacx_load_image(sacx_task *task, const uint8_t *file_data, uint32_t file_size, const char *friendly_path)
+{
+    sacx_selected_image selected;
+    int rc = -1;
+
+    if (sacx_select_image(file_data, file_size, &selected) != 0)
+        return -1;
+
+    rc = sacx_load_image_payload(task, selected.data, selected.size, friendly_path);
+    if (rc == 0)
+    {
+        task->loaded_arch = selected.arch;
+        task->loaded_from_fat = selected.from_fat;
+    }
+    return rc;
 }
 
 static int sacx_api_set_update(sacx_update_fn fn)
@@ -2794,6 +2877,9 @@ extern "C" int sacx_runtime_launch_ex(const char *raw_path,
         ksb_init(&b, msg, sizeof(msg));
         ksb_puts(&b, "[sacx] launched ");
         ksb_puts(&b, task->friendly_path[0] ? task->friendly_path : raw_path);
+        ksb_puts(&b, " [");
+        ksb_puts(&b, sacx_arch_name(task->loaded_arch));
+        ksb_puts(&b, task->loaded_from_fat ? " fat]" : " legacy]");
         sacx_task_log(task, msg);
     }
 

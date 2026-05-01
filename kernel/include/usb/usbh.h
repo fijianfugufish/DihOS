@@ -69,6 +69,7 @@ int usbh_poll(void);
 
 /* High-level host */
 int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint);
+int usbh_init_any(const uint64_t *xhci_mmio_hints, uint32_t hint_count, uint64_t acpi_rsdp_hint);
 int usbh_enumerate_first_msc(usbh_dev_t *d);
 int usbh_enumerate_first_hid(usbh_dev_t *d);
 int usbh_enumerate_first_hid_keyboard(usbh_dev_t *d);

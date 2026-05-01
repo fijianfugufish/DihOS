@@ -1,4 +1,5 @@
 #include "gpio/qcom_tlmm.h"
+#include "asm/asm.h"
 
 /*
  * Match your repo style here:
@@ -7,7 +8,7 @@
  */
 static inline void tlmm_barrier(void)
 {
-    __asm__ volatile("" ::: "memory");
+    asm_compiler_barrier();
 }
 
 void tlmm_init(qcom_tlmm_t *t, uintptr_t base, uint32_t size)

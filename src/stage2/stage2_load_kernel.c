@@ -456,10 +456,14 @@ EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, const wchar_t
     if (bi_out)
     {
         static const UINTN sacx_pool_page_options[] = {
-            (UINTN)((32ull * 1024ull * 1024ull) >> 12),
-            (UINTN)((16ull * 1024ull * 1024ull) >> 12),
-            (UINTN)((8ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((4ull * 1024ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((2ull * 1024ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((1ull * 1024ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((512ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((256ull * 1024ull * 1024ull) >> 12),
+            (UINTN)((128ull * 1024ull * 1024ull) >> 12),
         };
+        
         bi_out->kernel_base_phys = (uint64_t)base;
         bi_out->kernel_size_bytes = (uint64_t)(max_dst - min_dst);
         bi_out->sacx_exec_pool_base_phys = 0;

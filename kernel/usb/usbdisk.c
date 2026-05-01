@@ -1,7 +1,9 @@
 // usbdisk.c — USB MSC → blockdev adapter (freestanding)
 #include <stdint.h>
+#include "bootinfo.h"
 #include "usb/blockdev.h"
 #include "usb/usbh.h"
+#include "asm/asm.h"
 
 extern void usbh_dbg_dot(int n, uint32_t rgb);
 #define D_WHITE 0xFFFFFFu
@@ -92,34 +94,14 @@ static void kmemcpy(void *dst, const void *src, uint32_t n)
 // DMA-safe allocator (must exist elsewhere in the kernel)
 extern void *alloc_dma(uint32_t pages);
 
-// ---- Cache maintenance (ARM64) ----
-// Assumes 64-byte D-cache line (typical for AArch64). If yours differs, adjust 64.
 static inline void dcache_clean_range(const void *ptr, uint32_t len)
 {
-    uintptr_t a = (uintptr_t)ptr;
-    uintptr_t start = a & ~63ull;
-    uintptr_t end = (a + (uintptr_t)len + 63ull) & ~63ull;
-
-    for (uintptr_t p = start; p < end; p += 64)
-        __asm__ volatile("dc cvac, %0" ::"r"(p) : "memory");
-
-    __asm__ volatile("dsb ish" ::: "memory");
-    __asm__ volatile("isb" ::: "memory");
+    asm_dma_clean_range(ptr, len);
 }
 
 static inline void dcache_invalidate_range(const void *ptr, uint32_t len)
 {
-    uintptr_t a = (uintptr_t)ptr;
-    uintptr_t start = a & ~63ull;
-    uintptr_t end = (a + (uintptr_t)len + 63ull) & ~63ull;
-
-    __asm__ volatile("dsb ish" ::: "memory");
-
-    for (uintptr_t p = start; p < end; p += 64)
-        __asm__ volatile("dc ivac, %0" ::"r"(p) : "memory");
-
-    __asm__ volatile("dsb ish" ::: "memory");
-    __asm__ volatile("isb" ::: "memory");
+    asm_dma_invalidate_range(ptr, len);
 }
 
 // DMA-enforced bounce buffer allocator.
@@ -1049,11 +1031,10 @@ static void crumb(uint32_t px)
     if (!g_fb32)
         return;
     g_fb32[px] = 0x00FFFFFF; // white pixel
-    __asm__ volatile("dc cvac,%0" ::"r"((uintptr_t)(&g_fb32[px]) & ~63ull) : "memory");
-    __asm__ volatile("dsb ish; isb" ::: "memory");
+    asm_dma_clean_range((const void *)(uintptr_t)&g_fb32[px], sizeof(g_fb32[px]));
 }
 
-int usbdisk_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
+static int usbdisk_try_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 {
 
     usbh_dbg_dot(40, D_WHITE); // entered bind+enumerate
@@ -1084,4 +1065,49 @@ int usbdisk_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     usbh_dbg_dot(46, D_GRN); // bind OK
 
     return 0;
+}
+
+int usbdisk_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
+{
+    return usbdisk_try_bind_and_enumerate(xhci_mmio_hint, acpi_rsdp_hint);
+}
+
+int usbdisk_bind_and_enumerate_multi(const uint64_t *xhci_mmio_hints,
+                                     uint32_t hint_count,
+                                     uint64_t acpi_rsdp_hint)
+{
+    int last_rc = -1;
+
+    if (hint_count > BOOTINFO_XHCI_MMIO_MAX)
+        hint_count = BOOTINFO_XHCI_MMIO_MAX;
+
+    for (uint32_t i = 0; xhci_mmio_hints && i < hint_count; ++i)
+    {
+        uint64_t mmio = xhci_mmio_hints[i] & ~0xFULL;
+        int duplicate = 0;
+
+        if (!mmio)
+            continue;
+
+        for (uint32_t j = 0; j < i; ++j)
+        {
+            if ((xhci_mmio_hints[j] & ~0xFULL) == mmio)
+            {
+                duplicate = 1;
+                break;
+            }
+        }
+
+        if (duplicate)
+            continue;
+
+        last_rc = usbdisk_try_bind_and_enumerate(mmio, acpi_rsdp_hint);
+        if (last_rc == 0)
+            return 0;
+    }
+
+    if (!hint_count && acpi_rsdp_hint)
+        return usbdisk_try_bind_and_enumerate(0, acpi_rsdp_hint);
+
+    return last_rc;
 }

@@ -3,6 +3,7 @@
 #include "terminal/terminal_api.h"
 #include "gpio/gpio.h"
 #include "kwrappers/string.h"
+#include "asm/asm.h"
 #include <stdint.h>
 
 typedef struct aml_gpio_ctx
@@ -30,7 +31,7 @@ static void aml_log_cb(void *user, const char *msg)
 static void tp_delay(volatile uint32_t n)
 {
     while (n--)
-        __asm__ volatile("" ::: "memory");
+        asm_relax();
 }
 
 static void drive_touchpad_line(aml_gpio_ctx *s, uint64_t value)

@@ -25,6 +25,19 @@ extern const boot_info *k_bootinfo_ptr;
 #define DIHOS_SHELL_PIPELINE_MAX 8u
 #define DIHOS_SHELL_TAIL_RING_MAX 128u
 
+static const char *xhci_source_name(uint32_t source)
+{
+    switch (source)
+    {
+    case BOOTINFO_XHCI_SOURCE_DISCOVERED:
+        return "discovered";
+    case BOOTINFO_XHCI_SOURCE_FALLBACK_BUILTIN:
+        return "fallback:builtin";
+    default:
+        return "unknown";
+    }
+}
+
 typedef enum
 {
     DIHOS_TOK_WORD = 1,
@@ -1316,6 +1329,21 @@ static int dihos_cmd_sys_boot(dihos_shell_stage *stage)
     terminal_print_inline("\n");
     dihos_print_label_hex64("acpi_rsdp: ", k_bootinfo_ptr->acpi_rsdp);
     dihos_print_label_hex64("xhci_mmio: ", k_bootinfo_ptr->xhci_mmio_base);
+    terminal_print_inline("xhci_count: ");
+    dihos_print_dec_value(k_bootinfo_ptr->xhci_mmio_count);
+    terminal_print_inline("\n");
+    {
+        uint32_t count = k_bootinfo_ptr->xhci_mmio_count;
+        if (count > BOOTINFO_XHCI_MMIO_MAX)
+            count = BOOTINFO_XHCI_MMIO_MAX;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            dihos_print_label_hex64("xhci_base: ", k_bootinfo_ptr->xhci_mmio_bases[i]);
+            terminal_print_inline("xhci_source: ");
+            terminal_print_inline(xhci_source_name(k_bootinfo_ptr->xhci_mmio_sources[i]));
+            terminal_print_inline("\n");
+        }
+    }
     dihos_print_label_hex64("tlmm_mmio: ", k_bootinfo_ptr->tlmm_mmio_base);
     dihos_print_label_hex64("kernel_base: ", k_bootinfo_ptr->kernel_base_phys);
     dihos_print_label_hex64("sacx_exec_pool: ", k_bootinfo_ptr->sacx_exec_pool_base_phys);

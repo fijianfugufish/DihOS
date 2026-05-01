@@ -1,5 +1,6 @@
 #include "hardware_probes/i2c1_delta_probe.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -21,15 +22,14 @@ static inline void wr32(uint32_t off, uint32_t v)
 
 static inline void io_barrier(void)
 {
-    __asm__ __volatile__("dsb sy" ::: "memory");
-    __asm__ __volatile__("isb" ::: "memory");
+    asm_mmio_barrier();
 }
 
 static void tiny_delay(void)
 {
     volatile uint32_t i;
     for (i = 0; i < 50000u; ++i)
-        __asm__ __volatile__("" ::: "memory");
+        asm_relax();
 }
 
 static void snap_range(uint32_t start, uint32_t end, uint32_t *out)

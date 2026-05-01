@@ -1514,6 +1514,14 @@ static void parse_usb_mouse_report(const usbh_dev_t *dev, const uint8_t *data, u
 
 void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
 {
+    const uint64_t *bases = xhci_mmio_base ? &xhci_mmio_base : 0;
+    uint32_t count = xhci_mmio_base ? 1u : 0u;
+
+    kinput_init_multi(bases, count, rsdp_phys);
+}
+
+void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count, uint64_t rsdp_phys)
+{
     keys_clear(g_keys_now);
     keys_clear(g_keys_prev);
     keys_clear(g_i2c_kbd_keys);
@@ -1540,9 +1548,13 @@ void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys)
     i2c1_hidi2c_init(rsdp_phys);
     maybe_configure_touchpad_layouts(i2c1_hidi2c_touchpad());
 
+    terminal_flush_log();
+
     /* Also try USB HID.*/
-    if (usb_hid_probe(&g_usb, xhci_mmio_base, rsdp_phys) == 0)
+    /* disable for now
+    if (usb_hid_probe_multi(&g_usb, xhci_mmio_bases, xhci_mmio_count, rsdp_phys) == 0)
         g_usb_ok = 1;
+    */
 }
 
 void kinput_poll(void)
