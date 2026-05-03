@@ -287,6 +287,10 @@ static void print_acpi_net_resource_windows(void)
 #define ATH12K_BHI_ERRDBG3 0x3Cu
 #define ATH12K_BHI_SERIALNU 0x40u
 #define ATH12K_BHIE_MSMSOCID 0x00u
+#define ATH12K_BHIE_TXVECADDR_LOW 0x2Cu
+#define ATH12K_BHIE_TXVECADDR_HIGH 0x30u
+#define ATH12K_BHIE_TXVECSIZE 0x34u
+#define ATH12K_BHIE_TXVECDB 0x3Cu
 #define ATH12K_BHIE_TXVECSTATUS 0x44u
 #define ATH12K_BHIE_RXVECSTATUS 0x78u
 #define ATH12K_PCIE_TXVECDB 0x360u
@@ -297,10 +301,16 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_MHI_EVENT_RINGS 1u
 #define QWIFI_MHI_CMD_RINGS 1u
 #define QWIFI_MHI_RING_BYTES 4096u
+#define QWIFI_MHI_EVENT_ELEMENT_BYTES 16u
 #define QWIFI_MHI_SBL_BYTES 0x80000u
+#define QWIFI_BHIE_SEG_BYTES 0x80000u
+#define QWIFI_BHIE_MAX_SEGMENTS 32u
 #define QWIFI_MHI_ER_TYPE_VALID 1u
+#define QWIFI_MHI_STATE_M0 2u
 #define QWIFI_BHI_STATUS_SUCCESS 2u
 #define QWIFI_BHI_STATUS_ERROR 3u
+#define QWIFI_BHIE_STATUS_XFER_COMPL 2u
+#define QWIFI_BHIE_STATUS_ERROR 3u
 
 typedef struct __attribute__((packed))
 {
@@ -334,6 +344,12 @@ typedef struct __attribute__((packed))
     uint64_t rp;
     uint64_t wp;
 } qwifi_mhi_cmd_ctxt;
+
+typedef struct __attribute__((packed))
+{
+    uint64_t dma_addr;
+    uint64_t size;
+} qwifi_bhi_vec_entry;
 
 static int pci_probe_config_read32(uint64_t addr, uint32_t *out_value)
 {
@@ -453,7 +469,7 @@ static uint32_t qwifi_bhi_status_code(uint32_t status)
     return (status >> 30) & 0x3u;
 }
 
-static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const boot_info *bi)
+static int qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const boot_info *bi)
 {
     static int attempted = 0;
     uint64_t amss_phys = 0;
@@ -475,7 +491,7 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
     {
         terminal_print("[K:QWIFI] BHI SBL load skipped: already attempted");
         terminal_flush_log();
-        return;
+        return 0;
     }
     attempted = 1;
 
@@ -483,14 +499,14 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
     {
         terminal_print("[K:QWIFI] BHI SBL load skipped: invalid BHI offset");
         terminal_flush_log();
-        return;
+        return 0;
     }
 
     if (!qwifi_get_fw_blob(bi, BOOTINFO_WIFI_FW_AMSS, &amss_phys, &amss_size))
     {
         terminal_print("[K:QWIFI] BHI SBL load skipped: AMSS firmware missing");
         terminal_flush_log();
-        return;
+        return 0;
     }
 
     sbl_size = amss_size;
@@ -501,7 +517,7 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
         terminal_print("[K:QWIFI] BHI SBL load skipped: invalid AMSS size=");
         terminal_print_inline_hex64(amss_size);
         terminal_flush_log();
-        return;
+        return 0;
     }
 
     sbl_buf = pmem_alloc_pages_lowdma(qwifi_pages_for(sbl_size));
@@ -510,7 +526,7 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
         terminal_print("[K:QWIFI] BHI SBL load skipped: low-DMA alloc failed bytes=");
         terminal_print_inline_hex64(sbl_size);
         terminal_flush_log();
-        return;
+        return 0;
     }
 
     qwifi_copy_from_phys(sbl_buf, amss_phys, sbl_size);
@@ -538,7 +554,7 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
     terminal_print_inline_hex64((uint64_t)(int64_t)rc);
     terminal_flush_log();
     if (rc != 0)
-        return;
+        return 0;
 
     asm_mmio_barrier();
     rc = qwifi_mhi_write32(bar0_base, bhioff + ATH12K_BHI_IMGTXDB, 1u);
@@ -546,7 +562,7 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
     terminal_print_inline_hex64((uint64_t)(int64_t)rc);
     terminal_flush_log();
     if (rc != 0)
-        return;
+        return 0;
     asm_mmio_barrier();
 
     for (poll = 0; poll < 4000000u; ++poll)
@@ -591,6 +607,8 @@ static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const bo
     else if (rc == 0)
         terminal_print(" [SBL timeout]");
     terminal_flush_log();
+
+    return status_code == QWIFI_BHI_STATUS_SUCCESS;
 }
 
 static void qwifi_dump_pci_caps(uint64_t cfg, uint32_t cap_ptr_raw)
@@ -735,9 +753,8 @@ static void qwifi_mhi_program_minimal_contexts(uint64_t bar0_base, uint32_t mhic
 
     if (programmed)
     {
-        terminal_print("[K:QWIFI] MHI minimal context program skipped: already done");
+        terminal_print("[K:QWIFI] MHI minimal context reprogram after state change");
         terminal_flush_log();
-        return;
     }
 
     if (chan_count == 0u || chan_count > QWIFI_MHI_MAX_CHAN)
@@ -774,7 +791,7 @@ static void qwifi_mhi_program_minimal_contexts(uint64_t bar0_base, uint32_t mhic
     event_ctxt[0].rbase = event_ring_pa;
     event_ctxt[0].rlen = QWIFI_MHI_RING_BYTES;
     event_ctxt[0].rp = event_ring_pa;
-    event_ctxt[0].wp = event_ring_pa;
+    event_ctxt[0].wp = event_ring_pa + QWIFI_MHI_RING_BYTES - QWIFI_MHI_EVENT_ELEMENT_BYTES;
 
     cmd_ctxt[0].rbase = cmd_ring_pa;
     cmd_ctxt[0].rlen = QWIFI_MHI_RING_BYTES;
@@ -824,6 +841,251 @@ static void qwifi_mhi_program_minimal_contexts(uint64_t bar0_base, uint32_t mhic
 
     if (rc == 0)
         programmed = 1;
+}
+
+static int qwifi_mhi_wait_ready_and_enter_m0(uint64_t bar0_base,
+                                             uint32_t bhioff,
+                                             uint32_t mhicfg_hint)
+{
+    uint32_t mhictrl = 0;
+    uint32_t mhistatus = 0;
+    uint32_t mhicfg = 0;
+    uint32_t execenv = 0;
+    uint32_t poll;
+    uint32_t ready = 0;
+    uint32_t reset = 1;
+    int rc = 0;
+
+    for (poll = 0; poll < 4000000u; ++poll)
+    {
+        (void)pci_probe_config_read32(bar0_base + ATH12K_MHICTRL, &mhictrl);
+        (void)pci_probe_config_read32(bar0_base + ATH12K_MHISTATUS, &mhistatus);
+        if (bhioff != 0u && bhioff < 0x1000u)
+            (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_EXECENV, &execenv);
+
+        reset = (mhictrl & ATH12K_MHICTRL_RESET_MASK) ? 1u : 0u;
+        ready = (mhistatus & ATH12K_MHISTATUS_READY_MASK) ? 1u : 0u;
+        if (!reset && ready)
+            break;
+        asm_relax();
+    }
+
+    (void)pci_probe_config_read32(bar0_base + ATH12K_MHICFG, &mhicfg);
+    terminal_print("[K:QWIFI] post-SBL READY poll=");
+    terminal_print_inline_hex64(poll);
+    terminal_print(" reset=");
+    terminal_print_inline_hex64(reset);
+    terminal_print(" ready=");
+    terminal_print_inline_hex64(ready);
+    terminal_print(" mhictrl=");
+    terminal_print_inline_hex64(mhictrl);
+    terminal_print(" mhistatus=");
+    terminal_print_inline_hex64(mhistatus);
+    terminal_print(" mhicfg=");
+    terminal_print_inline_hex64(mhicfg);
+    terminal_print(" execenv=");
+    terminal_print_inline_hex64(execenv);
+    terminal_flush_log();
+
+    if (reset || !ready)
+        return 0;
+
+    qwifi_mhi_program_minimal_contexts(bar0_base, mhicfg ? mhicfg : mhicfg_hint);
+
+    rc = qwifi_mhi_write32(bar0_base, ATH12K_MHICTRL, QWIFI_MHI_STATE_M0 << 8);
+    asm_mmio_barrier();
+    (void)pci_probe_config_read32(bar0_base + ATH12K_MHICTRL, &mhictrl);
+    (void)pci_probe_config_read32(bar0_base + ATH12K_MHISTATUS, &mhistatus);
+
+    terminal_print("[K:QWIFI] MHI enter M0 rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" mhictrl=");
+    terminal_print_inline_hex64(mhictrl);
+    terminal_print(" mhistatus=");
+    terminal_print_inline_hex64(mhistatus);
+    terminal_flush_log();
+
+    return rc == 0;
+}
+
+static int qwifi_bhie_try_load_amss(uint64_t bar0_base, uint32_t bhioff, uint32_t bhieoff, const boot_info *bi)
+{
+    static int attempted = 0;
+    uint64_t amss_phys = 0;
+    uint64_t amss_size = 0;
+    uint64_t copied = 0;
+    uint32_t seg_count;
+    uint64_t vec_bytes;
+    qwifi_bhi_vec_entry *vec;
+    uint64_t vec_phys;
+    uint32_t status = 0;
+    uint32_t status_code = 0;
+    uint32_t execenv = 0;
+    uint32_t mhistatus = 0;
+    uint32_t poll;
+    const uint32_t sequence = 2u;
+    int rc = 0;
+
+    if (attempted)
+    {
+        terminal_print("[K:QWIFI] BHIE AMSS load skipped: already attempted");
+        terminal_flush_log();
+        return 0;
+    }
+    attempted = 1;
+
+    if (!bar0_base || !bhieoff || bhieoff >= 0x1000u)
+    {
+        terminal_print("[K:QWIFI] BHIE AMSS load skipped: invalid BHIE offset");
+        terminal_flush_log();
+        return 0;
+    }
+
+    if (!qwifi_get_fw_blob(bi, BOOTINFO_WIFI_FW_AMSS, &amss_phys, &amss_size))
+    {
+        terminal_print("[K:QWIFI] BHIE AMSS load skipped: AMSS firmware missing");
+        terminal_flush_log();
+        return 0;
+    }
+
+    seg_count = (uint32_t)((amss_size + QWIFI_BHIE_SEG_BYTES - 1u) / QWIFI_BHIE_SEG_BYTES);
+    if (!seg_count || seg_count > QWIFI_BHIE_MAX_SEGMENTS)
+    {
+        terminal_print("[K:QWIFI] BHIE AMSS load skipped: segment count=");
+        terminal_print_inline_hex64(seg_count);
+        terminal_print(" fw_size=");
+        terminal_print_inline_hex64(amss_size);
+        terminal_flush_log();
+        return 0;
+    }
+
+    vec_bytes = sizeof(qwifi_bhi_vec_entry) * (uint64_t)seg_count;
+    vec = (qwifi_bhi_vec_entry *)pmem_alloc_pages_lowdma(qwifi_pages_for(vec_bytes));
+    if (!vec)
+    {
+        terminal_print("[K:QWIFI] BHIE AMSS load skipped: vec alloc failed bytes=");
+        terminal_print_inline_hex64(vec_bytes);
+        terminal_flush_log();
+        return 0;
+    }
+    qwifi_zero(vec, vec_bytes);
+
+    for (uint32_t i = 0; i < seg_count; ++i)
+    {
+        uint64_t chunk = amss_size - copied;
+        void *seg_buf;
+        uint64_t seg_phys;
+
+        if (chunk > QWIFI_BHIE_SEG_BYTES)
+            chunk = QWIFI_BHIE_SEG_BYTES;
+
+        seg_buf = pmem_alloc_pages_lowdma(qwifi_pages_for(chunk));
+        if (!seg_buf)
+        {
+            terminal_print("[K:QWIFI] BHIE AMSS segment alloc failed i=");
+            terminal_print_inline_hex64(i);
+            terminal_print(" bytes=");
+            terminal_print_inline_hex64(chunk);
+            terminal_flush_log();
+            return 0;
+        }
+
+        qwifi_copy_from_phys(seg_buf, amss_phys + copied, chunk);
+        asm_dma_clean_range(seg_buf, chunk);
+        seg_phys = pmem_virt_to_phys(seg_buf);
+        vec[i].dma_addr = seg_phys;
+        vec[i].size = chunk;
+        copied += chunk;
+    }
+
+    asm_dma_clean_range(vec, vec_bytes);
+    vec_phys = pmem_virt_to_phys(vec);
+
+    terminal_print("[K:QWIFI] BHIE AMSS load begin fw_pa=");
+    terminal_print_inline_hex64(amss_phys);
+    terminal_print(" fw_size=");
+    terminal_print_inline_hex64(amss_size);
+    terminal_print(" segments=");
+    terminal_print_inline_hex64(seg_count);
+    terminal_print(" vec_pa=");
+    terminal_print_inline_hex64(vec_phys);
+    terminal_print(" vec_bytes=");
+    terminal_print_inline_hex64(vec_bytes);
+    terminal_flush_log();
+
+    rc |= qwifi_mhi_write64_pair(bar0_base,
+                                 bhieoff + ATH12K_BHIE_TXVECADDR_LOW,
+                                 bhieoff + ATH12K_BHIE_TXVECADDR_HIGH,
+                                 vec_phys);
+    rc |= qwifi_mhi_write32(bar0_base, bhieoff + ATH12K_BHIE_TXVECSIZE, (uint32_t)vec_bytes);
+    terminal_print("[K:QWIFI] BHIE AMSS programmed rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return 0;
+
+    asm_mmio_barrier();
+    rc = qwifi_mhi_write32(bar0_base, bhieoff + ATH12K_BHIE_TXVECDB, sequence);
+    terminal_print("[K:QWIFI] BHIE AMSS doorbell rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" seq=");
+    terminal_print_inline_hex64(sequence);
+    terminal_flush_log();
+    if (rc != 0)
+        return 0;
+    asm_mmio_barrier();
+
+    for (poll = 0; poll < 8000000u; ++poll)
+    {
+        rc = pci_probe_config_read32(bar0_base + bhieoff + ATH12K_BHIE_TXVECSTATUS, &status);
+        if (rc != 0)
+            break;
+        status_code = qwifi_bhi_status_code(status);
+        if (status_code != 0u)
+            break;
+        asm_relax();
+    }
+
+    terminal_print("[K:QWIFI] BHIE AMSS result rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" poll=");
+    terminal_print_inline_hex64(poll);
+    terminal_print(" status=");
+    terminal_print_inline_hex64(status);
+    terminal_print(" code=");
+    terminal_print_inline_hex64(status_code);
+    terminal_print(" seq_seen=");
+    terminal_print_inline_hex64(status & 0x3FFFFFFFu);
+    if (status_code == QWIFI_BHIE_STATUS_XFER_COMPL)
+        terminal_print(" [AMSS accepted]");
+    else if (status_code == QWIFI_BHIE_STATUS_ERROR)
+        terminal_print(" [AMSS error]");
+    else if (rc == 0)
+        terminal_print(" [AMSS timeout]");
+    terminal_flush_log();
+
+    if (bhioff != 0u && bhioff < 0x1000u)
+    {
+        for (poll = 0; poll < 4000000u; ++poll)
+        {
+            (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_EXECENV, &execenv);
+            if (execenv > 1u)
+                break;
+            asm_relax();
+        }
+    }
+
+    (void)pci_probe_config_read32(bar0_base + ATH12K_MHISTATUS, &mhistatus);
+    (void)pci_probe_config_read32(bar0_base + bhieoff + ATH12K_BHIE_TXVECSTATUS, &status);
+    terminal_print("[K:QWIFI] post-AMSS mhistatus=");
+    terminal_print_inline_hex64(mhistatus);
+    terminal_print(" bhie_status=");
+    terminal_print_inline_hex64(status);
+    terminal_print(" execenv=");
+    terminal_print_inline_hex64(execenv);
+    terminal_flush_log();
+
+    return status_code == QWIFI_BHIE_STATUS_XFER_COMPL;
 }
 
 static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi)
@@ -879,6 +1141,7 @@ static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi
     uint32_t bhieoff = 0;
     uint32_t bhi_status = 0;
     uint32_t value = 0;
+    int sbl_ok = 0;
     int rc;
 
     for (uint32_t i = 0; i < (uint32_t)(sizeof(mhi_regs) / sizeof(mhi_regs[0])); ++i)
@@ -956,7 +1219,7 @@ static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi
         terminal_print_inline_hex64(bhi_status);
         terminal_flush_log();
 
-        qwifi_bhi_try_load_sbl(bar0_base, bhioff, bi);
+        sbl_ok = qwifi_bhi_try_load_sbl(bar0_base, bhioff, bi);
     }
 
     if (bhieoff != 0u && bhieoff < 0x1000u)
@@ -975,6 +1238,18 @@ static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi
             terminal_flush_log();
             if (rc != 0)
                 break;
+        }
+    }
+
+    if (sbl_ok && bhieoff != 0u && bhieoff < 0x1000u)
+    {
+        int m0_ok = qwifi_mhi_wait_ready_and_enter_m0(bar0_base, bhioff, mhicfg);
+        if (m0_ok)
+            (void)qwifi_bhie_try_load_amss(bar0_base, bhioff, bhieoff, bi);
+        else
+        {
+            terminal_print("[K:QWIFI] BHIE AMSS skipped: MHI did not reach READY/M0");
+            terminal_flush_log();
         }
     }
 
