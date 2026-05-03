@@ -105,16 +105,19 @@ static void hex64(EFI_SYSTEM_TABLE *st, uint64_t v)
 typedef EFI_STATUS (*EFI_OPEN_PROTOCOL)(EFI_HANDLE, const EFI_GUID *, void **, EFI_HANDLE, EFI_HANDLE, uint32_t);
 typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL)(const EFI_GUID *, void *, void **);
 typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(UINTN, const EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
+typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void **);
 typedef EFI_STATUS (*EFI_FREE_POOL)(void *);
 typedef EFI_STATUS (*EFI_SET_WATCHDOG_TIMER)(UINTN, UINTN, UINTN, const wchar_t *);
 
 static inline EFI_OPEN_PROTOCOL BsOpenProto(void *BS) { return *(EFI_OPEN_PROTOCOL *)((char *)BS + 0x118); }
+static inline EFI_ALLOCATE_POOL BsAllocPool(void *BS) { return *(EFI_ALLOCATE_POOL *)((char *)BS + 0x40); }
 static inline EFI_FREE_POOL BsFreePool(void *BS) { return *(EFI_FREE_POOL *)((char *)BS + 0x48); }
 static inline EFI_LOCATE_HANDLE_BUFFER BsLocateHandles(void *BS) { return *(EFI_LOCATE_HANDLE_BUFFER *)((char *)BS + 0x138); }
 static inline EFI_LOCATE_PROTOCOL BsLocate(void *BS) { return *(EFI_LOCATE_PROTOCOL *)((char *)BS + 0x140); }
 static inline EFI_SET_WATCHDOG_TIMER BsWatchdog(void *BS) { return *(EFI_SET_WATCHDOG_TIMER *)((char *)BS + 0x100); }
 enum
 {
+    EfiLoaderData = 2,
     EFI_OPEN_PROTOCOL_GET_PROTOCOL = 2,
     EFI_LOCATE_BY_PROTOCOL = 2
 };
@@ -1443,6 +1446,169 @@ EFI_STATUS fs_open_root(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EFI_FILE_PROTOCO
     return s ? s : (EFI_STATUS)~0ULL;
 }
 
+static EFI_STATUS stage2_open_file(EFI_FILE_PROTOCOL *root, const wchar_t *path, EFI_FILE_PROTOCOL **out_file)
+{
+    typedef EFI_STATUS (*T_OPEN)(EFI_FILE_PROTOCOL *, EFI_FILE_PROTOCOL **, const wchar_t *, UINTN, UINTN);
+    T_OPEN FileOpen;
+    EFI_STATUS s;
+
+    if (!root || !path || !out_file)
+        return 2;
+
+    *out_file = 0;
+    FileOpen = *(void **)((char *)root + 0x08);
+    if (!FileOpen)
+        return 2;
+
+    s = FileOpen(root, out_file, path, 1u, 0u);
+    if (!s && *out_file)
+        return 0;
+
+    if (path[0] == L'\\')
+    {
+        s = FileOpen(root, out_file, path + 1, 1u, 0u);
+        if (!s && *out_file)
+            return 0;
+    }
+
+    return s ? s : 14;
+}
+
+static EFI_STATUS stage2_load_wifi_fw_one(EFI_SYSTEM_TABLE *st,
+                                          EFI_FILE_PROTOCOL *root,
+                                          const wchar_t *path,
+                                          uint32_t kind,
+                                          boot_info *bi)
+{
+    typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
+    typedef EFI_STATUS (*T_READ)(EFI_FILE_PROTOCOL *, UINTN *, void *);
+    typedef EFI_STATUS (*T_GETINFO)(EFI_FILE_PROTOCOL *, const EFI_GUID *, UINTN *, void *);
+    EFI_ALLOCATE_POOL AllocPool = BsAllocPool(st->BootServices);
+    EFI_FILE_PROTOCOL *fp = 0;
+    EFI_STATUS s;
+    UINTN info_sz = 0;
+    void *info = 0;
+    uint64_t fsz;
+    void *buf = 0;
+    UINTN read;
+
+    if (!st || !root || !path || !bi || bi->wifi_fw_count >= BOOTINFO_WIFI_FW_MAX)
+        return 2;
+
+    s = stage2_open_file(root, path, &fp);
+    if (s || !fp)
+        return s ? s : 14;
+
+    T_CLOSE FileClose = *(void **)((char *)fp + 0x10);
+    T_READ FileRead = *(void **)((char *)fp + 0x20);
+    T_GETINFO GetInfo = *(void **)((char *)fp + 0x40);
+
+    if (!FileClose || !FileRead || !GetInfo || !AllocPool)
+        return 2;
+
+    (void)GetInfo(fp, &FILE_INFO_ID, &info_sz, 0);
+    if (!info_sz || AllocPool(EfiLoaderData, info_sz, &info))
+    {
+        FileClose(fp);
+        return 9;
+    }
+
+    s = GetInfo(fp, &FILE_INFO_ID, &info_sz, info);
+    if (s)
+    {
+        FileClose(fp);
+        return s;
+    }
+
+    fsz = *(uint64_t *)((char *)info + 8);
+    if (!fsz || AllocPool(EfiLoaderData, (UINTN)fsz, &buf))
+    {
+        FileClose(fp);
+        return 9;
+    }
+
+    read = (UINTN)fsz;
+    s = FileRead(fp, &read, buf);
+    FileClose(fp);
+    if (s || read == 0u)
+        return s ? s : 5;
+
+    bi->wifi_fw[bi->wifi_fw_count].kind = kind;
+    bi->wifi_fw[bi->wifi_fw_count].base_phys = (uint64_t)(uintptr_t)buf;
+    bi->wifi_fw[bi->wifi_fw_count].size_bytes = (uint64_t)read;
+    bi->wifi_fw_count++;
+    return 0;
+}
+
+static void stage2_load_wifi_firmware(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, boot_info *bi)
+{
+    typedef EFI_STATUS (*T_CLOSE)(EFI_FILE_PROTOCOL *);
+    static const struct
+    {
+        uint32_t kind;
+        const wchar_t *name;
+        const wchar_t *paths[4];
+    } want[] = {
+        {BOOTINFO_WIFI_FW_AMSS, L"amss.bin",
+         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\amss.bin",
+          L"\\OS\\ath12k\\WCN7850\\hw2.0\\amss.bin",
+          L"\\ath12k\\WCN7850\\hw2.0\\amss.bin",
+          0}},
+        {BOOTINFO_WIFI_FW_M3, L"m3.bin",
+         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\m3.bin",
+          L"\\OS\\ath12k\\WCN7850\\hw2.0\\m3.bin",
+          L"\\ath12k\\WCN7850\\hw2.0\\m3.bin",
+          0}},
+        {BOOTINFO_WIFI_FW_BOARD, L"board-2.bin",
+         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\board-2.bin",
+          L"\\OS\\ath12k\\WCN7850\\hw2.0\\board-2.bin",
+          L"\\ath12k\\WCN7850\\hw2.0\\board-2.bin",
+          0}},
+    };
+    EFI_FILE_PROTOCOL *root = 0;
+
+    if (!bi)
+        return;
+
+    bi->wifi_fw_count = 0;
+    if (fs_open_root(st, image, &root) != 0 || !root)
+    {
+        println(st, L"[S2:WIFI] firmware root open failed");
+        return;
+    }
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(want) / sizeof(want[0])); ++i)
+    {
+        EFI_STATUS loaded = 14;
+        for (uint32_t p = 0; want[i].paths[p]; ++p)
+        {
+            loaded = stage2_load_wifi_fw_one(st, root, want[i].paths[p], want[i].kind, bi);
+            if (!loaded)
+                break;
+        }
+
+        print(st, L"[S2:WIFI] ");
+        print(st, want[i].name);
+        print(st, loaded ? L" missing" : L" loaded");
+        if (!loaded && bi->wifi_fw_count)
+        {
+            print(st, L" size=");
+            hex64(st, bi->wifi_fw[bi->wifi_fw_count - 1u].size_bytes);
+        }
+        else
+        {
+            println(st, L"");
+        }
+    }
+
+    print(st, L"[S2:WIFI] firmware count = ");
+    hex64(st, bi->wifi_fw_count);
+
+    T_CLOSE FileClose = *(void **)((char *)root + 0x10);
+    if (FileClose)
+        FileClose(root);
+}
+
 /* A helper some code may still call */
 EFI_STATUS reopen_same_volume(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, void **out_root)
 {
@@ -1585,6 +1751,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     hex64(st, bi.tlmm_mmio_base);
     print(st, L"[S2] TLMM MMIO size = ");
     hex64(st, bi.tlmm_mmio_size);
+    stage2_load_wifi_firmware(st, image, &bi);
 
     /* Load kernel */
     EFI_PHYSICAL_ADDRESS entry = 0;

@@ -48,6 +48,11 @@ void asm_aa64_install_exception_vectors(void)
 {
 }
 
+void asm_aa64_set_probe_trace(int enabled)
+{
+    (void)enabled;
+}
+
 int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
 {
     (void)addr;

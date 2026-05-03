@@ -4,8 +4,12 @@
 #define BOOTINFO_XHCI_MMIO_MAX 8u
 #define BOOTINFO_PCI_NIC_MAX 16u
 #define BOOTINFO_STAGE2_REPORT_MAX 8192u
+#define BOOTINFO_WIFI_FW_MAX 3u
 #define BOOTINFO_XHCI_SOURCE_DISCOVERED 1u
 #define BOOTINFO_XHCI_SOURCE_FALLBACK_BUILTIN 2u
+#define BOOTINFO_WIFI_FW_AMSS 1u
+#define BOOTINFO_WIFI_FW_M3 2u
+#define BOOTINFO_WIFI_FW_BOARD 3u
 
 typedef struct
 {
@@ -61,6 +65,16 @@ typedef struct
         uint16_t device_id;
         uint64_t bar0_mmio_base; /* 0 when BAR0 is not MMIO or not present */
     } pci_nics[BOOTINFO_PCI_NIC_MAX];
+
+    uint32_t wifi_fw_count;
+    uint32_t _pad5;
+    struct
+    {
+        uint32_t kind;
+        uint32_t _pad;
+        uint64_t base_phys;
+        uint64_t size_bytes;
+    } wifi_fw[BOOTINFO_WIFI_FW_MAX];
 
     uint32_t stage2_report_len; /* bytes used in stage2_report[] (ASCII, NUL-terminated when possible) */
     char stage2_report[BOOTINFO_STAGE2_REPORT_MAX];

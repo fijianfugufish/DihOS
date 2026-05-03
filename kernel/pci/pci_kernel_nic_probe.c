@@ -3,6 +3,7 @@
 #include "hardware_probes/acpi_probe_net_candidates.h"
 #include "pci/pci_ecam_lookup.h"
 #include "memory/mmio_map.h"
+#include "memory/pmem.h"
 #include "gpio/gpio.h"
 #include "terminal/terminal_api.h"
 #include "asm/asm.h"
@@ -229,6 +230,110 @@ static void print_acpi_net_resource_windows(void)
 #define QCOM_FC7800_VENDOR 0x17CBu
 #define QCOM_FC7800_DEVICE 0x1107u
 #define QCOM_FC7800_ROOTPORT_DEVICE 0x0111u
+#define QWIFI_BAR0_PROBE_BYTES 0x200000ull
+#define ATH12K_WINDOW_ENABLE_BIT 0x40000000u
+#define ATH12K_WINDOW_REG_ADDRESS 0x310Cu
+#define ATH12K_WINDOW_START 0x80000u
+#define ATH12K_WINDOW_RANGE_MASK 0x7FFFFu
+#define ATH12K_TCSR_SOC_HW_VERSION 0x01B00000u
+#define ATH12K_TCSR_SOC_HW_VERSION_MAJOR_MASK 0x00000F00u
+#define ATH12K_TCSR_SOC_HW_VERSION_MINOR_MASK 0x000000F0u
+#define ATH12K_MHIREGLEN 0x00u
+#define ATH12K_MHIVER 0x08u
+#define ATH12K_MHICFG 0x10u
+#define ATH12K_CHDBOFF 0x18u
+#define ATH12K_ERDBOFF 0x20u
+#define ATH12K_BHIOFF 0x28u
+#define ATH12K_BHIEOFF 0x2Cu
+#define ATH12K_DEBUGOFF 0x30u
+#define ATH12K_MHICTRL 0x38u
+#define ATH12K_MHISTATUS 0x48u
+#define ATH12K_CCABAP_LOWER 0x58u
+#define ATH12K_CCABAP_HIGHER 0x5Cu
+#define ATH12K_ECABAP_LOWER 0x60u
+#define ATH12K_ECABAP_HIGHER 0x64u
+#define ATH12K_CRCBAP_LOWER 0x68u
+#define ATH12K_CRCBAP_HIGHER 0x6Cu
+#define ATH12K_CRDB_LOWER 0x70u
+#define ATH12K_CRDB_HIGHER 0x74u
+#define ATH12K_MHICTRLBASE_LOWER 0x80u
+#define ATH12K_MHICTRLBASE_HIGHER 0x84u
+#define ATH12K_MHICTRLLIMIT_LOWER 0x88u
+#define ATH12K_MHICTRLLIMIT_HIGHER 0x8Cu
+#define ATH12K_MHIDATABASE_LOWER 0x98u
+#define ATH12K_MHIDATABASE_HIGHER 0x9Cu
+#define ATH12K_MHIDATALIMIT_LOWER 0xA0u
+#define ATH12K_MHIDATALIMIT_HIGHER 0xA4u
+#define ATH12K_MHICFG_NHWER_MASK 0xFF000000u
+#define ATH12K_MHICFG_NER_MASK 0x00FF0000u
+#define ATH12K_MHICFG_NHWCH_MASK 0x0000FF00u
+#define ATH12K_MHICFG_NCH_MASK 0x000000FFu
+#define ATH12K_MHICTRL_MHISTATE_MASK 0x0000FF00u
+#define ATH12K_MHICTRL_RESET_MASK 0x00000002u
+#define ATH12K_MHISTATUS_MHISTATE_MASK 0x0000FF00u
+#define ATH12K_MHISTATUS_SYSERR_MASK 0x00000004u
+#define ATH12K_MHISTATUS_READY_MASK 0x00000001u
+#define ATH12K_BHI_VERSION_MINOR 0x00u
+#define ATH12K_BHI_VERSION_MAJOR 0x04u
+#define ATH12K_BHI_IMGADDR_LOW 0x08u
+#define ATH12K_BHI_IMGADDR_HIGH 0x0Cu
+#define ATH12K_BHI_IMGSIZE 0x10u
+#define ATH12K_BHI_IMGTXDB 0x18u
+#define ATH12K_BHI_EXECENV 0x28u
+#define ATH12K_BHI_STATUS 0x2Cu
+#define ATH12K_BHI_ERRCODE 0x30u
+#define ATH12K_BHI_ERRDBG1 0x34u
+#define ATH12K_BHI_ERRDBG2 0x38u
+#define ATH12K_BHI_ERRDBG3 0x3Cu
+#define ATH12K_BHI_SERIALNU 0x40u
+#define ATH12K_BHIE_MSMSOCID 0x00u
+#define ATH12K_BHIE_TXVECSTATUS 0x44u
+#define ATH12K_BHIE_RXVECSTATUS 0x78u
+#define ATH12K_PCIE_TXVECDB 0x360u
+#define ATH12K_PCIE_TXVECSTATUS 0x368u
+#define ATH12K_PCIE_RXVECDB 0x394u
+#define ATH12K_PCIE_RXVECSTATUS 0x39Cu
+#define QWIFI_MHI_MAX_CHAN 128u
+#define QWIFI_MHI_EVENT_RINGS 1u
+#define QWIFI_MHI_CMD_RINGS 1u
+#define QWIFI_MHI_RING_BYTES 4096u
+#define QWIFI_MHI_SBL_BYTES 0x80000u
+#define QWIFI_MHI_ER_TYPE_VALID 1u
+#define QWIFI_BHI_STATUS_SUCCESS 2u
+#define QWIFI_BHI_STATUS_ERROR 3u
+
+typedef struct __attribute__((packed))
+{
+    uint32_t chcfg;
+    uint32_t chtype;
+    uint32_t erindex;
+    uint64_t rbase;
+    uint64_t rlen;
+    uint64_t rp;
+    uint64_t wp;
+} qwifi_mhi_chan_ctxt;
+
+typedef struct __attribute__((packed))
+{
+    uint32_t intmod;
+    uint32_t ertype;
+    uint32_t msivec;
+    uint64_t rbase;
+    uint64_t rlen;
+    uint64_t rp;
+    uint64_t wp;
+} qwifi_mhi_event_ctxt;
+
+typedef struct __attribute__((packed))
+{
+    uint32_t reserved0;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint64_t rbase;
+    uint64_t rlen;
+    uint64_t rp;
+    uint64_t wp;
+} qwifi_mhi_cmd_ctxt;
 
 static int pci_probe_config_read32(uint64_t addr, uint32_t *out_value)
 {
@@ -263,6 +368,634 @@ static uint64_t qwifi_bar0_base_from_config(uint32_t bar0, uint32_t bar1)
     if ((bar0 & 0x6u) == 0x4u)
         return (((uint64_t)bar1) << 32) | (uint64_t)(bar0 & ~0xFull);
     return (uint64_t)(bar0 & ~0xFull);
+}
+
+static void qwifi_zero(void *ptr, uint64_t bytes)
+{
+    uint8_t *p = (uint8_t *)ptr;
+
+    if (!p)
+        return;
+
+    for (uint64_t i = 0; i < bytes; ++i)
+        p[i] = 0u;
+}
+
+static uint64_t qwifi_pages_for(uint64_t bytes)
+{
+    return (bytes + 4095ull) >> 12;
+}
+
+static int qwifi_mhi_write32(uint64_t bar0_base, uint32_t off, uint32_t value)
+{
+    int rc = pci_probe_mmio_write32(bar0_base + off, value);
+    if (rc != 0)
+    {
+        terminal_print("[K:QWIFI] MHI write failed off=");
+        terminal_print_inline_hex64(off);
+        terminal_print(" rc=");
+        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_flush_log();
+    }
+    return rc;
+}
+
+static int qwifi_mhi_write64_pair(uint64_t bar0_base, uint32_t lower_off, uint32_t higher_off, uint64_t value)
+{
+    int rc;
+
+    rc = qwifi_mhi_write32(bar0_base, higher_off, (uint32_t)(value >> 32));
+    if (rc != 0)
+        return rc;
+    return qwifi_mhi_write32(bar0_base, lower_off, (uint32_t)(value & 0xFFFFFFFFu));
+}
+
+static int qwifi_get_fw_blob(const boot_info *bi, uint32_t kind, uint64_t *base_phys, uint64_t *size_bytes)
+{
+    uint32_t count;
+
+    if (!bi || !base_phys || !size_bytes)
+        return 0;
+
+    count = bi->wifi_fw_count;
+    if (count > BOOTINFO_WIFI_FW_MAX)
+        count = BOOTINFO_WIFI_FW_MAX;
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (bi->wifi_fw[i].kind != kind)
+            continue;
+        if (!bi->wifi_fw[i].base_phys || !bi->wifi_fw[i].size_bytes)
+            continue;
+
+        *base_phys = bi->wifi_fw[i].base_phys;
+        *size_bytes = bi->wifi_fw[i].size_bytes;
+        return 1;
+    }
+
+    return 0;
+}
+
+static void qwifi_copy_from_phys(void *dst, uint64_t src_phys, uint64_t bytes)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)pmem_phys_to_virt(src_phys);
+
+    if (!d || !s)
+        return;
+
+    for (uint64_t i = 0; i < bytes; ++i)
+        d[i] = s[i];
+}
+
+static uint32_t qwifi_bhi_status_code(uint32_t status)
+{
+    return (status >> 30) & 0x3u;
+}
+
+static void qwifi_bhi_try_load_sbl(uint64_t bar0_base, uint32_t bhioff, const boot_info *bi)
+{
+    static int attempted = 0;
+    uint64_t amss_phys = 0;
+    uint64_t amss_size = 0;
+    uint64_t sbl_size;
+    void *sbl_buf;
+    uint64_t sbl_phys;
+    uint32_t status = 0;
+    uint32_t status_code = 0;
+    uint32_t execenv = 0;
+    uint32_t errcode = 0;
+    uint32_t errdbg1 = 0;
+    uint32_t errdbg2 = 0;
+    uint32_t errdbg3 = 0;
+    uint32_t poll;
+    int rc = 0;
+
+    if (attempted)
+    {
+        terminal_print("[K:QWIFI] BHI SBL load skipped: already attempted");
+        terminal_flush_log();
+        return;
+    }
+    attempted = 1;
+
+    if (!bar0_base || !bhioff || bhioff >= 0x1000u)
+    {
+        terminal_print("[K:QWIFI] BHI SBL load skipped: invalid BHI offset");
+        terminal_flush_log();
+        return;
+    }
+
+    if (!qwifi_get_fw_blob(bi, BOOTINFO_WIFI_FW_AMSS, &amss_phys, &amss_size))
+    {
+        terminal_print("[K:QWIFI] BHI SBL load skipped: AMSS firmware missing");
+        terminal_flush_log();
+        return;
+    }
+
+    sbl_size = amss_size;
+    if (sbl_size > QWIFI_MHI_SBL_BYTES)
+        sbl_size = QWIFI_MHI_SBL_BYTES;
+    if (!sbl_size || sbl_size > 0xFFFFFFFFull)
+    {
+        terminal_print("[K:QWIFI] BHI SBL load skipped: invalid AMSS size=");
+        terminal_print_inline_hex64(amss_size);
+        terminal_flush_log();
+        return;
+    }
+
+    sbl_buf = pmem_alloc_pages_lowdma(qwifi_pages_for(sbl_size));
+    if (!sbl_buf)
+    {
+        terminal_print("[K:QWIFI] BHI SBL load skipped: low-DMA alloc failed bytes=");
+        terminal_print_inline_hex64(sbl_size);
+        terminal_flush_log();
+        return;
+    }
+
+    qwifi_copy_from_phys(sbl_buf, amss_phys, sbl_size);
+    asm_dma_clean_range(sbl_buf, sbl_size);
+    sbl_phys = pmem_virt_to_phys(sbl_buf);
+
+    terminal_print("[K:QWIFI] BHI SBL load begin fw_pa=");
+    terminal_print_inline_hex64(amss_phys);
+    terminal_print(" fw_size=");
+    terminal_print_inline_hex64(amss_size);
+    terminal_print(" sbl_pa=");
+    terminal_print_inline_hex64(sbl_phys);
+    terminal_print(" sbl_size=");
+    terminal_print_inline_hex64(sbl_size);
+    terminal_flush_log();
+
+    rc |= qwifi_mhi_write32(bar0_base, bhioff + ATH12K_BHI_STATUS, 0u);
+    rc |= qwifi_mhi_write64_pair(bar0_base,
+                                 bhioff + ATH12K_BHI_IMGADDR_LOW,
+                                 bhioff + ATH12K_BHI_IMGADDR_HIGH,
+                                 sbl_phys);
+    rc |= qwifi_mhi_write32(bar0_base, bhioff + ATH12K_BHI_IMGSIZE, (uint32_t)sbl_size);
+
+    terminal_print("[K:QWIFI] BHI SBL programmed rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return;
+
+    asm_mmio_barrier();
+    rc = qwifi_mhi_write32(bar0_base, bhioff + ATH12K_BHI_IMGTXDB, 1u);
+    terminal_print("[K:QWIFI] BHI SBL doorbell rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return;
+    asm_mmio_barrier();
+
+    for (poll = 0; poll < 4000000u; ++poll)
+    {
+        rc = pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_STATUS, &status);
+        if (rc != 0)
+            break;
+        status_code = qwifi_bhi_status_code(status);
+        if (status_code != 0u)
+            break;
+        asm_relax();
+    }
+
+    (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_EXECENV, &execenv);
+    (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_ERRCODE, &errcode);
+    (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_ERRDBG1, &errdbg1);
+    (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_ERRDBG2, &errdbg2);
+    (void)pci_probe_config_read32(bar0_base + bhioff + ATH12K_BHI_ERRDBG3, &errdbg3);
+
+    terminal_print("[K:QWIFI] BHI SBL result rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" poll=");
+    terminal_print_inline_hex64(poll);
+    terminal_print(" status=");
+    terminal_print_inline_hex64(status);
+    terminal_print(" code=");
+    terminal_print_inline_hex64(status_code);
+    terminal_print(" execenv=");
+    terminal_print_inline_hex64(execenv);
+    terminal_print(" err=");
+    terminal_print_inline_hex64(errcode);
+    terminal_print(" dbg1=");
+    terminal_print_inline_hex64(errdbg1);
+    terminal_print(" dbg2=");
+    terminal_print_inline_hex64(errdbg2);
+    terminal_print(" dbg3=");
+    terminal_print_inline_hex64(errdbg3);
+    if (status_code == QWIFI_BHI_STATUS_SUCCESS)
+        terminal_print(" [SBL accepted]");
+    else if (status_code == QWIFI_BHI_STATUS_ERROR)
+        terminal_print(" [SBL error]");
+    else if (rc == 0)
+        terminal_print(" [SBL timeout]");
+    terminal_flush_log();
+}
+
+static void qwifi_dump_pci_caps(uint64_t cfg, uint32_t cap_ptr_raw)
+{
+    uint32_t ptr = cap_ptr_raw & 0xFFu;
+    uint32_t seen = 0;
+
+    if (ptr == 0u)
+    {
+        terminal_print("[K:QWIFI] no PCI capability list");
+        terminal_flush_log();
+        return;
+    }
+
+    terminal_print("[K:QWIFI] PCI capability list start=");
+    terminal_print_inline_hex64(ptr);
+    terminal_flush_log();
+
+    while (ptr >= 0x40u && ptr < 0x100u && seen < 16u)
+    {
+        uint32_t dword0 = 0;
+        uint32_t dword1 = 0;
+        uint32_t dword2 = 0;
+        uint32_t cap_id;
+        uint32_t next;
+        int rc;
+
+        rc = pci_probe_config_read32(cfg + ptr, &dword0);
+        if (rc != 0)
+        {
+            terminal_print("[K:QWIFI] PCI cap read failed ptr=");
+            terminal_print_inline_hex64(ptr);
+            terminal_print(" rc=");
+            terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+            terminal_flush_log();
+            return;
+        }
+
+        cap_id = dword0 & 0xFFu;
+        next = (dword0 >> 8) & 0xFFu;
+
+        terminal_print("[K:QWIFI] PCI cap ptr=");
+        terminal_print_inline_hex64(ptr);
+        terminal_print(" id=");
+        terminal_print_inline_hex64(cap_id);
+        terminal_print(" next=");
+        terminal_print_inline_hex64(next);
+        terminal_print(" d0=");
+        terminal_print_inline_hex64(dword0);
+
+        if (cap_id == 0x05u) /* MSI */
+        {
+            uint32_t msgctl = (dword0 >> 16) & 0xFFFFu;
+            terminal_print(" MSI ctl=");
+            terminal_print_inline_hex64(msgctl);
+        }
+        else if (cap_id == 0x10u) /* PCI Express */
+        {
+            (void)pci_probe_config_read32(cfg + ptr + 0x04u, &dword1);
+            terminal_print(" PCIE cap=");
+            terminal_print_inline_hex64((dword0 >> 16) & 0xFFFFu);
+            terminal_print(" devcap=");
+            terminal_print_inline_hex64(dword1);
+        }
+        else if (cap_id == 0x11u) /* MSI-X */
+        {
+            (void)pci_probe_config_read32(cfg + ptr + 0x04u, &dword1);
+            (void)pci_probe_config_read32(cfg + ptr + 0x08u, &dword2);
+            terminal_print(" MSIX ctl=");
+            terminal_print_inline_hex64((dword0 >> 16) & 0xFFFFu);
+            terminal_print(" table=");
+            terminal_print_inline_hex64(dword1);
+            terminal_print(" pba=");
+            terminal_print_inline_hex64(dword2);
+        }
+
+        terminal_flush_log();
+
+        if (next == 0u || next == ptr)
+            break;
+        ptr = next;
+        seen++;
+    }
+}
+
+static int qwifi_ath12k_read32(uint64_t bar0_base, uint32_t offset, uint32_t *out_value)
+{
+    uint32_t window;
+    uint32_t readback = 0;
+    uint64_t read_addr;
+    int rc;
+
+    if (!bar0_base || !out_value)
+        return -1;
+
+    if (offset < ATH12K_WINDOW_START)
+        return pci_probe_config_read32(bar0_base + offset, out_value);
+
+    window = (offset >> 19) & 0x3Fu;
+    rc = pci_probe_mmio_write32(bar0_base + ATH12K_WINDOW_REG_ADDRESS,
+                                ATH12K_WINDOW_ENABLE_BIT | window);
+    terminal_print("[K:QWIFI] ath12k window select off=");
+    terminal_print_inline_hex64(offset);
+    terminal_print(" window=");
+    terminal_print_inline_hex64(window);
+    terminal_print(" rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return rc;
+
+    (void)pci_probe_config_read32(bar0_base + ATH12K_WINDOW_REG_ADDRESS, &readback);
+    terminal_print("[K:QWIFI] ath12k window readback=");
+    terminal_print_inline_hex64(readback);
+    terminal_flush_log();
+
+    read_addr = bar0_base + ATH12K_WINDOW_START + (uint64_t)(offset & ATH12K_WINDOW_RANGE_MASK);
+    return pci_probe_config_read32(read_addr, out_value);
+}
+
+static void qwifi_mhi_program_minimal_contexts(uint64_t bar0_base, uint32_t mhicfg)
+{
+    static int programmed = 0;
+    uint32_t nch = mhicfg & ATH12K_MHICFG_NCH_MASK;
+    uint32_t chan_count = nch;
+    uint64_t chan_bytes;
+    uint64_t event_bytes = sizeof(qwifi_mhi_event_ctxt) * QWIFI_MHI_EVENT_RINGS;
+    uint64_t cmd_bytes = sizeof(qwifi_mhi_cmd_ctxt) * QWIFI_MHI_CMD_RINGS;
+    qwifi_mhi_chan_ctxt *chan_ctxt;
+    qwifi_mhi_event_ctxt *event_ctxt;
+    qwifi_mhi_cmd_ctxt *cmd_ctxt;
+    void *event_ring;
+    void *cmd_ring;
+    uint64_t chan_pa;
+    uint64_t event_pa;
+    uint64_t cmd_pa;
+    uint64_t event_ring_pa;
+    uint64_t cmd_ring_pa;
+    uint32_t readback = 0;
+    uint32_t new_mhicfg;
+    int rc = 0;
+
+    if (programmed)
+    {
+        terminal_print("[K:QWIFI] MHI minimal context program skipped: already done");
+        terminal_flush_log();
+        return;
+    }
+
+    if (chan_count == 0u || chan_count > QWIFI_MHI_MAX_CHAN)
+        chan_count = QWIFI_MHI_MAX_CHAN;
+    chan_bytes = sizeof(qwifi_mhi_chan_ctxt) * (uint64_t)chan_count;
+
+    chan_ctxt = (qwifi_mhi_chan_ctxt *)pmem_alloc_pages_lowdma(qwifi_pages_for(chan_bytes));
+    event_ctxt = (qwifi_mhi_event_ctxt *)pmem_alloc_pages_lowdma(qwifi_pages_for(event_bytes));
+    cmd_ctxt = (qwifi_mhi_cmd_ctxt *)pmem_alloc_pages_lowdma(qwifi_pages_for(cmd_bytes));
+    event_ring = pmem_alloc_pages_lowdma(qwifi_pages_for(QWIFI_MHI_RING_BYTES));
+    cmd_ring = pmem_alloc_pages_lowdma(qwifi_pages_for(QWIFI_MHI_RING_BYTES));
+
+    if (!chan_ctxt || !event_ctxt || !cmd_ctxt || !event_ring || !cmd_ring)
+    {
+        terminal_print("[K:QWIFI] MHI minimal context alloc failed");
+        terminal_flush_log();
+        return;
+    }
+
+    qwifi_zero(chan_ctxt, chan_bytes);
+    qwifi_zero(event_ctxt, event_bytes);
+    qwifi_zero(cmd_ctxt, cmd_bytes);
+    qwifi_zero(event_ring, QWIFI_MHI_RING_BYTES);
+    qwifi_zero(cmd_ring, QWIFI_MHI_RING_BYTES);
+
+    chan_pa = pmem_virt_to_phys(chan_ctxt);
+    event_pa = pmem_virt_to_phys(event_ctxt);
+    cmd_pa = pmem_virt_to_phys(cmd_ctxt);
+    event_ring_pa = pmem_virt_to_phys(event_ring);
+    cmd_ring_pa = pmem_virt_to_phys(cmd_ring);
+
+    event_ctxt[0].ertype = QWIFI_MHI_ER_TYPE_VALID;
+    event_ctxt[0].msivec = 0u;
+    event_ctxt[0].rbase = event_ring_pa;
+    event_ctxt[0].rlen = QWIFI_MHI_RING_BYTES;
+    event_ctxt[0].rp = event_ring_pa;
+    event_ctxt[0].wp = event_ring_pa;
+
+    cmd_ctxt[0].rbase = cmd_ring_pa;
+    cmd_ctxt[0].rlen = QWIFI_MHI_RING_BYTES;
+    cmd_ctxt[0].rp = cmd_ring_pa;
+    cmd_ctxt[0].wp = cmd_ring_pa;
+
+    asm_dma_clean_range(chan_ctxt, chan_bytes);
+    asm_dma_clean_range(event_ctxt, event_bytes);
+    asm_dma_clean_range(cmd_ctxt, cmd_bytes);
+    asm_dma_clean_range(event_ring, QWIFI_MHI_RING_BYTES);
+    asm_dma_clean_range(cmd_ring, QWIFI_MHI_RING_BYTES);
+
+    terminal_print("[K:QWIFI] MHI ctx alloc chan_pa=");
+    terminal_print_inline_hex64(chan_pa);
+    terminal_print(" event_pa=");
+    terminal_print_inline_hex64(event_pa);
+    terminal_print(" cmd_pa=");
+    terminal_print_inline_hex64(cmd_pa);
+    terminal_print(" evring_pa=");
+    terminal_print_inline_hex64(event_ring_pa);
+    terminal_print(" cmdring_pa=");
+    terminal_print_inline_hex64(cmd_ring_pa);
+    terminal_flush_log();
+
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_CCABAP_LOWER, ATH12K_CCABAP_HIGHER, chan_pa);
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_ECABAP_LOWER, ATH12K_ECABAP_HIGHER, event_pa);
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_CRCBAP_LOWER, ATH12K_CRCBAP_HIGHER, cmd_pa);
+
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_MHICTRLBASE_LOWER, ATH12K_MHICTRLBASE_HIGHER, 0u);
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_MHICTRLLIMIT_LOWER, ATH12K_MHICTRLLIMIT_HIGHER, 0xFFFFFFFFull);
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_MHIDATABASE_LOWER, ATH12K_MHIDATABASE_HIGHER, 0u);
+    rc |= qwifi_mhi_write64_pair(bar0_base, ATH12K_MHIDATALIMIT_LOWER, ATH12K_MHIDATALIMIT_HIGHER, 0xFFFFFFFFull);
+
+    new_mhicfg = (mhicfg & ~(ATH12K_MHICFG_NER_MASK | ATH12K_MHICFG_NHWER_MASK)) |
+                 (QWIFI_MHI_EVENT_RINGS << 16);
+    rc |= qwifi_mhi_write32(bar0_base, ATH12K_MHICFG, new_mhicfg);
+
+    (void)pci_probe_config_read32(bar0_base + ATH12K_CCABAP_LOWER, &readback);
+    terminal_print("[K:QWIFI] MHI ctx programmed rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" ccabap_lo=");
+    terminal_print_inline_hex64(readback);
+    (void)pci_probe_config_read32(bar0_base + ATH12K_MHICFG, &readback);
+    terminal_print(" mhicfg=");
+    terminal_print_inline_hex64(readback);
+    terminal_flush_log();
+
+    if (rc == 0)
+        programmed = 1;
+}
+
+static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi)
+{
+    static const struct
+    {
+        const char *name;
+        uint32_t off;
+    } mhi_regs[] = {
+        {"MHIREGLEN", ATH12K_MHIREGLEN},
+        {"MHIVER", ATH12K_MHIVER},
+        {"MHICFG", ATH12K_MHICFG},
+        {"CHDBOFF", ATH12K_CHDBOFF},
+        {"ERDBOFF", ATH12K_ERDBOFF},
+        {"BHIOFF", ATH12K_BHIOFF},
+        {"BHIEOFF", ATH12K_BHIEOFF},
+        {"DEBUGOFF", ATH12K_DEBUGOFF},
+        {"MHICTRL", ATH12K_MHICTRL},
+        {"MHISTATUS", ATH12K_MHISTATUS},
+        {"PCIE_TXVECDB", ATH12K_PCIE_TXVECDB},
+        {"PCIE_TXVECSTATUS", ATH12K_PCIE_TXVECSTATUS},
+        {"PCIE_RXVECDB", ATH12K_PCIE_RXVECDB},
+        {"PCIE_RXVECSTATUS", ATH12K_PCIE_RXVECSTATUS},
+    };
+    static const struct
+    {
+        const char *name;
+        uint32_t rel;
+    } bhi_regs[] = {
+        {"BHI_VERSION_MINOR", ATH12K_BHI_VERSION_MINOR},
+        {"BHI_VERSION_MAJOR", ATH12K_BHI_VERSION_MAJOR},
+        {"BHI_EXECENV", ATH12K_BHI_EXECENV},
+        {"BHI_STATUS", ATH12K_BHI_STATUS},
+        {"BHI_ERRCODE", ATH12K_BHI_ERRCODE},
+        {"BHI_ERRDBG1", ATH12K_BHI_ERRDBG1},
+        {"BHI_ERRDBG2", ATH12K_BHI_ERRDBG2},
+        {"BHI_ERRDBG3", ATH12K_BHI_ERRDBG3},
+        {"BHI_SERIALNU", ATH12K_BHI_SERIALNU},
+    };
+    static const struct
+    {
+        const char *name;
+        uint32_t rel;
+    } bhie_regs[] = {
+        {"BHIE_MSMSOCID", ATH12K_BHIE_MSMSOCID},
+        {"BHIE_TXVECSTATUS", ATH12K_BHIE_TXVECSTATUS},
+        {"BHIE_RXVECSTATUS", ATH12K_BHIE_RXVECSTATUS},
+    };
+    uint32_t mhicfg = 0;
+    uint32_t mhictrl = 0;
+    uint32_t mhistatus = 0;
+    uint32_t bhioff = 0;
+    uint32_t bhieoff = 0;
+    uint32_t bhi_status = 0;
+    uint32_t value = 0;
+    int rc;
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(mhi_regs) / sizeof(mhi_regs[0])); ++i)
+    {
+        rc = pci_probe_config_read32(bar0_base + mhi_regs[i].off, &value);
+        terminal_print("[K:QWIFI] MHI reg ");
+        terminal_print(mhi_regs[i].name);
+        terminal_print(" off=");
+        terminal_print_inline_hex64(mhi_regs[i].off);
+        terminal_print(" rc=");
+        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_print(" value=");
+        terminal_print_inline_hex64(value);
+        terminal_flush_log();
+        if (rc != 0)
+            break;
+
+        if (mhi_regs[i].off == ATH12K_MHICFG)
+            mhicfg = value;
+        else if (mhi_regs[i].off == ATH12K_MHICTRL)
+            mhictrl = value;
+        else if (mhi_regs[i].off == ATH12K_MHISTATUS)
+            mhistatus = value;
+        else if (mhi_regs[i].off == ATH12K_BHIOFF)
+            bhioff = value;
+        else if (mhi_regs[i].off == ATH12K_BHIEOFF)
+            bhieoff = value;
+    }
+
+    terminal_print("[K:QWIFI] MHI decode nch=");
+    terminal_print_inline_hex64(mhicfg & ATH12K_MHICFG_NCH_MASK);
+    terminal_print(" nhwch=");
+    terminal_print_inline_hex64((mhicfg & ATH12K_MHICFG_NHWCH_MASK) >> 8);
+    terminal_print(" ner=");
+    terminal_print_inline_hex64((mhicfg & ATH12K_MHICFG_NER_MASK) >> 16);
+    terminal_print(" nhwer=");
+    terminal_print_inline_hex64((mhicfg & ATH12K_MHICFG_NHWER_MASK) >> 24);
+    terminal_print(" ctrl_state=");
+    terminal_print_inline_hex64((mhictrl & ATH12K_MHICTRL_MHISTATE_MASK) >> 8);
+    terminal_print(" ctrl_reset=");
+    terminal_print_inline_hex64((mhictrl & ATH12K_MHICTRL_RESET_MASK) ? 1u : 0u);
+    terminal_print(" status_state=");
+    terminal_print_inline_hex64((mhistatus & ATH12K_MHISTATUS_MHISTATE_MASK) >> 8);
+    terminal_print(" ready=");
+    terminal_print_inline_hex64((mhistatus & ATH12K_MHISTATUS_READY_MASK) ? 1u : 0u);
+    terminal_print(" syserr=");
+    terminal_print_inline_hex64((mhistatus & ATH12K_MHISTATUS_SYSERR_MASK) ? 1u : 0u);
+    terminal_flush_log();
+
+    qwifi_mhi_program_minimal_contexts(bar0_base, mhicfg);
+
+    if (bhioff != 0u && bhioff < 0x1000u)
+    {
+        for (uint32_t i = 0; i < (uint32_t)(sizeof(bhi_regs) / sizeof(bhi_regs[0])); ++i)
+        {
+            rc = pci_probe_config_read32(bar0_base + bhioff + bhi_regs[i].rel, &value);
+            terminal_print("[K:QWIFI] BHI reg ");
+            terminal_print(bhi_regs[i].name);
+            terminal_print(" off=");
+            terminal_print_inline_hex64(bhioff + bhi_regs[i].rel);
+            terminal_print(" rc=");
+            terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(value);
+            terminal_flush_log();
+            if (rc != 0)
+                break;
+            if (bhi_regs[i].rel == ATH12K_BHI_STATUS)
+                bhi_status = value;
+        }
+
+        terminal_print("[K:QWIFI] BHI decode status=");
+        terminal_print_inline_hex64((bhi_status >> 30) & 0x3u);
+        terminal_print(" raw=");
+        terminal_print_inline_hex64(bhi_status);
+        terminal_flush_log();
+
+        qwifi_bhi_try_load_sbl(bar0_base, bhioff, bi);
+    }
+
+    if (bhieoff != 0u && bhieoff < 0x1000u)
+    {
+        for (uint32_t i = 0; i < (uint32_t)(sizeof(bhie_regs) / sizeof(bhie_regs[0])); ++i)
+        {
+            rc = pci_probe_config_read32(bar0_base + bhieoff + bhie_regs[i].rel, &value);
+            terminal_print("[K:QWIFI] BHIE reg ");
+            terminal_print(bhie_regs[i].name);
+            terminal_print(" off=");
+            terminal_print_inline_hex64(bhieoff + bhie_regs[i].rel);
+            terminal_print(" rc=");
+            terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(value);
+            terminal_flush_log();
+            if (rc != 0)
+                break;
+        }
+    }
+
+    value = 0;
+    rc = qwifi_ath12k_read32(bar0_base, ATH12K_TCSR_SOC_HW_VERSION, &value);
+    terminal_print("[K:QWIFI] ath12k TCSR_SOC_HW_VERSION rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" value=");
+    terminal_print_inline_hex64(value);
+    if (rc == 0)
+    {
+        uint32_t major = (value & ATH12K_TCSR_SOC_HW_VERSION_MAJOR_MASK) >> 8;
+        uint32_t minor = (value & ATH12K_TCSR_SOC_HW_VERSION_MINOR_MASK) >> 4;
+        terminal_print(" major=");
+        terminal_print_inline_hex64(major);
+        terminal_print(" minor=");
+        terminal_print_inline_hex64(minor);
+        if (major == 2u)
+            terminal_print(" [WCN7850 hw2.x expected]");
+    }
+    terminal_flush_log();
 }
 
 static void qwifi_acpi_exec0(uint64_t rsdp, const char dev_name4[4], const char method_name4[4])
@@ -309,17 +1042,7 @@ static void qwifi_acpi_prekick(const boot_info *bi)
 
     qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_STA");
     qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_PS0");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_INI");
-
-    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_STA");
     qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_PS0");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_PSC");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_INI");
-
-    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_STA");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_PS0");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_PSC");
-    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_INI");
 }
 
 static int qwifi_find_ecam(uint64_t rsdp_phys, dihos_pci_ecam *out_ecam)
@@ -407,34 +1130,23 @@ static void qwifi_enable_and_dump_bar0(const boot_info *bi,
         terminal_flush_log();
     }
 
-    if (ecam_overlaps_efi_ram(bi, bar0_base, 0x1000ull))
+    if (ecam_overlaps_efi_ram(bi, bar0_base, QWIFI_BAR0_PROBE_BYTES))
     {
         terminal_print("[K:QWIFI] skip BAR0 map: overlaps EFI RAM");
         terminal_flush_log();
         return;
     }
 
-    rc = mmio_map_device_identity(bar0_base, 0x1000ull);
+    rc = mmio_map_device_identity(bar0_base, QWIFI_BAR0_PROBE_BYTES);
     terminal_print("[K:QWIFI] BAR0 map rc=");
     terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" bytes=");
+    terminal_print_inline_hex64(QWIFI_BAR0_PROBE_BYTES);
     terminal_flush_log();
     if (rc != 0)
         return;
 
-    for (uint32_t off = 0; off < 0x40u; off += 4u)
-    {
-        uint32_t value = 0;
-        rc = pci_probe_config_read32(bar0_base + off, &value);
-        terminal_print("[K:QWIFI] BAR0[");
-        terminal_print_inline_hex64(off);
-        terminal_print("] rc=");
-        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
-        terminal_print(" value=");
-        terminal_print_inline_hex64(value);
-        terminal_flush_log();
-        if (rc != 0)
-            break;
-    }
+    qwifi_dump_ath12k_probe_regs(bar0_base, bi);
 }
 
 static uint32_t qwifi_probe_one_function(const boot_info *bi,
@@ -544,6 +1256,8 @@ static uint32_t qwifi_probe_one_function(const boot_info *bi,
         terminal_print(":");
         terminal_print_inline_hex64(device);
         terminal_flush_log();
+        if (expected_device == QCOM_FC7800_DEVICE)
+            qwifi_dump_pci_caps(cfg, cap);
         if (expected_device == QCOM_FC7800_DEVICE)
             qwifi_enable_and_dump_bar0(bi, cfg, cmd, bar0, bar1);
         return 1;

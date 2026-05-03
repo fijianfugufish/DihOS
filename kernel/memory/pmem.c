@@ -234,6 +234,10 @@ void pmem_init(const boot_info *bi)
     //    - the memory-map buffer (so we don't allocate over it)
     range_exclude(bi->mmap, bi->mmap_size);
 
+    //    - firmware blobs passed by stage2
+    for (uint32_t i = 0; i < bi->wifi_fw_count && i < BOOTINFO_WIFI_FW_MAX; ++i)
+        range_exclude(bi->wifi_fw[i].base_phys, bi->wifi_fw[i].size_bytes);
+
     // 3) page-align all ranges (down/up)
     for (uint32_t i = 0; i < pool_count; ++i)
     {

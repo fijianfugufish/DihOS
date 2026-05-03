@@ -10,6 +10,7 @@ volatile uint64_t g_aa64_probe_resume_elr = 0u;
 volatile uint64_t g_aa64_probe_last_esr = 0u;
 volatile uint64_t g_aa64_probe_last_far = 0u;
 volatile uint64_t g_aa64_probe_last_elr = 0u;
+static volatile uint32_t g_aa64_probe_trace = 0u;
 
 void aa64_exception_panic(void)
 {
@@ -123,6 +124,11 @@ void asm_aa64_install_exception_vectors(void)
     __asm__ __volatile__("isb" ::: "memory");
 }
 
+void asm_aa64_set_probe_trace(int enabled)
+{
+    g_aa64_probe_trace = enabled ? 1u : 0u;
+}
+
 int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
 {
     uint64_t resume_pc = 0u;
@@ -131,9 +137,12 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
     uintptr_t probe_vbar = (uintptr_t)&aa64_vector_table;
     uint32_t value = 0u;
 
-    terminal_print("[K:EXC] try_read32 enter addr=");
-    terminal_print_inline_hex64(addr);
-    terminal_flush_log();
+    if (g_aa64_probe_trace)
+    {
+        terminal_print("[K:EXC] try_read32 enter addr=");
+        terminal_print_inline_hex64(addr);
+        terminal_flush_log();
+    }
 
     g_aa64_probe_faulted = 0u;
     g_aa64_probe_active = 1u;
@@ -148,8 +157,11 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
         : "r"(probe_vbar)
         : "memory");
 
-    terminal_print("[K:EXC] try_read32 armed");
-    terminal_flush_log();
+    if (g_aa64_probe_trace)
+    {
+        terminal_print("[K:EXC] try_read32 armed");
+        terminal_flush_log();
+    }
 
     __asm__ __volatile__(
         "adr %0, 1f\n"
@@ -168,18 +180,21 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
         : "r"(old_vbar), "r"(old_daif)
         : "memory");
 
-    terminal_print("[K:EXC] try_read32 restored fault=");
-    terminal_print_inline_hex64(g_aa64_probe_faulted);
-    if (g_aa64_probe_faulted)
+    if (g_aa64_probe_trace || g_aa64_probe_faulted)
     {
-        terminal_print(" esr=");
-        terminal_print_inline_hex64(g_aa64_probe_last_esr);
-        terminal_print(" far=");
-        terminal_print_inline_hex64(g_aa64_probe_last_far);
-        terminal_print(" elr=");
-        terminal_print_inline_hex64(g_aa64_probe_last_elr);
+        terminal_print("[K:EXC] try_read32 restored fault=");
+        terminal_print_inline_hex64(g_aa64_probe_faulted);
+        if (g_aa64_probe_faulted)
+        {
+            terminal_print(" esr=");
+            terminal_print_inline_hex64(g_aa64_probe_last_esr);
+            terminal_print(" far=");
+            terminal_print_inline_hex64(g_aa64_probe_last_far);
+            terminal_print(" elr=");
+            terminal_print_inline_hex64(g_aa64_probe_last_elr);
+        }
+        terminal_flush_log();
     }
-    terminal_flush_log();
 
     (void)resume_pc;
     g_aa64_probe_active = 0u;
@@ -203,11 +218,14 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
     uint64_t old_daif = 0u;
     uintptr_t probe_vbar = (uintptr_t)&aa64_vector_table;
 
-    terminal_print("[K:EXC] try_write32 enter addr=");
-    terminal_print_inline_hex64(addr);
-    terminal_print(" value=");
-    terminal_print_inline_hex64(value);
-    terminal_flush_log();
+    if (g_aa64_probe_trace)
+    {
+        terminal_print("[K:EXC] try_write32 enter addr=");
+        terminal_print_inline_hex64(addr);
+        terminal_print(" value=");
+        terminal_print_inline_hex64(value);
+        terminal_flush_log();
+    }
 
     g_aa64_probe_faulted = 0u;
     g_aa64_probe_active = 1u;
@@ -222,8 +240,11 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
         : "r"(probe_vbar)
         : "memory");
 
-    terminal_print("[K:EXC] try_write32 armed");
-    terminal_flush_log();
+    if (g_aa64_probe_trace)
+    {
+        terminal_print("[K:EXC] try_write32 armed");
+        terminal_flush_log();
+    }
 
     __asm__ __volatile__(
         "adr %0, 1f\n"
@@ -242,18 +263,21 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
         : "r"(old_vbar), "r"(old_daif)
         : "memory");
 
-    terminal_print("[K:EXC] try_write32 restored fault=");
-    terminal_print_inline_hex64(g_aa64_probe_faulted);
-    if (g_aa64_probe_faulted)
+    if (g_aa64_probe_trace || g_aa64_probe_faulted)
     {
-        terminal_print(" esr=");
-        terminal_print_inline_hex64(g_aa64_probe_last_esr);
-        terminal_print(" far=");
-        terminal_print_inline_hex64(g_aa64_probe_last_far);
-        terminal_print(" elr=");
-        terminal_print_inline_hex64(g_aa64_probe_last_elr);
+        terminal_print("[K:EXC] try_write32 restored fault=");
+        terminal_print_inline_hex64(g_aa64_probe_faulted);
+        if (g_aa64_probe_faulted)
+        {
+            terminal_print(" esr=");
+            terminal_print_inline_hex64(g_aa64_probe_last_esr);
+            terminal_print(" far=");
+            terminal_print_inline_hex64(g_aa64_probe_last_far);
+            terminal_print(" elr=");
+            terminal_print_inline_hex64(g_aa64_probe_last_elr);
+        }
+        terminal_flush_log();
     }
-    terminal_flush_log();
 
     (void)resume_pc;
     g_aa64_probe_active = 0u;
@@ -264,6 +288,11 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
 #else
 
 void asm_aa64_install_exception_vectors(void) {}
+void asm_aa64_set_probe_trace(int enabled)
+{
+    (void)enabled;
+}
+
 int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
 {
     (void)addr;
