@@ -2,6 +2,7 @@
 .vscode/
 backups/
 build/
+linux-firmware/
 
 # Ignore all PowerShell scripts
 *.ps1
