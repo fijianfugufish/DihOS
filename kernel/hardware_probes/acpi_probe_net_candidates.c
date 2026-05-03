@@ -45,6 +45,7 @@ typedef struct
 } aml_named_slot;
 static aml_named_slot g_aml_named[64];
 static uint32_t g_aml_named_count = 0;
+static uint32_t g_aml_named_rw_log_count = 0;
 
 static uint32_t cstr_len_bounded(const char *s, uint32_t cap)
 {
@@ -73,6 +74,7 @@ static int cstr_eq(const char *a, const char *b)
 static void aml_named_reset(void)
 {
     g_aml_named_count = 0;
+    g_aml_named_rw_log_count = 0;
 }
 
 static int aml_named_get(const char *path, uint64_t *out)
@@ -88,6 +90,12 @@ static int aml_named_get(const char *path, uint64_t *out)
         }
     }
     return 0;
+}
+
+static int aml_named_has(const char *path)
+{
+    uint64_t ignored = 0;
+    return aml_named_get(path, &ignored);
 }
 
 static void aml_named_set(const char *path, uint64_t value)
@@ -111,6 +119,14 @@ static void aml_named_set(const char *path, uint64_t value)
     g_aml_named[g_aml_named_count].path[n] = 0;
     g_aml_named[g_aml_named_count].value = value;
     g_aml_named_count++;
+}
+
+static int aml_named_set_if_absent(const char *path, uint64_t value)
+{
+    if (!path || !path[0] || aml_named_has(path))
+        return 0;
+    aml_named_set(path, value);
+    return aml_named_has(path);
 }
 
 static void net_res_reset(void)
@@ -212,6 +228,14 @@ static uint32_t read_dword(const uint8_t *p)
            ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
+}
+
+static uint64_t read_aml_qword(const uint8_t *p)
+{
+    uint64_t v = 0;
+    for (uint32_t i = 0; i < 8u; ++i)
+        v |= ((uint64_t)p[i]) << (8u * i);
+    return v;
 }
 
 static uint64_t read_qword(const uint8_t *p)
@@ -378,6 +402,160 @@ static int aml_parse_namestring_lastseg(const uint8_t *aml,
     if (*consumed_out == 0u)
         *consumed_out = (p - start);
     return 0;
+}
+
+static int aml_parse_integer_const_at(const uint8_t *aml,
+                                      uint32_t aml_len,
+                                      uint32_t off,
+                                      uint64_t *value_out,
+                                      uint32_t *consumed_out)
+{
+    if (!aml || !value_out || !consumed_out || off >= aml_len)
+        return -1;
+
+    switch (aml[off])
+    {
+    case 0x00u: /* ZeroOp */
+        *value_out = 0u;
+        *consumed_out = 1u;
+        return 0;
+    case 0x01u: /* OneOp */
+        *value_out = 1u;
+        *consumed_out = 1u;
+        return 0;
+    case 0xFFu: /* OnesOp */
+        *value_out = ~0ull;
+        *consumed_out = 1u;
+        return 0;
+    case 0x0Au: /* ByteConst */
+        if (off + 1u >= aml_len)
+            return -1;
+        *value_out = (uint64_t)aml[off + 1u];
+        *consumed_out = 2u;
+        return 0;
+    case 0x0Bu: /* WordConst */
+        if (off + 2u >= aml_len)
+            return -1;
+        *value_out = (uint64_t)read_word(aml + off + 1u);
+        *consumed_out = 3u;
+        return 0;
+    case 0x0Cu: /* DWordConst */
+        if (off + 4u >= aml_len)
+            return -1;
+        *value_out = (uint64_t)read_dword(aml + off + 1u);
+        *consumed_out = 5u;
+        return 0;
+    case 0x0Eu: /* QWordConst */
+        if (off + 8u >= aml_len)
+            return -1;
+        *value_out = read_aml_qword(aml + off + 1u);
+        *consumed_out = 9u;
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+static int interesting_named_seed(const char name[5])
+{
+    return cstr_eq(name, "DID0") ||
+           cstr_eq(name, "DID1") ||
+           cstr_eq(name, "PVDI") ||
+           cstr_eq(name, "PRP5");
+}
+
+static void seed_simple_named_ints_from_table(const acpi_sdt_header_t *tbl)
+{
+    const uint8_t *aml;
+    uint32_t aml_len;
+    uint32_t logged = 0;
+
+    if (!tbl || tbl->length < sizeof(acpi_sdt_header_t))
+        return;
+
+    aml = (const uint8_t *)(uintptr_t)tbl;
+    aml_len = tbl->length;
+
+    for (uint32_t p = sizeof(acpi_sdt_header_t); p + 6u < aml_len; ++p)
+    {
+        uint32_t consumed_name = 0;
+        uint32_t consumed_value = 0;
+        uint64_t value = 0;
+        uint8_t seg[4];
+        char name[5];
+
+        if (aml[p] != 0x08u) /* NameOp */
+            continue;
+        if (aml_parse_namestring_lastseg(aml, aml_len, p + 1u, &consumed_name, seg) != 0 || consumed_name == 0u)
+            continue;
+        if (aml_parse_integer_const_at(aml, aml_len, p + 1u + consumed_name, &value, &consumed_value) != 0)
+            continue;
+
+        (void)consumed_value;
+        name[0] = (char)seg[0];
+        name[1] = (char)seg[1];
+        name[2] = (char)seg[2];
+        name[3] = (char)seg[3];
+        name[4] = 0;
+
+        if (!interesting_named_seed(name))
+            continue;
+
+        if (aml_named_set_if_absent(name, value) && logged < 8u)
+        {
+            terminal_print("[K:ACPI-NET] seed ");
+            terminal_print(name);
+            terminal_print("=");
+            terminal_print_inline_hex64(value);
+            logged++;
+        }
+    }
+
+    /*
+      Some PCI children expose DIDx as Field() objects over PCI_Config regions.
+      We cannot safely read that config space on this platform yet, but the DSDT
+      often compares the field to the expected vendor/device dword. Use that as
+      a conservative ACPI-derived seed so simple power methods can make progress.
+    */
+    for (uint32_t p = sizeof(acpi_sdt_header_t); p + 7u < aml_len; ++p)
+    {
+        uint32_t consumed_name = 0;
+        uint32_t consumed_value = 0;
+        uint64_t value = 0;
+        uint8_t seg[4];
+        char name[5];
+        uint32_t name_off;
+        uint32_t value_off;
+
+        if (aml[p] != 0x93u) /* LEqualOp */
+            continue;
+
+        name_off = p + 1u;
+        if (aml_parse_namestring_lastseg(aml, aml_len, name_off, &consumed_name, seg) != 0 || consumed_name == 0u)
+            continue;
+        value_off = name_off + consumed_name;
+        if (aml_parse_integer_const_at(aml, aml_len, value_off, &value, &consumed_value) != 0)
+            continue;
+
+        (void)consumed_value;
+        name[0] = (char)seg[0];
+        name[1] = (char)seg[1];
+        name[2] = (char)seg[2];
+        name[3] = (char)seg[3];
+        name[4] = 0;
+
+        if (!interesting_named_seed(name))
+            continue;
+
+        if (aml_named_set_if_absent(name, value) && logged < 8u)
+        {
+            terminal_print("[K:ACPI-NET] seed cmp ");
+            terminal_print(name);
+            terminal_print("=");
+            terminal_print_inline_hex64(value);
+            logged++;
+        }
+    }
 }
 
 static int find_named_buffer_range(const uint8_t *aml,
@@ -731,18 +909,103 @@ static int aml_net_read_named_int(void *user, const char *path, uint64_t *out_va
     if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PRP5", 4u))
     {
         *out_value = 1u;
+        if (g_aml_named_rw_log_count < 32u)
+        {
+            terminal_print("[K:ACPI-NET] read PRP5 override path=");
+            terminal_print(path);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(*out_value);
+            g_aml_named_rw_log_count++;
+        }
         return 0;
     }
     if (aml_named_get(path, out_value))
+    {
+        if (path &&
+            (find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID0", 4u) ||
+             find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PVDI", 4u)) &&
+            g_aml_named_rw_log_count < 32u)
+        {
+            terminal_print("[K:ACPI-NET] read exact path=");
+            terminal_print(path);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(*out_value);
+            g_aml_named_rw_log_count++;
+        }
         return 0;
-    *out_value = 0u;
-    return 0;
+    }
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID0", 4u) &&
+        aml_named_get("DID0", out_value))
+    {
+        if (g_aml_named_rw_log_count < 32u)
+        {
+            terminal_print("[K:ACPI-NET] read suffix DID0 path=");
+            terminal_print(path);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(*out_value);
+            g_aml_named_rw_log_count++;
+        }
+        return 0;
+    }
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID1", 4u) &&
+        aml_named_get("DID1", out_value))
+    {
+        if (g_aml_named_rw_log_count < 32u)
+        {
+            terminal_print("[K:ACPI-NET] read suffix DID1 path=");
+            terminal_print(path);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(*out_value);
+            g_aml_named_rw_log_count++;
+        }
+        return 0;
+    }
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PVDI", 4u) &&
+        aml_named_get("PVDI", out_value))
+    {
+        if (g_aml_named_rw_log_count < 32u)
+        {
+            terminal_print("[K:ACPI-NET] read suffix PVDI path=");
+            terminal_print(path);
+            terminal_print(" value=");
+            terminal_print_inline_hex64(*out_value);
+            g_aml_named_rw_log_count++;
+        }
+        return 0;
+    }
+    if (path &&
+        (find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID0", 4u) ||
+         find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PVDI", 4u)) &&
+        g_aml_named_rw_log_count < 32u)
+    {
+        terminal_print("[K:ACPI-NET] read miss path=");
+        terminal_print(path);
+        g_aml_named_rw_log_count++;
+    }
+    return -1;
 }
 
 static int aml_net_write_named_int(void *user, const char *path, uint64_t value)
 {
     (void)user;
     aml_named_set(path, value);
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID0", 4u))
+        aml_named_set("DID0", value);
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID1", 4u))
+        aml_named_set("DID1", value);
+    if (path && find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PVDI", 4u))
+        aml_named_set("PVDI", value);
+    if (path &&
+        (find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "DID0", 4u) ||
+         find_bytes((const uint8_t *)path, cstr_len_bounded(path, 128u), "PVDI", 4u)) &&
+        g_aml_named_rw_log_count < 32u)
+    {
+        terminal_print("[K:ACPI-NET] write path=");
+        terminal_print(path);
+        terminal_print(" value=");
+        terminal_print_inline_hex64(value);
+        g_aml_named_rw_log_count++;
+    }
     return 0;
 }
 
@@ -929,6 +1192,80 @@ static int find_method_body_bounds_in_body(const uint8_t *aml,
         *meth_body_out = meth_body;
         *meth_end_out = meth_end;
         *flags_out = aml[flags_off];
+        return 0;
+    }
+
+    return -1;
+}
+
+static int find_method_body_bounds_prefer_nonempty(const uint8_t *aml,
+                                                   uint32_t aml_len,
+                                                   uint32_t body_start,
+                                                   uint32_t body_end,
+                                                   const char name4[4],
+                                                   uint32_t *meth_body_out,
+                                                   uint32_t *meth_end_out,
+                                                   uint8_t *flags_out)
+{
+    uint32_t fallback_body = 0, fallback_end = 0;
+    uint8_t fallback_flags = 0;
+    int have_fallback = 0;
+
+    if (!aml || !name4 || !meth_body_out || !meth_end_out || !flags_out)
+        return -1;
+
+    for (uint32_t p = body_start; p + 5u < body_end; ++p)
+    {
+        uint32_t pkglen = 0, pkglen_bytes = 0, name_off, name_len = 0;
+        uint32_t flags_off, meth_body, meth_end;
+        uint8_t seg[4];
+
+        if (aml[p] != 0x14u)
+            continue;
+        if (aml_read_pkglen(aml, aml_len, p + 1u, &pkglen, &pkglen_bytes) != 0)
+            continue;
+
+        name_off = p + 1u + pkglen_bytes;
+        if (name_off >= body_end)
+            continue;
+        if (aml_parse_namestring_lastseg(aml, aml_len, name_off, &name_len, seg) != 0)
+            continue;
+        if (!(seg[0] == (uint8_t)name4[0] &&
+              seg[1] == (uint8_t)name4[1] &&
+              seg[2] == (uint8_t)name4[2] &&
+              seg[3] == (uint8_t)name4[3]))
+            continue;
+
+        flags_off = name_off + name_len;
+        meth_body = flags_off + 1u;
+        meth_end = p + 1u + pkglen;
+        if (meth_end > body_end)
+            meth_end = body_end;
+        if (flags_off >= body_end || meth_body > meth_end)
+            continue;
+
+        if (!have_fallback)
+        {
+            fallback_body = meth_body;
+            fallback_end = meth_end;
+            fallback_flags = aml[flags_off];
+            have_fallback = 1;
+        }
+
+        if (meth_end > meth_body)
+        {
+            *meth_body_out = meth_body;
+            *meth_end_out = meth_end;
+            *flags_out = aml[flags_off];
+            return 0;
+        }
+    }
+
+    if (have_fallback)
+    {
+        *meth_body_out = fallback_body;
+        *meth_end_out = fallback_end;
+        *flags_out = fallback_flags;
         return 0;
     }
 
@@ -1188,6 +1525,98 @@ static void print_aml_bytes(const char *tag, const uint8_t *aml, uint32_t start,
     }
 }
 
+static void dump_symbol_contexts_range(const uint8_t *aml,
+                                       uint32_t aml_len,
+                                       uint32_t start,
+                                       uint32_t end,
+                                       const char sym4[4],
+                                       uint32_t max_hits)
+{
+    uint32_t hits = 0;
+
+    if (!aml || !sym4 || end > aml_len || start >= end)
+        return;
+
+    for (uint32_t p = start; p + 4u <= end && hits < max_hits; ++p)
+    {
+        char symz[5];
+        if (!(aml[p + 0u] == (uint8_t)sym4[0] &&
+              aml[p + 1u] == (uint8_t)sym4[1] &&
+              aml[p + 2u] == (uint8_t)sym4[2] &&
+              aml[p + 3u] == (uint8_t)sym4[3]))
+            continue;
+
+        symz[0] = sym4[0];
+        symz[1] = sym4[1];
+        symz[2] = sym4[2];
+        symz[3] = sym4[3];
+        symz[4] = 0;
+
+        terminal_print("[K:ACPI-NET] symbol ");
+        terminal_print(symz);
+        terminal_print(" off=");
+        terminal_print_inline_hex32(p);
+        print_aml_bytes(" ctx:", aml, (p >= 16u) ? (p - 16u) : start,
+                        ((p + 32u) < end) ? (p + 32u) : end, 48u);
+        hits++;
+    }
+}
+
+static void dump_all_methods_in_body(const uint8_t *aml,
+                                     uint32_t aml_len,
+                                     const char *dev_name,
+                                     uint32_t body_start,
+                                     uint32_t body_end)
+{
+    uint32_t logged = 0;
+
+    if (!aml || !dev_name)
+        return;
+
+    for (uint32_t p = body_start; p + 5u < body_end && logged < 32u; ++p)
+    {
+        uint32_t pkglen = 0, pkglen_bytes = 0, name_off, name_len = 0;
+        uint32_t flags_off, meth_body, meth_end;
+        uint8_t seg[4];
+        char name[5];
+
+        if (aml[p] != 0x14u)
+            continue;
+        if (aml_read_pkglen(aml, aml_len, p + 1u, &pkglen, &pkglen_bytes) != 0)
+            continue;
+
+        name_off = p + 1u + pkglen_bytes;
+        if (name_off >= body_end)
+            continue;
+        if (aml_parse_namestring_lastseg(aml, aml_len, name_off, &name_len, seg) != 0)
+            continue;
+
+        flags_off = name_off + name_len;
+        meth_body = flags_off + 1u;
+        meth_end = p + 1u + pkglen;
+        if (flags_off >= body_end || meth_body > body_end)
+            continue;
+        if (meth_end > body_end)
+            meth_end = body_end;
+
+        name[0] = (char)seg[0];
+        name[1] = (char)seg[1];
+        name[2] = (char)seg[2];
+        name[3] = (char)seg[3];
+        name[4] = 0;
+
+        terminal_print("[K:ACPI-NET] method-any ");
+        terminal_print(dev_name);
+        terminal_print(".");
+        terminal_print(name);
+        terminal_print(" args=");
+        terminal_print_inline_hex32((uint32_t)(aml[flags_off] & 0x07u));
+        terminal_print(" len=");
+        terminal_print_inline_hex32(meth_end - meth_body);
+        logged++;
+    }
+}
+
 static void dump_focus_device_methods(const uint8_t *aml,
                                       uint32_t aml_len,
                                       const char *dev_name,
@@ -1195,7 +1624,7 @@ static void dump_focus_device_methods(const uint8_t *aml,
                                       uint32_t body_start,
                                       uint32_t body_end)
 {
-    static const char *methods[] = {"_STA", "_PS0", "_INI", "_RST", "_PS3", "_PS1", "_PS2"};
+    static const char *methods[] = {"_STA", "_PS0", "PVD5", "_PSC", "_INI", "_RST", "_PS3", "_PS1", "_PS2"};
     int focus = 0;
 
     if (!aml || !dev_name || !hid_name)
@@ -1221,13 +1650,14 @@ static void dump_focus_device_methods(const uint8_t *aml,
     terminal_print(" _DEP=");
     terminal_print_inline_hex32((uint32_t)body_has_name_literal(aml, body_start, body_end, "_DEP"));
     dump_dep_names(aml, aml_len, dev_name, body_start, body_end);
+    dump_all_methods_in_body(aml, aml_len, dev_name, body_start, body_end);
 
     for (uint32_t i = 0; i < (uint32_t)(sizeof(methods) / sizeof(methods[0])); ++i)
     {
         uint32_t meth_body = 0, meth_end = 0;
         uint8_t flags = 0;
-        if (find_method_body_bounds_in_body(aml, aml_len, body_start, body_end,
-                                            methods[i], &meth_body, &meth_end, &flags) != 0)
+        if (find_method_body_bounds_prefer_nonempty(aml, aml_len, body_start, body_end,
+                                                    methods[i], &meth_body, &meth_end, &flags) != 0)
             continue;
 
         terminal_print("[K:ACPI-NET] method ");
@@ -1746,7 +2176,7 @@ static int exec_device_method_in_table(const acpi_sdt_header_t *tbl,
         if (find_scope_body_by_nameseg(aml, aml_len, dev_name4, &body_start, &body_end) != 0)
             return -1;
     }
-    if (find_method_body_bounds_in_body(aml, aml_len, body_start, body_end, method_name4, &meth_body, &meth_end, &flags) != 0)
+    if (find_method_body_bounds_prefer_nonempty(aml, aml_len, body_start, body_end, method_name4, &meth_body, &meth_end, &flags) != 0)
         return -1;
     if (meth_end < meth_body)
         return -1;
@@ -1773,7 +2203,7 @@ static int exec_device_method_in_table(const acpi_sdt_header_t *tbl,
             terminal_print(devz);
             terminal_print(".");
             terminal_print(methz);
-            terminal_print(" rc=0 (empty body)");
+            terminal_print(" len=0x00000000 rc=0 (empty body)");
         }
         return 0;
     }
@@ -1793,6 +2223,7 @@ static int exec_device_method_in_table(const acpi_sdt_header_t *tbl,
     h.log = aml_net_log;
     h.user = 0;
 
+    seed_simple_named_ints_from_table(tbl);
     rc = aml_tiny_exec(&m, &h, &ret);
     *ran_out = 1;
     if (ret_out)
@@ -1816,6 +2247,8 @@ static int exec_device_method_in_table(const acpi_sdt_header_t *tbl,
         terminal_print(".");
         terminal_print(methz);
     }
+    terminal_print(" len=");
+    terminal_print_inline_hex64((uint64_t)(meth_end - meth_body));
     terminal_print(" rc=");
     terminal_print_inline_hex64((uint64_t)(int64_t)rc);
     terminal_print(" argc=");

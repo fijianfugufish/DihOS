@@ -125,7 +125,14 @@ static int aml_pkg_length(aml_tiny_ctx *ctx, uint32_t *out_len, uint32_t *out_pk
         return AML_TINY_ERR_EOF;
 
     follow_count = (uint8_t)((lead >> 6) & 0x03u);
-    len = (uint32_t)(lead & 0x0Fu);
+    if (follow_count == 0u)
+    {
+        len = (uint32_t)(lead & 0x3Fu);
+    }
+    else
+    {
+        len = (uint32_t)(lead & 0x0Fu);
+    }
 
     for (i = 0; i < follow_count; ++i)
     {

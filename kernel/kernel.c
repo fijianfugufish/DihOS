@@ -110,6 +110,10 @@ void kmain(boot_info *bi)
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
     pmem_init(bi);
 
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    /* Probe reads install temporary vectors locally; keep global VBAR untouched. */
+#endif
+
     kbutton_init();
     ktextbox_init();
     kwindow_init();

@@ -5,6 +5,7 @@
 #include "memory/mmio_map.h"
 #include "gpio/gpio.h"
 #include "terminal/terminal_api.h"
+#include "asm/asm.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -840,12 +841,15 @@ static void probe_pci5_mmio_windows(const boot_info *bi)
         terminal_print_inline_hex64(probe_base);
         terminal_print(" len=");
         terminal_print_inline_hex64(probe_len);
+        terminal_flush_log();
         rc = mmio_map_device_identity(probe_base, probe_len);
         terminal_print("[K:PCI] PCI5 MMIO probe map rc=");
         terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_flush_log();
         if (rc != 0)
             continue;
-        terminal_print("[K:PCI] PCI5 MMIO probe: mapped (read disabled for abort safety)");
+        terminal_print("[K:PCI] PCI5 MMIO probe: mapped (read disabled; aperture aborts unrecoverably)");
+        terminal_flush_log();
     }
 }
 
@@ -913,6 +917,15 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi)
         terminal_print_inline_hex64(ret);
         terminal_print("[K:PCI] ACPI pre-kick PCI5._PS0");
         (void)acpi_probe_net_exec_device_method(bi->acpi_rsdp, "PCI5", "_PS0", 0);
+        terminal_print("[K:PCI] ACPI probe PCI5._PSC");
+        (void)acpi_probe_net_exec_device_method(bi->acpi_rsdp, "PCI5", "_PSC", &ret);
+        terminal_print("[K:PCI] PCI5._PSC ret=");
+        terminal_print_inline_hex64(ret);
+        terminal_print("[K:PCI] ACPI probe PCI5.PVD5");
+        (void)acpi_probe_net_exec_device_method(bi->acpi_rsdp, "PCI5", "PVD5", &ret);
+        terminal_print("[K:PCI] PCI5.PVD5 ret=");
+        terminal_print_inline_hex64(ret);
+        terminal_flush_log();
         terminal_print("[K:PCI] ACPI pre-kick PCI5._INI");
         (void)acpi_probe_net_exec_device_method(bi->acpi_rsdp, "PCI5", "_INI", 0);
 
@@ -967,6 +980,7 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi)
     terminal_print_inline_hex64(sdc2_maps);
     terminal_print("[K:PCI] NIC hits total: ");
     terminal_print_inline_hex64(nic_hits);
+    terminal_flush_log();
     return;
 #else
     const int probe_level = 3; /* 0=plan only, 1=map only, 2=tiny read, 3=bounded full scan */

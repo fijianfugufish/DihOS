@@ -44,4 +44,16 @@ void asm_sync_executable_range(const void *ptr, uint64_t len)
     asm_compiler_barrier();
 }
 
+void asm_aa64_install_exception_vectors(void)
+{
+}
+
+int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
+{
+    (void)addr;
+    if (out_value)
+        *out_value = 0u;
+    return -1;
+}
+
 #endif

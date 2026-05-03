@@ -463,6 +463,7 @@ static int tcpd_aml_read_named_int(void *user, const char *name, uint64_t *out)
 
 static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value)
 {
+    static uint32_t ignored_write_logs = 0;
     (void)user;
 
     if (!name)
@@ -525,8 +526,12 @@ static int tcpd_aml_write_named_int(void *user, const char *name, uint64_t value
         return 0;
     }
 
-    terminal_print("AML ignored write: ");
-    terminal_print(name);
+    if (ignored_write_logs < 8u)
+    {
+        terminal_print("AML ignored write: ");
+        terminal_print(name);
+        ignored_write_logs++;
+    }
 
     return 0;
 }
@@ -610,7 +615,10 @@ static int aml_raw_pkglen(const uint8_t *p, const uint8_t *end,
     if (p + 1u + follow_count > end)
         return -1;
 
-    len = (uint32_t)(lead & 0x0Fu);
+    if (follow_count == 0u)
+        len = (uint32_t)(lead & 0x3Fu);
+    else
+        len = (uint32_t)(lead & 0x0Fu);
 
     for (i = 0; i < follow_count; ++i)
         len |= ((uint32_t)p[1u + i]) << (4u + 8u * i);
