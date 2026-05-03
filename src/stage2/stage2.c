@@ -1547,15 +1547,21 @@ static void stage2_load_wifi_firmware(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, bo
     {
         uint32_t kind;
         const wchar_t *name;
-        const wchar_t *paths[4];
+        const wchar_t *paths[7];
     } want[] = {
         {BOOTINFO_WIFI_FW_AMSS, L"amss.bin",
-         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\amss.bin",
+         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\ncm865\\amss.bin",
+          L"\\OS\\ath12k\\WCN7850\\hw2.0\\ncm865\\amss.bin",
+          L"\\ath12k\\WCN7850\\hw2.0\\ncm865\\amss.bin",
+          L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\amss.bin",
           L"\\OS\\ath12k\\WCN7850\\hw2.0\\amss.bin",
           L"\\ath12k\\WCN7850\\hw2.0\\amss.bin",
           0}},
         {BOOTINFO_WIFI_FW_M3, L"m3.bin",
-         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\m3.bin",
+         {L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\ncm865\\m3.bin",
+          L"\\OS\\ath12k\\WCN7850\\hw2.0\\ncm865\\m3.bin",
+          L"\\ath12k\\WCN7850\\hw2.0\\ncm865\\m3.bin",
+          L"\\OS\\Firmware\\ath12k\\WCN7850\\hw2.0\\m3.bin",
           L"\\OS\\ath12k\\WCN7850\\hw2.0\\m3.bin",
           L"\\ath12k\\WCN7850\\hw2.0\\m3.bin",
           0}},
@@ -1580,11 +1586,15 @@ static void stage2_load_wifi_firmware(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, bo
     for (uint32_t i = 0; i < (uint32_t)(sizeof(want) / sizeof(want[0])); ++i)
     {
         EFI_STATUS loaded = 14;
+        const wchar_t *loaded_path = 0;
         for (uint32_t p = 0; want[i].paths[p]; ++p)
         {
             loaded = stage2_load_wifi_fw_one(st, root, want[i].paths[p], want[i].kind, bi);
             if (!loaded)
+            {
+                loaded_path = want[i].paths[p];
                 break;
+            }
         }
 
         print(st, L"[S2:WIFI] ");
@@ -1592,6 +1602,8 @@ static void stage2_load_wifi_firmware(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, bo
         print(st, loaded ? L" missing" : L" loaded");
         if (!loaded && bi->wifi_fw_count)
         {
+            print(st, L" path=");
+            print(st, loaded_path ? loaded_path : L"?");
             print(st, L" size=");
             hex64(st, bi->wifi_fw[bi->wifi_fw_count - 1u].size_bytes);
         }
