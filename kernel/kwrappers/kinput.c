@@ -1545,8 +1545,10 @@ void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count
     g_usb.has_mouse = 0;
 
     /* Existing ACPI/I2C HID path */
+    terminal_set_quiet();
     i2c1_hidi2c_init(rsdp_phys);
     maybe_configure_touchpad_layouts(i2c1_hidi2c_touchpad());
+    terminal_set_loud();
 
     terminal_flush_log();
 

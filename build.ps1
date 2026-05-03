@@ -100,11 +100,22 @@ function Kernel-Include-Dirs {
 function Kernel-Arch-Defines {
   param([string]$Arch)
 
-  if ($Arch -eq "aa64") {
-    return @("-DKERNEL_ARCH_AA64=1", "-DKERNEL_ARCH=1")
+  if ($Arch -eq "aa64")
+  {
+    return @(
+      "-DKERNEL_ARCH_AA64=1",
+      "-DDIHOS_ARCH_AARCH64=1",
+      "-DKERNEL_ARCH=1"
+    )
   }
-  if ($Arch -eq "x64") {
-    return @("-DKERNEL_ARCH_X64=1", "-DKERNEL_ARCH=2")
+
+  if ($Arch -eq "x64")
+  {
+    return @(
+      "-DKERNEL_ARCH_X64=1",
+      "-DDIHOS_ARCH_X64=1",
+      "-DKERNEL_ARCH=2"
+    )
   }
   throw "Unknown kernel arch: $Arch"
 }
@@ -170,11 +181,21 @@ function Get-KernelSourcesForArch {
   $sources = @(
     $kernSrcAll | Where-Object {
       $path = $_.FullName
+      $name = $_.Name
+
       if ($path.StartsWith($asmRootFull, [StringComparison]::OrdinalIgnoreCase)) {
-        $path.StartsWith($asmArchFull, [StringComparison]::OrdinalIgnoreCase)
-      } else {
-        $true
+        return $path.StartsWith($asmArchFull, [StringComparison]::OrdinalIgnoreCase)
       }
+
+      if ($Arch -eq "aa64" -and $name -eq "x64_mmu_map.c") {
+        return $false
+      }
+
+      if ($Arch -eq "x64" -and $name -eq "aarch64_mmu_map.c") {
+        return $false
+      }
+
+      return $true
     } | ForEach-Object { $_.FullName }
   )
 

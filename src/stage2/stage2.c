@@ -50,8 +50,36 @@ typedef struct EFI_SYSTEM_TABLE
     void *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
+static boot_info *g_stage2_report_bi = 0;
+
+static void stage2_report_append_wide(const wchar_t *s)
+{
+    if (!g_stage2_report_bi || !s)
+        return;
+
+    while (*s)
+    {
+        uint32_t len = g_stage2_report_bi->stage2_report_len;
+        if (len + 1u >= BOOTINFO_STAGE2_REPORT_MAX)
+            return;
+
+        wchar_t wc = *s++;
+        char c = (wc >= 32 && wc <= 126) ? (char)wc : '?';
+        if (wc == L'\r' || wc == L'\n' || wc == L'\t')
+            c = (char)wc;
+
+        g_stage2_report_bi->stage2_report[len] = c;
+        g_stage2_report_bi->stage2_report[len + 1u] = 0;
+        g_stage2_report_bi->stage2_report_len = len + 1u;
+    }
+}
+
 /* console helpers */
-static void print(EFI_SYSTEM_TABLE *st, const wchar_t *s) { st->ConOut->OutputString(st->ConOut, s); }
+static void print(EFI_SYSTEM_TABLE *st, const wchar_t *s)
+{
+    stage2_report_append_wide(s);
+    st->ConOut->OutputString(st->ConOut, s);
+}
 static void println(EFI_SYSTEM_TABLE *st, const wchar_t *s)
 {
     print(st, s);
@@ -404,6 +432,26 @@ typedef struct
     uint32_t source[BOOTINFO_XHCI_MMIO_MAX];
     uint32_t count;
 } XHCI_MMIO_LIST;
+
+typedef struct
+{
+    uint16_t segment;
+    uint8_t bus;
+    uint8_t dev;
+    uint8_t fn;
+    uint8_t class_code;
+    uint8_t subclass;
+    uint8_t prog_if;
+    uint16_t vendor_id;
+    uint16_t device_id;
+    uint64_t bar0_mmio_base;
+} PCI_NIC_HINT;
+
+typedef struct
+{
+    PCI_NIC_HINT item[BOOTINFO_PCI_NIC_MAX];
+    uint32_t count;
+} PCI_NIC_LIST;
 
 static int xhci_list_try_add(EFI_SYSTEM_TABLE *st,
                              XHCI_MMIO_LIST *list,
@@ -788,6 +836,82 @@ static uint64_t xhci_mmio_from_bars(uint32_t bar0, uint32_t bar1)
     return (uint64_t)(bar0 & ~0xFULL);
 }
 
+static uint64_t pci_bar0_mmio_from_bars(uint32_t bar0, uint32_t bar1)
+{
+    if (!bar0 || bar0 == 0xFFFFFFFFu)
+        return 0;
+    if (bar0 & 1u)
+        return 0;
+    if (bar_is_64_mmio(bar0, bar1))
+        return ((uint64_t)bar1 << 32) | (uint64_t)(bar0 & ~0xFULL);
+    return (uint64_t)(bar0 & ~0xFULL);
+}
+
+static int nic_list_contains(const PCI_NIC_LIST *list, uint8_t bus, uint8_t dev, uint8_t fn)
+{
+    if (!list)
+        return 0;
+    for (uint32_t i = 0; i < list->count; ++i)
+    {
+        const PCI_NIC_HINT *n = &list->item[i];
+        if (n->bus == bus && n->dev == dev && n->fn == fn)
+            return 1;
+    }
+    return 0;
+}
+
+static void nic_list_try_add(EFI_SYSTEM_TABLE *st,
+                             PCI_NIC_LIST *list,
+                             uint8_t bus,
+                             uint8_t dev,
+                             uint8_t fn,
+                             uint16_t vendor,
+                             uint16_t device,
+                             uint8_t class_code,
+                             uint8_t subclass,
+                             uint8_t prog_if,
+                             uint64_t bar0_mmio_base)
+{
+    if (!list)
+        return;
+
+    if (nic_list_contains(list, bus, dev, fn))
+        return;
+
+    if (list->count >= BOOTINFO_PCI_NIC_MAX)
+    {
+        println(st, L"[S2:NIC] list full");
+        return;
+    }
+
+    PCI_NIC_HINT *n = &list->item[list->count++];
+    n->segment = 0;
+    n->bus = bus;
+    n->dev = dev;
+    n->fn = fn;
+    n->class_code = class_code;
+    n->subclass = subclass;
+    n->prog_if = prog_if;
+    n->vendor_id = vendor;
+    n->device_id = device;
+    n->bar0_mmio_base = bar0_mmio_base;
+
+    print(st, L"[S2:NIC] found bdf=");
+    hex64(st, ((uint64_t)bus << 16) | ((uint64_t)dev << 8) | fn);
+    print(st, L"[S2:NIC] vendor=");
+    hex64(st, vendor);
+    print(st, L"[S2:NIC] device=");
+    hex64(st, device);
+    print(st, L"[S2:NIC] class=");
+    hex64(st, class_code);
+    print(st, L"[S2:NIC] subclass=");
+    hex64(st, subclass);
+    print(st, L"[S2:NIC] progif=");
+    hex64(st, prog_if);
+    print(st, L"[S2:NIC] bar0(mmio)=");
+    hex64(st, bar0_mmio_base);
+}
+
 static void scan_xhci_rbio_instance(EFI_SYSTEM_TABLE *st,
                                     EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb,
                                     XHCI_MMIO_LIST *out)
@@ -878,6 +1002,295 @@ static uint32_t scan_xhci_mmio_rbio(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, XHCI
     }
 
     return out ? (out->count - before) : 0;
+}
+
+static void scan_nics_rbio_instance(EFI_SYSTEM_TABLE *st,
+                                    EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb,
+                                    PCI_NIC_LIST *out,
+                                    uint32_t *visible_count,
+                                    uint32_t *sample_count)
+{
+    if (!rb || !rb->Pci.Read || !out)
+        return;
+
+    for (uint32_t bus = 0; bus < 256; ++bus)
+    {
+        for (uint32_t dev = 0; dev < 32; ++dev)
+        {
+            for (uint32_t fn = 0; fn < 8; ++fn)
+            {
+                uint32_t id = 0xFFFFFFFFu;
+                uint32_t cc = 0;
+                uint32_t bar0 = 0;
+                uint32_t bar1 = 0;
+                uint16_t vendor;
+                uint16_t device;
+                uint8_t class_code;
+                uint8_t subclass;
+                uint8_t prog_if;
+                uint64_t bar0_mmio;
+
+                if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x00), 1, &id))
+                    continue;
+                if (id == 0xFFFFFFFFu || id == 0x00000000u)
+                    continue;
+
+                if (visible_count)
+                    (*visible_count)++;
+
+                if (rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x08), 1, &cc))
+                    continue;
+
+                class_code = (uint8_t)(cc >> 24);
+                subclass = (uint8_t)(cc >> 16);
+                prog_if = (uint8_t)(cc >> 8);
+
+                if (sample_count && *sample_count < 12u)
+                {
+                    (*sample_count)++;
+                    print(st, L"[S2:PCI] RBIO vis bdf=");
+                    hex64(st, ((uint64_t)bus << 16) | ((uint64_t)dev << 8) | fn);
+                    print(st, L"[S2:PCI] class=");
+                    hex64(st, class_code);
+                    print(st, L"[S2:PCI] sub=");
+                    hex64(st, subclass);
+                    print(st, L"[S2:PCI] if=");
+                    hex64(st, prog_if);
+                    print(st, L"[S2:PCI] vid=");
+                    hex64(st, (uint16_t)(id & 0xFFFFu));
+                    print(st, L"[S2:PCI] did=");
+                    hex64(st, (uint16_t)((id >> 16) & 0xFFFFu));
+                }
+
+                if (class_code != 0x02u)
+                    continue;
+
+                vendor = (uint16_t)(id & 0xFFFFu);
+                device = (uint16_t)((id >> 16) & 0xFFFFu);
+
+                (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x10), 1, &bar0);
+                (void)rb->Pci.Read(rb, RB_WIDTH_U32, EFI_PCI_ADDRESS(bus, dev, fn, 0x14), 1, &bar1);
+                bar0_mmio = pci_bar0_mmio_from_bars(bar0, bar1);
+
+                nic_list_try_add(st, out,
+                                 (uint8_t)bus, (uint8_t)dev, (uint8_t)fn,
+                                 vendor, device,
+                                 class_code, subclass, prog_if,
+                                 bar0_mmio);
+            }
+        }
+    }
+}
+
+static uint32_t find_pci_nics_rbio(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, PCI_NIC_LIST *out)
+{
+    uint32_t before;
+    void *BS;
+    EFI_LOCATE_HANDLE_BUFFER LocateHandles;
+    EFI_LOCATE_PROTOCOL Locate;
+    EFI_OPEN_PROTOCOL Open;
+    EFI_FREE_POOL FreePool;
+    EFI_HANDLE *handles = 0;
+    UINTN handle_count = 0;
+    uint32_t visible_count = 0;
+    uint32_t sample_count = 0;
+
+    if (!out)
+        return 0;
+
+    before = out->count;
+    BS = st->BootServices;
+    LocateHandles = BsLocateHandles(BS);
+    Locate = BsLocate(BS);
+    Open = BsOpenProto(BS);
+    FreePool = BsFreePool(BS);
+
+    println(st, L"[S2:NIC] scan: RBIO");
+
+    if (LocateHandles &&
+        LocateHandles(EFI_LOCATE_BY_PROTOCOL,
+                      &PCI_ROOT_BRIDGE_IO_GUID,
+                      NULL,
+                      &handle_count,
+                      &handles) == 0 &&
+        handles &&
+        handle_count)
+    {
+        for (UINTN i = 0; i < handle_count; ++i)
+        {
+            EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb = 0;
+            if (Open &&
+                Open(handles[i],
+                     &PCI_ROOT_BRIDGE_IO_GUID,
+                     (void **)&rb,
+                     image,
+                     0,
+                     EFI_OPEN_PROTOCOL_GET_PROTOCOL) == 0)
+            {
+                scan_nics_rbio_instance(st, rb, out, &visible_count, &sample_count);
+            }
+        }
+
+        if (FreePool)
+            FreePool(handles);
+    }
+    else
+    {
+        EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL *rb = 0;
+        if (Locate &&
+            Locate(&PCI_ROOT_BRIDGE_IO_GUID, NULL, (void **)&rb) == 0)
+        {
+            scan_nics_rbio_instance(st, rb, out, &visible_count, &sample_count);
+        }
+    }
+
+    print(st, L"[S2:PCI] RBIO visible fn count = ");
+    hex64(st, visible_count);
+    print(st, L"[S2:NIC] discovered count = ");
+    hex64(st, out->count);
+    return out->count - before;
+}
+
+static uint32_t find_pci_nics_ecam(EFI_SYSTEM_TABLE *st, uint64_t rsdp_pa, PCI_NIC_LIST *out)
+{
+    uint32_t before = out ? out->count : 0;
+    uint32_t visible_count = 0;
+    uint32_t sample_count = 0;
+
+    if (!out || !rsdp_pa || !sane(rsdp_pa))
+        return 0;
+
+    ACPI_RSDP *R = (ACPI_RSDP *)(uintptr_t)rsdp_pa;
+    if (!R->Xsdt || !sane(R->Xsdt))
+        return 0;
+
+    ACPI_XSDT_FBK *X = (ACPI_XSDT_FBK *)(uintptr_t)R->Xsdt;
+    if (!sane((uint64_t)(uintptr_t)X) || X->Hdr.Length < sizeof(ACPI_SDT_FBK))
+        return 0;
+
+    println(st, L"[S2:NIC] scan: MCFG/ECAM");
+
+    uint32_t entries = (X->Hdr.Length - (uint32_t)sizeof(ACPI_SDT_FBK)) / 8u;
+    for (uint32_t i = 0; i < entries; ++i)
+    {
+        uint64_t spa = X->Entry[i];
+        if (!sane(spa))
+            continue;
+
+        ACPI_SDT_FBK *H = (ACPI_SDT_FBK *)(uintptr_t)spa;
+        if (!sane((uint64_t)(uintptr_t)H) || H->Length < sizeof(ACPI_SDT_FBK))
+            continue;
+
+        if (H->Sig[0] != 'M' || H->Sig[1] != 'C' || H->Sig[2] != 'F' || H->Sig[3] != 'G')
+            continue;
+
+        ACPI_MCFG_FBK *M = (ACPI_MCFG_FBK *)(uintptr_t)spa;
+        if (M->Hdr.Length < sizeof(ACPI_MCFG_FBK))
+            continue;
+
+        uint32_t seg_count = (M->Hdr.Length - (uint32_t)sizeof(ACPI_MCFG_FBK)) / (uint32_t)sizeof(M->entry[0]);
+        for (uint32_t si = 0; si < seg_count; ++si)
+        {
+            uint64_t ecam = M->entry[si].Base;
+            uint32_t bus_start = (uint32_t)M->entry[si].BusStart;
+            uint32_t bus_end = (uint32_t)M->entry[si].BusEnd;
+            uint16_t seg = M->entry[si].Seg;
+
+            if (!sane(ecam))
+                continue;
+
+            for (uint32_t bus = bus_start; bus <= bus_end; ++bus)
+            {
+                for (uint32_t dev = 0; dev < 32; ++dev)
+                {
+                    for (uint32_t fn = 0; fn < 8; ++fn)
+                    {
+                        uint64_t cfg = ecam + ((uint64_t)(bus - bus_start) << 20) +
+                                       ((uint64_t)dev << 15) + ((uint64_t)fn << 12);
+                        uint32_t id = *(volatile uint32_t *)(uintptr_t)(cfg + 0x00);
+                        uint32_t cc;
+                        uint8_t class_code;
+                        uint8_t subclass;
+                        uint8_t prog_if;
+                        uint32_t bar0, bar1;
+                        uint64_t bar0_mmio;
+
+                        if (id == 0xFFFFFFFFu || id == 0x00000000u)
+                            continue;
+
+                        visible_count++;
+
+                        cc = *(volatile uint32_t *)(uintptr_t)(cfg + 0x08);
+                        class_code = (uint8_t)(cc >> 24);
+                        subclass = (uint8_t)(cc >> 16);
+                        prog_if = (uint8_t)(cc >> 8);
+
+                        if (sample_count < 12u)
+                        {
+                            sample_count++;
+                            print(st, L"[S2:PCI] ECAM vis seg=");
+                            hex64(st, seg);
+                            print(st, L"[S2:PCI] bdf=");
+                            hex64(st, ((uint64_t)bus << 16) | ((uint64_t)dev << 8) | fn);
+                            print(st, L"[S2:PCI] class=");
+                            hex64(st, class_code);
+                            print(st, L"[S2:PCI] sub=");
+                            hex64(st, subclass);
+                            print(st, L"[S2:PCI] if=");
+                            hex64(st, prog_if);
+                            print(st, L"[S2:PCI] vid=");
+                            hex64(st, (uint16_t)(id & 0xFFFFu));
+                            print(st, L"[S2:PCI] did=");
+                            hex64(st, (uint16_t)((id >> 16) & 0xFFFFu));
+                        }
+
+                        if (class_code != 0x02u)
+                            continue;
+
+                        bar0 = *(volatile uint32_t *)(uintptr_t)(cfg + 0x10);
+                        bar1 = *(volatile uint32_t *)(uintptr_t)(cfg + 0x14);
+                        bar0_mmio = pci_bar0_mmio_from_bars(bar0, bar1);
+
+                        if (nic_list_contains(out, (uint8_t)bus, (uint8_t)dev, (uint8_t)fn))
+                            continue;
+
+                        if (out->count >= BOOTINFO_PCI_NIC_MAX)
+                        {
+                            println(st, L"[S2:NIC] list full");
+                            return out->count - before;
+                        }
+
+                        PCI_NIC_HINT *n = &out->item[out->count++];
+                        n->segment = seg;
+                        n->bus = (uint8_t)bus;
+                        n->dev = (uint8_t)dev;
+                        n->fn = (uint8_t)fn;
+                        n->class_code = class_code;
+                        n->subclass = subclass;
+                        n->prog_if = prog_if;
+                        n->vendor_id = (uint16_t)(id & 0xFFFFu);
+                        n->device_id = (uint16_t)((id >> 16) & 0xFFFFu);
+                        n->bar0_mmio_base = bar0_mmio;
+
+                        print(st, L"[S2:NIC] found(ECAM) seg=");
+                        hex64(st, seg);
+                        print(st, L"[S2:NIC] bdf=");
+                        hex64(st, ((uint64_t)bus << 16) | ((uint64_t)dev << 8) | fn);
+                        print(st, L"[S2:NIC] vendor=");
+                        hex64(st, n->vendor_id);
+                        print(st, L"[S2:NIC] device=");
+                        hex64(st, n->device_id);
+                        print(st, L"[S2:NIC] bar0(mmio)=");
+                        hex64(st, bar0_mmio);
+                    }
+                }
+            }
+        }
+    }
+
+    print(st, L"[S2:PCI] ECAM visible fn count = ");
+    hex64(st, visible_count);
+    return out->count - before;
 }
 
 /* ---------- main finder ---------- */
@@ -1079,6 +1492,9 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     boot_info bi = (boot_info){0};
     bi.version = 1;
+    bi.stage2_report_len = 0;
+    bi.stage2_report[0] = 0;
+    g_stage2_report_bi = &bi;
 
     bi.fb.fb_base = (uint64_t)gop->Mode->FrameBufferBase;
     bi.fb.fb_size = (uint64_t)gop->Mode->FrameBufferSize;
@@ -1098,6 +1514,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     hex64(st, bi.acpi_rsdp);
 
     XHCI_MMIO_LIST xhci_mmios;
+    PCI_NIC_LIST nic_list = {0};
     bi.xhci_mmio_count = find_xhci_mmios(st, image, bi.acpi_rsdp, &xhci_mmios);
     if (bi.xhci_mmio_count > BOOTINFO_XHCI_MMIO_MAX)
         bi.xhci_mmio_count = BOOTINFO_XHCI_MMIO_MAX;
@@ -1139,6 +1556,28 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     else
     {
         println(st, L"[S2:xHCI] probe skipped for fallback MMIO");
+    }
+
+    (void)find_pci_nics_rbio(st, image, &nic_list);
+    (void)find_pci_nics_ecam(st, bi.acpi_rsdp, &nic_list);
+    print(st, L"[S2:NIC] total discovered = ");
+    hex64(st, nic_list.count);
+    bi.pci_nic_count = nic_list.count;
+    if (bi.pci_nic_count > BOOTINFO_PCI_NIC_MAX)
+        bi.pci_nic_count = BOOTINFO_PCI_NIC_MAX;
+
+    for (uint32_t i = 0; i < bi.pci_nic_count; ++i)
+    {
+        bi.pci_nics[i].segment = nic_list.item[i].segment;
+        bi.pci_nics[i].bus = nic_list.item[i].bus;
+        bi.pci_nics[i].dev = nic_list.item[i].dev;
+        bi.pci_nics[i].fn = nic_list.item[i].fn;
+        bi.pci_nics[i].class_code = nic_list.item[i].class_code;
+        bi.pci_nics[i].subclass = nic_list.item[i].subclass;
+        bi.pci_nics[i].prog_if = nic_list.item[i].prog_if;
+        bi.pci_nics[i].vendor_id = nic_list.item[i].vendor_id;
+        bi.pci_nics[i].device_id = nic_list.item[i].device_id;
+        bi.pci_nics[i].bar0_mmio_base = nic_list.item[i].bar0_mmio_base;
     }
 
     find_tlmm_mmio(st, image, &bi.tlmm_mmio_base, &bi.tlmm_mmio_size);

@@ -117,6 +117,19 @@ static inline void *phys_to_virt(uint64_t phys)
 }
 #endif
 
+void *pmem_phys_to_virt(uint64_t phys)
+{
+    return phys_to_virt(phys);
+}
+
+uint64_t pmem_virt_to_phys(const void *virt)
+{
+    uint64_t va = (uint64_t)(uintptr_t)virt;
+    if (g_pa2va_delta && va >= g_pa2va_delta)
+        return va - g_pa2va_delta;
+    return va;
+}
+
 // --- <4GB split pools for DMA-constrained devices -------------------------
 static range_t pool_lo[256], pool_hi[256];
 static uint32_t pool_lo_count = 0, pool_hi_count = 0;

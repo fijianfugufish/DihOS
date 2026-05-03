@@ -19,6 +19,13 @@
 #include "apps/text_editor_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "hardware_probes/acpi_probe_xhci.h"
+#include "hardware_probes/acpi_probe_net_candidates.h"
+#include "hardware_probes/acpi_probe_pci_lookup.h"
+#include "pci/pci_ecam_lookup.h"
+#include "pci/pci_ecam_map_plan.h"
+#include "pci/pci_kernel_nic_probe.h"
+#include "memory/mmio_map.h"
+#include "pci/pci_dump_mapped.h"
 #include "asm/asm.h"
 
 #include "terminal/terminal_api.h"
@@ -100,13 +107,12 @@ void kmain(boot_info *bi)
         for (;;)
             asm_wait();
 
+    g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
     pmem_init(bi);
 
     kbutton_init();
     ktextbox_init();
     kwindow_init();
-
-    g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
 
     crumb((kcolor){20, 20, 20});
 
@@ -193,6 +199,106 @@ void kmain(boot_info *bi)
     terminal_initialize(&font);
     terminal_print("terminal online");
     terminal_success("sacx runtime online");
+    
+    terminal_print("[stage2_report] begin");
+    terminal_print("stage2_report_len:");
+    terminal_print_inline_hex64(bi->stage2_report_len);
+    if (bi->stage2_report_len)
+        terminal_print(bi->stage2_report);
+    else
+        terminal_print("(empty)");
+    terminal_print("[stage2_report] end");
+
+    /*
+    acpi_pci_print_ecams_from_rsdp(bi->acpi_rsdp);
+    pci_print_lookup_examples_from_rsdp(bi->acpi_rsdp);
+    pci_ecam_print_map_plan_from_rsdp(bi->acpi_rsdp);
+    */
+
+    terminal_print("Stage2 NIC hint count: ");
+    terminal_print_inline_hex64(bi->pci_nic_count);
+    for (uint32_t i = 0; i < bi->pci_nic_count && i < BOOTINFO_PCI_NIC_MAX; ++i)
+    {
+        terminal_print("NIC seg=");
+        terminal_print_inline_hex64(bi->pci_nics[i].segment);
+        terminal_print(" bdf=");
+        terminal_print_inline_hex64(((uint64_t)bi->pci_nics[i].bus << 16) |
+                                    ((uint64_t)bi->pci_nics[i].dev << 8) |
+                                    (uint64_t)bi->pci_nics[i].fn);
+        terminal_print(" vid=");
+        terminal_print_inline_hex64(bi->pci_nics[i].vendor_id);
+        terminal_print(" did=");
+        terminal_print_inline_hex64(bi->pci_nics[i].device_id);
+        terminal_print(" class=");
+        terminal_print_inline_hex64(bi->pci_nics[i].class_code);
+        terminal_print(" sub=");
+        terminal_print_inline_hex64(bi->pci_nics[i].subclass);
+        terminal_print(" if=");
+        terminal_print_inline_hex64(bi->pci_nics[i].prog_if);
+        terminal_print(" bar0=");
+        terminal_print_inline_hex64(bi->pci_nics[i].bar0_mmio_base);
+    }
+    if (!bi->pci_nic_count)
+    {
+        uint32_t net_hints = 0;
+        terminal_print("Stage2 NIC hints empty; trying kernel MCFG NIC probe");
+        net_hints = acpi_probe_net_candidates_from_rsdp(bi->acpi_rsdp);
+        pci_kernel_set_net_hints(net_hints);
+        if ((net_hints & (DIHOS_NET_HINT_WLAN | DIHOS_NET_HINT_WIFI | DIHOS_NET_HINT_WCN)) != 0u)
+            terminal_print("[NET] ACPI suggests WLAN/WCN platform path");
+        else
+            terminal_print("[NET] ACPI has no explicit WLAN/WIFI/WCN device marker");
+        if ((net_hints & DIHOS_NET_HINT_SDIO) != 0u)
+            terminal_print("[NET] ACPI suggests SDIO/SDHost network path");
+        if ((net_hints & (DIHOS_NET_HINT_WWAN | DIHOS_NET_HINT_MHI)) != 0u)
+            terminal_print("[NET] ACPI suggests WWAN/MHI path (non-PCI NIC likely)");
+        else if ((net_hints & DIHOS_NET_HINT_USB) != 0u)
+            terminal_print("[NET] ACPI suggests USB network path");
+        {
+            uint32_t nres = acpi_probe_net_resource_count();
+            const acpi_net_resource_window *res = acpi_probe_net_resources();
+            terminal_print("[NET] ACPI resource window count:");
+            terminal_print_inline_hex32(nres);
+            for (uint32_t i = 0; i < nres; ++i)
+            {
+                terminal_print("[NET] res dev=");
+                terminal_print(res[i].dev_name);
+                terminal_print(" hid=");
+                terminal_print(res[i].hid_name);
+                terminal_print(" kind=");
+                terminal_print_inline_hex32(res[i].kind);
+                terminal_print(" rtype=");
+                terminal_print_inline_hex32(res[i].rtype);
+                terminal_print(" min=");
+                terminal_print_inline_hex64(res[i].min_addr);
+                terminal_print(" max=");
+                terminal_print_inline_hex64(res[i].max_addr);
+                terminal_print(" len=");
+                terminal_print_inline_hex64(res[i].span_len);
+            }
+        }
+        pci_kernel_probe_nics_from_mcfg(bi);
+    }
+    {
+        const int enable_risky_mapped_pci_probe = 0;
+        if (enable_risky_mapped_pci_probe)
+        {
+            mmio_map_print_state();
+            terminal_print("PCI probe: before ECAM map");
+            mmio_map_pci_ecams_from_rsdp(bi->acpi_rsdp);
+            terminal_print("PCI probe: after ECAM map");
+            terminal_print("PCI probe: before mapped dump");
+            terminal_flush_log();
+            pci_dump_mapped_ecam_bus0_from_rsdp(bi->acpi_rsdp);
+            terminal_print("PCI probe: after mapped dump");
+            terminal_flush_log();
+        }
+        else
+        {
+            terminal_print("PCI mapped ECAM probe skipped (stability mode)");
+            terminal_flush_log();
+        }
+    }
 
     terminal_print("ACPI xHCI discovered count: ");
     terminal_print_inline_hex64(acpi_xhci_count);
