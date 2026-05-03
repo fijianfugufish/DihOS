@@ -464,6 +464,13 @@ static int interesting_named_seed(const char name[5])
            cstr_eq(name, "PRP5");
 }
 
+static int hardcoded_qcom_wifi_nameseg(const char name[5])
+{
+    return cstr_eq(name, "PCI4") ||
+           cstr_eq(name, "RP1_") ||
+           cstr_eq(name, "WLN_");
+}
+
 static void seed_simple_named_ints_from_table(const acpi_sdt_header_t *tbl)
 {
     const uint8_t *aml;
@@ -1634,6 +1641,8 @@ static void dump_focus_device_methods(const uint8_t *aml,
         focus = 1;
     if (memeq_n(dev_name, "PCI5", 4) || memeq_n(dev_name, "WWAN", 4))
         focus = 1;
+    if (hardcoded_qcom_wifi_nameseg(dev_name))
+        focus = 1;
     if (!focus)
         return;
 
@@ -1977,6 +1986,15 @@ static uint32_t scan_dsdt_device_candidates(const acpi_sdt_header_t *dsdt_hdr)
 
         if (memeq_n(name, "SDC2", 4) || memeq_n(hid_str, "QCOM2466", 8))
             local_hints |= DIHOS_NET_HINT_SDIO;
+        if (hardcoded_qcom_wifi_nameseg(name))
+        {
+            local_hints |= DIHOS_NET_HINT_QCOM | DIHOS_NET_HINT_WLAN;
+            if (!has_hid)
+            {
+                copy_namez(hid_str, sizeof(hid_str), "PCI-QCOM-WIFI");
+                has_hid = 1;
+            }
+        }
 
         for (uint32_t p = body_start; p + 6u < body_end; ++p)
         {
@@ -2078,6 +2096,7 @@ static uint32_t scan_table_for_net_markers(const acpi_sdt_header_t *hdr)
     static const char *markers[] = {
         "PNP0A08", "PNP0A03",
         "WLAN", "WWAN", "WIFI",
+        "WLN_",
         "QCOM", "WCN", "ATH", "BCM", "RTL", "MTK", "MRVL", "INTC",
         "MHI", "RMNET", "QMI", "MBIM", "RNDIS", "NCM", "CNVW",
         "SDIO", "PCIE", "USB", "NET", "ETH"
@@ -2110,6 +2129,8 @@ static uint32_t scan_table_for_net_markers(const acpi_sdt_header_t *hdr)
             if (memeq_n(m, "QCOM", 4))
                 hints |= DIHOS_NET_HINT_QCOM;
             else if (memeq_n(m, "WLAN", 4))
+                hints |= DIHOS_NET_HINT_WLAN;
+            else if (memeq_n(m, "WLN_", 4))
                 hints |= DIHOS_NET_HINT_WLAN;
             else if (memeq_n(m, "WIFI", 4))
                 hints |= DIHOS_NET_HINT_WIFI;

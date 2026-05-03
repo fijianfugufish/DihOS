@@ -222,6 +222,364 @@ static void print_acpi_net_resource_windows(void)
     }
 }
 
+#define QCOM_FC7800_SEGMENT 4u
+#define QCOM_FC7800_BUS 1u
+#define QCOM_FC7800_DEV 0u
+#define QCOM_FC7800_FN 0u
+#define QCOM_FC7800_VENDOR 0x17CBu
+#define QCOM_FC7800_DEVICE 0x1107u
+#define QCOM_FC7800_ROOTPORT_DEVICE 0x0111u
+
+static int pci_probe_config_read32(uint64_t addr, uint32_t *out_value)
+{
+    if (!addr || !out_value)
+        return -1;
+
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    return asm_aa64_try_read32(addr, out_value);
+#else
+    *out_value = mmio_read32(addr);
+    return 0;
+#endif
+}
+
+static int pci_probe_mmio_write32(uint64_t addr, uint32_t value)
+{
+    if (!addr)
+        return -1;
+
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    return asm_aa64_try_write32(addr, value);
+#else
+    mmio_write32(addr, value);
+    return 0;
+#endif
+}
+
+static uint64_t qwifi_bar0_base_from_config(uint32_t bar0, uint32_t bar1)
+{
+    if (bar0 & 0x1u)
+        return 0u;
+    if ((bar0 & 0x6u) == 0x4u)
+        return (((uint64_t)bar1) << 32) | (uint64_t)(bar0 & ~0xFull);
+    return (uint64_t)(bar0 & ~0xFull);
+}
+
+static void qwifi_acpi_exec0(uint64_t rsdp, const char dev_name4[4], const char method_name4[4])
+{
+    uint64_t ret = 0;
+    int rc;
+
+    terminal_print("[K:QWIFI] ACPI ");
+    terminal_print(dev_name4);
+    terminal_print(".");
+    terminal_print(method_name4);
+    terminal_flush_log();
+
+    rc = acpi_probe_net_exec_device_method(rsdp, dev_name4, method_name4, &ret);
+
+    terminal_print("[K:QWIFI] ACPI result ");
+    terminal_print(dev_name4);
+    terminal_print(".");
+    terminal_print(method_name4);
+    terminal_print(" rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" ret=");
+    terminal_print_inline_hex64(ret);
+    terminal_flush_log();
+}
+
+static void qwifi_acpi_prekick(const boot_info *bi)
+{
+    uint64_t reg_args[2];
+
+    if (!bi || !bi->acpi_rsdp)
+        return;
+
+    terminal_print("[K:QWIFI] hardcoded ACPI path: _SB.PCI4.RP1_.WLN_");
+    terminal_flush_log();
+
+    acpi_probe_net_exec_context_reset();
+
+    reg_args[0] = 0x08u;
+    reg_args[1] = 1u;
+    terminal_print("[K:QWIFI] ACPI GIO0._REG(0x08,1)");
+    terminal_flush_log();
+    (void)acpi_probe_net_exec_device_method_args(bi->acpi_rsdp, "GIO0", "_REG", 2u, reg_args, 0);
+
+    qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_STA");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_PS0");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "PCI4", "_INI");
+
+    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_STA");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_PS0");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_PSC");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "RP1_", "_INI");
+
+    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_STA");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_PS0");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_PSC");
+    qwifi_acpi_exec0(bi->acpi_rsdp, "WLN_", "_INI");
+}
+
+static int qwifi_find_ecam(uint64_t rsdp_phys, dihos_pci_ecam *out_ecam)
+{
+    dihos_pci_ecam ecams[DIHOS_PCI_ECAM_MAX];
+    uint32_t count;
+
+    if (!out_ecam || !rsdp_phys)
+        return 0;
+
+    count = acpi_pci_get_ecams_from_rsdp(rsdp_phys, ecams, DIHOS_PCI_ECAM_MAX);
+    terminal_print("[K:QWIFI] MCFG ECAM count=");
+    terminal_print_inline_hex64(count);
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        terminal_print("[K:QWIFI] ECAM seg=");
+        terminal_print_inline_hex64(ecams[i].segment);
+        terminal_print(" base=");
+        terminal_print_inline_hex64(ecams[i].base);
+        terminal_print(" buses=");
+        terminal_print_inline_hex64(ecams[i].start_bus);
+        terminal_print("-");
+        terminal_print_inline_hex64(ecams[i].end_bus);
+
+        if (ecams[i].segment == QCOM_FC7800_SEGMENT &&
+            QCOM_FC7800_BUS >= ecams[i].start_bus &&
+            QCOM_FC7800_BUS <= ecams[i].end_bus)
+        {
+            *out_ecam = ecams[i];
+            terminal_print("[K:QWIFI] selected segment 4 ECAM");
+            terminal_flush_log();
+            return 1;
+        }
+    }
+
+    terminal_print("[K:QWIFI] segment 4 ECAM not found");
+    terminal_flush_log();
+    return 0;
+}
+
+static void qwifi_enable_and_dump_bar0(const boot_info *bi,
+                                       uint64_t cfg,
+                                       uint32_t cmd_status,
+                                       uint32_t bar0,
+                                       uint32_t bar1)
+{
+    uint64_t bar0_base = qwifi_bar0_base_from_config(bar0, bar1);
+    uint16_t cmd = (uint16_t)(cmd_status & 0xFFFFu);
+    uint16_t wanted_cmd = (uint16_t)(cmd | 0x0006u); /* Memory Space + Bus Master */
+    uint32_t readback = 0;
+    int rc;
+
+    terminal_print("[K:QWIFI] BAR0 decoded base=");
+    terminal_print_inline_hex64(bar0_base);
+    terminal_print(" raw0=");
+    terminal_print_inline_hex64(bar0);
+    terminal_print(" raw1=");
+    terminal_print_inline_hex64(bar1);
+    terminal_flush_log();
+
+    if (!bar0_base)
+    {
+        terminal_print("[K:QWIFI] BAR0 unavailable; skip MMIO dump");
+        terminal_flush_log();
+        return;
+    }
+
+    if ((cmd & 0x0006u) != 0x0006u)
+    {
+        terminal_print("[K:QWIFI] enable PCI command MEM|BUSMASTER old=");
+        terminal_print_inline_hex64(cmd);
+        terminal_print(" new=");
+        terminal_print_inline_hex64(wanted_cmd);
+        terminal_flush_log();
+
+        rc = pci_probe_mmio_write32(cfg + 0x04u, (uint32_t)wanted_cmd);
+        terminal_print("[K:QWIFI] command write rc=");
+        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_flush_log();
+
+        (void)pci_probe_config_read32(cfg + 0x04u, &readback);
+        terminal_print("[K:QWIFI] command readback=");
+        terminal_print_inline_hex64(readback);
+        terminal_flush_log();
+    }
+
+    if (ecam_overlaps_efi_ram(bi, bar0_base, 0x1000ull))
+    {
+        terminal_print("[K:QWIFI] skip BAR0 map: overlaps EFI RAM");
+        terminal_flush_log();
+        return;
+    }
+
+    rc = mmio_map_device_identity(bar0_base, 0x1000ull);
+    terminal_print("[K:QWIFI] BAR0 map rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return;
+
+    for (uint32_t off = 0; off < 0x40u; off += 4u)
+    {
+        uint32_t value = 0;
+        rc = pci_probe_config_read32(bar0_base + off, &value);
+        terminal_print("[K:QWIFI] BAR0[");
+        terminal_print_inline_hex64(off);
+        terminal_print("] rc=");
+        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_print(" value=");
+        terminal_print_inline_hex64(value);
+        terminal_flush_log();
+        if (rc != 0)
+            break;
+    }
+}
+
+static uint32_t qwifi_probe_one_function(const boot_info *bi,
+                                         const dihos_pci_ecam *ecam,
+                                         const char *label,
+                                         uint8_t bus,
+                                         uint8_t dev,
+                                         uint8_t fn,
+                                         uint16_t expected_device)
+{
+    uint64_t cfg;
+    uint64_t page;
+    uint32_t id = 0;
+    uint32_t cmd = 0;
+    uint32_t classrev = 0;
+    uint32_t hdr = 0;
+    uint32_t bar0 = 0;
+    uint32_t bar1 = 0;
+    uint32_t cap = 0;
+    uint16_t vendor;
+    uint16_t device;
+    int rc;
+
+    cfg = pci_ecam_config_phys(ecam, bus, dev, fn, 0u);
+    if (!cfg)
+    {
+        terminal_print("[K:QWIFI] cfg unavailable for ");
+        terminal_print(label);
+        return 0;
+    }
+
+    page = cfg & ~0xFFFull;
+    terminal_print("[K:QWIFI] probe ");
+    terminal_print(label);
+    terminal_print(" seg=");
+    terminal_print_inline_hex64(QCOM_FC7800_SEGMENT);
+    terminal_print(" bdf=");
+    terminal_print_inline_hex64(((uint64_t)bus << 16) | ((uint64_t)dev << 8) | (uint64_t)fn);
+    terminal_print(" cfg=");
+    terminal_print_inline_hex64(cfg);
+    terminal_print(" page=");
+    terminal_print_inline_hex64(page);
+    terminal_flush_log();
+
+    if (ecam_overlaps_efi_ram(bi, page, 0x1000ull))
+    {
+        terminal_print("[K:QWIFI] skip cfg page: overlaps EFI RAM");
+        terminal_flush_log();
+        return 0;
+    }
+
+    rc = mmio_map_device_identity(page, 0x1000ull);
+    terminal_print("[K:QWIFI] cfg page map rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+    if (rc != 0)
+        return 0;
+
+    terminal_print("[K:QWIFI] read id32 ");
+    terminal_print(label);
+    terminal_flush_log();
+    rc = pci_probe_config_read32(cfg + 0x00u, &id);
+    terminal_print("[K:QWIFI] id32 rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_print(" id=");
+    terminal_print_inline_hex64(id);
+    terminal_flush_log();
+    if (rc != 0 || id == 0u || id == 0xFFFFFFFFu)
+        return 0;
+
+    vendor = (uint16_t)(id & 0xFFFFu);
+    device = (uint16_t)((id >> 16) & 0xFFFFu);
+
+    (void)pci_probe_config_read32(cfg + 0x04u, &cmd);
+    (void)pci_probe_config_read32(cfg + 0x08u, &classrev);
+    (void)pci_probe_config_read32(cfg + 0x0Cu, &hdr);
+    (void)pci_probe_config_read32(cfg + 0x10u, &bar0);
+    (void)pci_probe_config_read32(cfg + 0x14u, &bar1);
+    (void)pci_probe_config_read32(cfg + 0x34u, &cap);
+
+    terminal_print("[K:QWIFI] fn ");
+    terminal_print(label);
+    terminal_print(" vid=");
+    terminal_print_inline_hex64(vendor);
+    terminal_print(" did=");
+    terminal_print_inline_hex64(device);
+    terminal_print(" cmd=");
+    terminal_print_inline_hex64(cmd);
+    terminal_print(" classrev=");
+    terminal_print_inline_hex64(classrev);
+    terminal_print(" hdr=");
+    terminal_print_inline_hex64(hdr);
+    terminal_print(" bar0=");
+    terminal_print_inline_hex64(bar0);
+    terminal_print(" bar1=");
+    terminal_print_inline_hex64(bar1);
+    terminal_print(" cap=");
+    terminal_print_inline_hex64(cap);
+    terminal_flush_log();
+
+    if (vendor == QCOM_FC7800_VENDOR && device == expected_device)
+    {
+        terminal_print("[K:QWIFI] MATCH ");
+        terminal_print(label);
+        terminal_print(" Qualcomm ");
+        terminal_print_inline_hex64(vendor);
+        terminal_print(":");
+        terminal_print_inline_hex64(device);
+        terminal_flush_log();
+        if (expected_device == QCOM_FC7800_DEVICE)
+            qwifi_enable_and_dump_bar0(bi, cfg, cmd, bar0, bar1);
+        return 1;
+    }
+
+    return 0;
+}
+
+static uint32_t probe_hardcoded_qcom_fc7800_wifi(const boot_info *bi)
+{
+    dihos_pci_ecam ecam = {0};
+    uint32_t hits = 0u;
+
+    terminal_print("[K:QWIFI] Windows hint: FastConnect 7800 PCI 17CB:1107 at PCI4.RP1_.WLN_ seg4 bus1 dev0 fn0");
+    terminal_flush_log();
+
+    if (!bi || !bi->acpi_rsdp)
+    {
+        terminal_print("[K:QWIFI] no boot info / no RSDP");
+        return 0u;
+    }
+
+    qwifi_acpi_prekick(bi);
+
+    if (!qwifi_find_ecam(bi->acpi_rsdp, &ecam))
+        return 0u;
+
+    (void)qwifi_probe_one_function(bi, &ecam, "parent-RP1", 0u, 0u, 0u, QCOM_FC7800_ROOTPORT_DEVICE);
+    hits += qwifi_probe_one_function(bi, &ecam, "wifi-WLN", QCOM_FC7800_BUS, QCOM_FC7800_DEV, QCOM_FC7800_FN, QCOM_FC7800_DEVICE);
+
+    terminal_print("[K:QWIFI] hardcoded hit count=");
+    terminal_print_inline_hex64(hits);
+    terminal_flush_log();
+    return hits;
+}
+
 static int sdhci_reset_cmd_dat(uint64_t base)
 {
     const uint8_t SDHCI_RESET_CMD = 0x02u;
@@ -874,7 +1232,14 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi)
     }
 
     print_acpi_net_resource_windows();
-    if (has_wwan_hint && bi && bi->acpi_rsdp)
+    nic_hits += probe_hardcoded_qcom_fc7800_wifi(bi);
+    if (nic_hits != 0u)
+    {
+        terminal_print("[K:PCI] hardcoded Qualcomm WiFi path found; skipping PCI5/SDIO fallback");
+        terminal_flush_log();
+    }
+
+    if (nic_hits == 0u && has_wwan_hint && bi && bi->acpi_rsdp)
     {
         uint64_t sta_ret = 0;
         uint64_t ret = 0;
@@ -961,7 +1326,11 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi)
 
         probe_pci5_mmio_windows(bi);
     }
-    if (!has_wlan_hint && has_wwan_hint)
+    if (nic_hits != 0u)
+    {
+        terminal_print("[K:PCI] SDC2 SDIO bootstrap skipped: real WiFi is PCIe 17CB:1107");
+    }
+    else if (!has_wlan_hint && has_wwan_hint)
     {
         terminal_print("[K:PCI] defer SDC2 SDIO bootstrap: ACPI points to WWAN/MHI path and has no WLAN marker");
     }
@@ -1012,6 +1381,15 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi)
     {
         terminal_print("[K:PCI] preferred segment from ACPI net resources: ");
         terminal_print_inline_hex64(preferred_seg);
+    }
+
+    nic_hits += probe_hardcoded_qcom_fc7800_wifi(bi);
+    if (nic_hits != 0u)
+    {
+        terminal_print("[K:PCI] hardcoded Qualcomm WiFi path found; skipping broad PCI scan");
+        terminal_print("[K:PCI] NIC hits total: ");
+        terminal_print_inline_hex64(nic_hits);
+        return;
     }
 
     for (uint32_t i = 0; i < ecam_count; ++i)

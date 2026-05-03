@@ -196,6 +196,71 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
     return 0;
 }
 
+int asm_aa64_try_write32(uint64_t addr, uint32_t value)
+{
+    uint64_t resume_pc = 0u;
+    uint64_t old_vbar = 0u;
+    uint64_t old_daif = 0u;
+    uintptr_t probe_vbar = (uintptr_t)&aa64_vector_table;
+
+    terminal_print("[K:EXC] try_write32 enter addr=");
+    terminal_print_inline_hex64(addr);
+    terminal_print(" value=");
+    terminal_print_inline_hex64(value);
+    terminal_flush_log();
+
+    g_aa64_probe_faulted = 0u;
+    g_aa64_probe_active = 1u;
+
+    __asm__ __volatile__(
+        "mrs %0, vbar_el1\n"
+        "mrs %1, daif\n"
+        "msr daifset, #0xf\n"
+        "msr vbar_el1, %2\n"
+        "isb\n"
+        : "=&r"(old_vbar), "=&r"(old_daif)
+        : "r"(probe_vbar)
+        : "memory");
+
+    terminal_print("[K:EXC] try_write32 armed");
+    terminal_flush_log();
+
+    __asm__ __volatile__(
+        "adr %0, 1f\n"
+        "str %0, [%1]\n"
+        "str %w2, [%3]\n"
+        "1:\n"
+        : "=&r"(resume_pc)
+        : "r"(&g_aa64_probe_resume_elr), "r"(value), "r"(addr)
+        : "memory");
+
+    __asm__ __volatile__(
+        "msr vbar_el1, %0\n"
+        "msr daif, %1\n"
+        "isb\n"
+        :
+        : "r"(old_vbar), "r"(old_daif)
+        : "memory");
+
+    terminal_print("[K:EXC] try_write32 restored fault=");
+    terminal_print_inline_hex64(g_aa64_probe_faulted);
+    if (g_aa64_probe_faulted)
+    {
+        terminal_print(" esr=");
+        terminal_print_inline_hex64(g_aa64_probe_last_esr);
+        terminal_print(" far=");
+        terminal_print_inline_hex64(g_aa64_probe_last_far);
+        terminal_print(" elr=");
+        terminal_print_inline_hex64(g_aa64_probe_last_elr);
+    }
+    terminal_flush_log();
+
+    (void)resume_pc;
+    g_aa64_probe_active = 0u;
+
+    return g_aa64_probe_faulted ? -1 : 0;
+}
+
 #else
 
 void asm_aa64_install_exception_vectors(void) {}
@@ -204,6 +269,13 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
     (void)addr;
     if (out_value)
         *out_value = 0u;
+    return -1;
+}
+
+int asm_aa64_try_write32(uint64_t addr, uint32_t value)
+{
+    (void)addr;
+    (void)value;
     return -1;
 }
 

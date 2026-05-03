@@ -56,4 +56,11 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
     return -1;
 }
 
+int asm_aa64_try_write32(uint64_t addr, uint32_t value)
+{
+    (void)addr;
+    (void)value;
+    return -1;
+}
+
 #endif

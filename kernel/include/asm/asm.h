@@ -17,6 +17,7 @@ extern "C"
     void asm_sync_executable_range(const void *ptr, uint64_t len);
     void asm_aa64_install_exception_vectors(void);
     int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value);
+    int asm_aa64_try_write32(uint64_t addr, uint32_t value);
 
 #ifdef __cplusplus
 }
