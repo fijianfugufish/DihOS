@@ -311,9 +311,9 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_MHI_IPCR_TX_CH 20u
 #define QWIFI_MHI_IPCR_RX_CH 21u
 #define QWIFI_MHI_IPCR_ELEMENTS 64u
-#define QWIFI_MHI_IPCR_RX_PREPOST 8u
+#define QWIFI_MHI_IPCR_RX_PREPOST 32u
 #define QWIFI_MHI_IPCR_RX_BUF_BYTES 4096u
-#define QWIFI_MHI_IPCR_TX_BUF_BYTES 4096u
+#define QWIFI_MHI_IPCR_TX_BUF_BYTES 8192u
 #define QWIFI_MHI_CMD_RING_ELEMENTS (QWIFI_MHI_RING_BYTES / QWIFI_MHI_TRE_BYTES)
 #define QWIFI_MHI_ER_TYPE_VALID 1u
 #define QWIFI_MHI_STATE_M0 2u
@@ -339,8 +339,12 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_QRTR_TYPE_BYE 3u
 #define QWIFI_QRTR_TYPE_NEW_SERVER 4u
 #define QWIFI_QRTR_TYPE_DEL_SERVER 5u
+#define QWIFI_QRTR_TYPE_DEL_CLIENT 6u
+#define QWIFI_QRTR_TYPE_RESUME_TX 7u
 #define QWIFI_QRTR_TYPE_NEW_LOOKUP 10u
 #define QWIFI_QRTR_TYPE_DEL_LOOKUP 11u
+#define QWIFI_QRTR_TX_FLOW_LOW 5u
+#define QWIFI_QRTR_TX_FLOW_HIGH 10u
 #define QWIFI_QRTR_NODE_BCAST 0xFFFFFFFFu
 #define QWIFI_QRTR_PORT_CTRL 0xFFFFFFFEu
 #define QWIFI_QRTR_LOCAL_NODE 1u
@@ -351,18 +355,58 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_QMI_RESPONSE 2u
 #define QWIFI_QMI_INDICATION 4u
 #define QWIFI_QMI_WLANFW_IND_REGISTER_REQ 0x0020u
+#define QWIFI_QMI_WLANFW_WLAN_MODE_REQ 0x0022u
+#define QWIFI_QMI_WLANFW_WLAN_CFG_REQ 0x0023u
+#define QWIFI_QMI_WLANFW_CAP_REQ 0x0024u
+#define QWIFI_QMI_WLANFW_BDF_DOWNLOAD_REQ 0x0025u
+#define QWIFI_QMI_WLANFW_WLAN_INI_REQ 0x002Fu
 #define QWIFI_QMI_WLANFW_HOST_CAP_REQ 0x0034u
 #define QWIFI_QMI_WLANFW_REQUEST_MEM_IND 0x0035u
+#define QWIFI_QMI_WLANFW_RESPOND_MEM_REQ 0x0036u
+#define QWIFI_QMI_WLANFW_FW_MEM_READY_IND 0x0037u
+#define QWIFI_QMI_WLANFW_FW_READY_IND 0x0038u
+#define QWIFI_QMI_WLANFW_M3_INFO_REQ 0x003Cu
 #define QWIFI_QMI_WLANFW_PHY_CAP_REQ 0x0057u
 #define QWIFI_QMI_TXN_PHY_CAP 1u
 #define QWIFI_QMI_TXN_IND_REGISTER 2u
 #define QWIFI_QMI_TXN_HOST_CAP 3u
+#define QWIFI_QMI_TXN_RESPOND_MEM 4u
+#define QWIFI_QMI_TXN_TARGET_CAP 5u
+#define QWIFI_QMI_TXN_M3_INFO 6u
+#define QWIFI_QMI_TXN_WLAN_INI 7u
+#define QWIFI_QMI_TXN_WLAN_CFG 8u
+#define QWIFI_QMI_TXN_WLAN_MODE 9u
+#define QWIFI_QMI_TXN_BDF_DOWNLOAD 10u
 #define QWIFI_QMI_WLANFW_CLIENT_ID 0x4B4E454Cu
 #define QWIFI_QMI_NM_MODEM_SLEEP_CLOCK_INTERNAL 0x02u
 #define QWIFI_QMI_NM_MODEM_HOST_CSTATE 0x04u
 #define QWIFI_QMI_NM_MODEM_PCIE_GLOBAL_RESET 0x08u
 #define QWIFI_QMI_WCN7850_MAX_MLO_PEER 32u
 #define QWIFI_QMI_WCN7850_FEATURE_LIST ((1ull << 3) | (1ull << 4))
+#define QWIFI_QMI_MEM_MAX_SEG 8u
+#define QWIFI_QMI_BDF_CHUNK_BYTES 6144u
+#define QWIFI_QMI_BDF_TYPE_BIN 0u
+#define QWIFI_QMI_BDF_TYPE_ELF 1u
+#define QWIFI_QMI_BDF_TYPE_REGDB 4u
+#define QWIFI_QMI_WCN7850_BOARD_ID_DEFAULT 0xFFu
+#define QWIFI_BOARD2_IE_BOARD 0u
+#define QWIFI_BOARD2_IE_REGDB 1u
+#define QWIFI_BOARD2_SUBIE_NAME 0u
+#define QWIFI_BOARD2_SUBIE_DATA 1u
+#define QWIFI_QMI_FW_MODE_NORMAL 0u
+#define QWIFI_CE_PIPEDIR_NONE 0u
+#define QWIFI_CE_PIPEDIR_IN 1u
+#define QWIFI_CE_PIPEDIR_OUT 2u
+#define QWIFI_CE_PIPEDIR_INOUT 3u
+#define QWIFI_CE_PIPEDIR_INOUT_H2H 4u
+#define QWIFI_CE_ATTR_DIS_INTR 8u
+#define QWIFI_HTC_SVC_WMI_DATA_BE 0x0101u
+#define QWIFI_HTC_SVC_WMI_DATA_BK 0x0102u
+#define QWIFI_HTC_SVC_WMI_DATA_VI 0x0103u
+#define QWIFI_HTC_SVC_WMI_DATA_VO 0x0104u
+#define QWIFI_HTC_SVC_WMI_CONTROL 0x0100u
+#define QWIFI_HTC_SVC_RSVD_CTRL 0x0001u
+#define QWIFI_HTC_SVC_HTT_DATA_MSG 0x0300u
 
 typedef struct __attribute__((packed))
 {
@@ -453,13 +497,41 @@ static uint32_t g_qwifi_cmd_wp_index;
 static uint32_t g_qwifi_event_read_index[QWIFI_MHI_EVENT_RINGS];
 static uint32_t g_qwifi_ipcr_tx_wp_index;
 static uint32_t g_qwifi_ipcr_rx_wp_index;
+static uint64_t g_qwifi_ipcr_bar0_base;
+static uint32_t g_qwifi_ipcr_chdboff;
 static uint32_t g_qwifi_qrtr_remote_node;
 static uint32_t g_qwifi_qrtr_wlan_node;
 static uint32_t g_qwifi_qrtr_wlan_port;
+static uint32_t g_qwifi_qrtr_tx_pending;
 static uint32_t g_qwifi_qmi_phy_cap_resp_seen;
 static uint32_t g_qwifi_qmi_ind_register_resp_seen;
 static uint32_t g_qwifi_qmi_host_cap_resp_seen;
 static uint32_t g_qwifi_qmi_request_mem_ind_seen;
+static uint32_t g_qwifi_qmi_respond_mem_resp_seen;
+static uint32_t g_qwifi_qmi_fw_mem_ready_ind_seen;
+static uint32_t g_qwifi_qmi_fw_ready_ind_seen;
+static uint32_t g_qwifi_qmi_target_cap_resp_seen;
+static uint32_t g_qwifi_qmi_bdf_download_resp_seen;
+static uint32_t g_qwifi_qmi_m3_info_resp_seen;
+static uint32_t g_qwifi_qmi_wlan_ini_resp_seen;
+static uint32_t g_qwifi_qmi_wlan_cfg_resp_seen;
+static uint32_t g_qwifi_qmi_wlan_mode_resp_seen;
+static uint16_t g_qwifi_qmi_last_resp_msg;
+static uint16_t g_qwifi_qmi_last_resp_txn;
+static uint16_t g_qwifi_qmi_last_resp_result;
+static uint16_t g_qwifi_qmi_last_resp_error;
+static uint32_t g_qwifi_target_chip_id;
+static uint32_t g_qwifi_target_chip_family;
+static uint32_t g_qwifi_target_board_id;
+static uint32_t g_qwifi_target_soc_id;
+static uint32_t g_qwifi_mem_seg_count;
+static uint32_t g_qwifi_mem_seg_size[QWIFI_QMI_MEM_MAX_SEG];
+static uint32_t g_qwifi_mem_seg_type[QWIFI_QMI_MEM_MAX_SEG];
+static uint64_t g_qwifi_mem_seg_phys[QWIFI_QMI_MEM_MAX_SEG];
+static void *g_qwifi_mem_seg_virt[QWIFI_QMI_MEM_MAX_SEG];
+static uint64_t g_qwifi_m3_phys;
+static uint32_t g_qwifi_m3_size;
+static void *g_qwifi_m3_virt;
 
 static int pci_probe_config_read32(uint64_t addr, uint32_t *out_value)
 {
@@ -522,6 +594,123 @@ static void qwifi_copy_to_buf(void *dst, const void *src, uint64_t bytes)
 
     for (uint64_t i = 0; i < bytes; ++i)
         d[i] = s[i];
+}
+
+static uint32_t qwifi_cstr_len(const char *s)
+{
+    uint32_t len = 0;
+
+    if (!s)
+        return 0;
+
+    while (s[len])
+        len++;
+    return len;
+}
+
+static int qwifi_bytes_match(const uint8_t *buf, uint32_t len, const char *needle)
+{
+    uint32_t needle_len = qwifi_cstr_len(needle);
+
+    if (!buf || !needle || len < needle_len)
+        return 0;
+
+    for (uint32_t i = 0; i < needle_len; ++i)
+    {
+        if (buf[i] != (uint8_t)needle[i])
+            return 0;
+    }
+
+    return 1;
+}
+
+static int qwifi_ascii_contains(const uint8_t *buf, uint32_t len, const char *needle)
+{
+    uint32_t needle_len = qwifi_cstr_len(needle);
+
+    if (!buf || !needle || !needle_len || len < needle_len)
+        return 0;
+
+    for (uint32_t off = 0; off + needle_len <= len; ++off)
+    {
+        if (qwifi_bytes_match(buf + off, needle_len, needle))
+            return 1;
+    }
+
+    return 0;
+}
+
+static uint32_t qwifi_read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static uint16_t qwifi_read_le16(const uint8_t *p)
+{
+    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static void qwifi_write_le32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)(value & 0xFFu);
+    p[1] = (uint8_t)((value >> 8) & 0xFFu);
+    p[2] = (uint8_t)((value >> 16) & 0xFFu);
+    p[3] = (uint8_t)((value >> 24) & 0xFFu);
+}
+
+static void qwifi_write_le64(uint8_t *p, uint64_t value)
+{
+    for (uint32_t i = 0; i < 8u; ++i)
+        p[i] = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+}
+
+static void qwifi_parse_request_mem_tlv(const uint8_t *value, uint16_t len)
+{
+    uint32_t count;
+    uint32_t off = 1u;
+
+    if (!value || len < 1u)
+        return;
+
+    count = value[0];
+    if (count > QWIFI_QMI_MEM_MAX_SEG)
+        count = QWIFI_QMI_MEM_MAX_SEG;
+
+    g_qwifi_mem_seg_count = 0u;
+    terminal_print("[K:QWIFI] QMI REQUEST_MEM seg_count=");
+    terminal_print_inline_hex64(value[0]);
+    terminal_print(" capped=");
+    terminal_print_inline_hex64(count);
+    terminal_flush_log();
+
+    for (uint32_t i = 0; i < count && off + 9u <= len; ++i)
+    {
+        uint32_t size = qwifi_read_le32(value + off);
+        uint32_t type = qwifi_read_le32(value + off + 4u);
+        uint8_t mem_cfg_len = value[off + 8u];
+        uint32_t skip = 9u + (uint32_t)mem_cfg_len * 13u;
+
+        g_qwifi_mem_seg_size[i] = size;
+        g_qwifi_mem_seg_type[i] = type;
+        g_qwifi_mem_seg_count++;
+
+        terminal_print("[K:QWIFI] QMI REQUEST_MEM seg=");
+        terminal_print_inline_hex64(i);
+        terminal_print(" size=");
+        terminal_print_inline_hex64(size);
+        terminal_print(" type=");
+        terminal_print_inline_hex64(type);
+        terminal_print(" cfg_len=");
+        terminal_print_inline_hex64(mem_cfg_len);
+        terminal_flush_log();
+
+        if (off + skip > len)
+            break;
+        off += skip;
+    }
 }
 
 static int qwifi_mhi_write32(uint64_t bar0_base, uint32_t off, uint32_t value)
@@ -1195,6 +1384,13 @@ static uint32_t qwifi_mhi_find_rx_tre_index(uint64_t tre_pa)
     return (uint32_t)(off / QWIFI_MHI_TRE_BYTES);
 }
 
+static int qwifi_mhi_send_qrtr_resume_tx(uint64_t bar0_base,
+                                         uint32_t chdboff,
+                                         uint32_t remote_node,
+                                         uint32_t remote_port,
+                                         uint32_t local_node,
+                                         uint32_t local_port);
+
 static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *tag)
 {
     const uint8_t *p = (const uint8_t *)buf;
@@ -1242,11 +1438,30 @@ static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *t
         terminal_print_inline_hex64(hdr->dst_node_id);
         terminal_print(":");
         terminal_print_inline_hex64(hdr->dst_port_id);
+        terminal_print(" confirm=");
+        terminal_print_inline_hex64(hdr->confirm_rx);
         terminal_print(" size=");
         terminal_print_inline_hex64(hdr->size);
         terminal_flush_log();
 
-        if (hdr->size >= sizeof(qwifi_qrtr_ctrl_pkt) && len >= sizeof(qwifi_qrtr_hdr_v1) + sizeof(qwifi_qrtr_ctrl_pkt))
+        if (hdr->type == QWIFI_QRTR_TYPE_DATA &&
+            hdr->confirm_rx &&
+            g_qwifi_ipcr_bar0_base &&
+            g_qwifi_ipcr_chdboff)
+        {
+            terminal_print("[K:QWIFI] QRTR DATA confirm_rx; sending RESUME_TX");
+            terminal_flush_log();
+            (void)qwifi_mhi_send_qrtr_resume_tx(g_qwifi_ipcr_bar0_base,
+                                                g_qwifi_ipcr_chdboff,
+                                                hdr->src_node_id,
+                                                hdr->src_port_id,
+                                                hdr->dst_node_id,
+                                                hdr->dst_port_id);
+        }
+
+        if (hdr->type != QWIFI_QRTR_TYPE_DATA &&
+            hdr->size >= sizeof(qwifi_qrtr_ctrl_pkt) &&
+            len >= sizeof(qwifi_qrtr_hdr_v1) + sizeof(qwifi_qrtr_ctrl_pkt))
         {
             const qwifi_qrtr_ctrl_pkt *ctrl = (const qwifi_qrtr_ctrl_pkt *)(p + sizeof(qwifi_qrtr_hdr_v1));
             if (hdr->src_node_id != 0u && hdr->src_node_id != QWIFI_QRTR_NODE_BCAST)
@@ -1274,6 +1489,14 @@ static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *t
                 terminal_print_inline_hex64(ctrl->node);
                 terminal_print(" port=");
                 terminal_print_inline_hex64(ctrl->port);
+            }
+            else if (ctrl->cmd == QWIFI_QRTR_TYPE_RESUME_TX)
+            {
+                terminal_print(" client=");
+                terminal_print_inline_hex64(ctrl->service);
+                terminal_print(":");
+                terminal_print_inline_hex64(ctrl->instance);
+                g_qwifi_qrtr_tx_pending = 0u;
             }
             terminal_flush_log();
 
@@ -1308,6 +1531,14 @@ static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *t
             terminal_print_inline_hex64(qmi->msg_len);
             terminal_flush_log();
 
+            if (qmi->type == QWIFI_QMI_RESPONSE)
+            {
+                g_qwifi_qmi_last_resp_msg = qmi->msg_id;
+                g_qwifi_qmi_last_resp_txn = qmi->txn_id;
+                g_qwifi_qmi_last_resp_result = 0xFFFFu;
+                g_qwifi_qmi_last_resp_error = 0xFFFFu;
+            }
+
             if (qmi->type == QWIFI_QMI_RESPONSE &&
                 qmi->txn_id == QWIFI_QMI_TXN_PHY_CAP &&
                 qmi->msg_id == QWIFI_QMI_WLANFW_PHY_CAP_REQ)
@@ -1339,6 +1570,75 @@ static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *t
                 terminal_print("[K:QWIFI] QMI WLANFW REQUEST_MEM indication seen");
                 terminal_flush_log();
             }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_RESPOND_MEM &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_RESPOND_MEM_REQ)
+            {
+                g_qwifi_qmi_respond_mem_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW RESPOND_MEM response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_INDICATION &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_FW_MEM_READY_IND)
+            {
+                g_qwifi_qmi_fw_mem_ready_ind_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW FW_MEM_READY indication seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_INDICATION &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_FW_READY_IND)
+            {
+                g_qwifi_qmi_fw_ready_ind_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW FW_READY indication seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_TARGET_CAP &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_CAP_REQ)
+            {
+                g_qwifi_qmi_target_cap_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW TARGET_CAP response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_BDF_DOWNLOAD_REQ)
+            {
+                g_qwifi_qmi_bdf_download_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW BDF_DOWNLOAD response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_M3_INFO &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_M3_INFO_REQ)
+            {
+                g_qwifi_qmi_m3_info_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW M3_INFO response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_WLAN_INI &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_WLAN_INI_REQ)
+            {
+                g_qwifi_qmi_wlan_ini_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW WLAN_INI response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_WLAN_CFG &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_WLAN_CFG_REQ)
+            {
+                g_qwifi_qmi_wlan_cfg_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW WLAN_CFG response seen");
+                terminal_flush_log();
+            }
+            if (qmi->type == QWIFI_QMI_RESPONSE &&
+                qmi->txn_id == QWIFI_QMI_TXN_WLAN_MODE &&
+                qmi->msg_id == QWIFI_QMI_WLANFW_WLAN_MODE_REQ)
+            {
+                g_qwifi_qmi_wlan_mode_resp_seen = 1u;
+                terminal_print("[K:QWIFI] QMI WLANFW WLAN_MODE response seen");
+                terminal_flush_log();
+            }
 
             for (uint32_t tlv = 0; payload_off + 3u <= payload_end && payload_off + 3u <= len && tlv < 8u; ++tlv)
             {
@@ -1362,25 +1662,80 @@ static void qwifi_dump_ipcr_payload(const void *buf, uint64_t len, const char *t
                 }
                 if (tlv_len >= 2u)
                 {
-                    uint16_t v16 = (uint16_t)p[value_off] | ((uint16_t)p[value_off + 1u] << 8);
+                    uint16_t v16 = qwifi_read_le16(p + value_off);
                     terminal_print(" v16=");
                     terminal_print_inline_hex64(v16);
                 }
                 if (tlv_len >= 4u)
                 {
-                    uint16_t a = (uint16_t)p[value_off] | ((uint16_t)p[value_off + 1u] << 8);
-                    uint16_t b = (uint16_t)p[value_off + 2u] | ((uint16_t)p[value_off + 3u] << 8);
+                    uint16_t a = qwifi_read_le16(p + value_off);
+                    uint16_t b = qwifi_read_le16(p + value_off + 2u);
                     terminal_print(" v0=");
                     terminal_print_inline_hex64(a);
                     terminal_print(" v1=");
                     terminal_print_inline_hex64(b);
                 }
                 terminal_flush_log();
+                if (qmi->type == QWIFI_QMI_INDICATION &&
+                    qmi->msg_id == QWIFI_QMI_WLANFW_REQUEST_MEM_IND &&
+                    tlv_type == 0x01u)
+                    qwifi_parse_request_mem_tlv(p + value_off, tlv_len);
+                if (qmi->type == QWIFI_QMI_RESPONSE &&
+                    tlv_type == 0x02u &&
+                    tlv_len >= 4u)
+                {
+                    g_qwifi_qmi_last_resp_result = qwifi_read_le16(p + value_off);
+                    g_qwifi_qmi_last_resp_error = qwifi_read_le16(p + value_off + 2u);
+                    terminal_print("[K:QWIFI] QMI resp result msg=");
+                    terminal_print_inline_hex64(qmi->msg_id);
+                    terminal_print(" txn=");
+                    terminal_print_inline_hex64(qmi->txn_id);
+                    terminal_print(" result=");
+                    terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                    terminal_print(" error=");
+                    terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                    terminal_flush_log();
+                }
+                if (qmi->type == QWIFI_QMI_RESPONSE &&
+                    qmi->msg_id == QWIFI_QMI_WLANFW_CAP_REQ &&
+                    tlv_type == 0x10u &&
+                    tlv_len >= 8u)
+                {
+                    g_qwifi_target_chip_id = qwifi_read_le32(p + value_off);
+                    g_qwifi_target_chip_family = qwifi_read_le32(p + value_off + 4u);
+                    terminal_print("[K:QWIFI] TARGET_CAP chip_id=");
+                    terminal_print_inline_hex64(g_qwifi_target_chip_id);
+                    terminal_print(" family=");
+                    terminal_print_inline_hex64(g_qwifi_target_chip_family);
+                    terminal_flush_log();
+                }
+                if (qmi->type == QWIFI_QMI_RESPONSE &&
+                    qmi->msg_id == QWIFI_QMI_WLANFW_CAP_REQ &&
+                    tlv_type == 0x11u &&
+                    tlv_len >= 4u)
+                {
+                    g_qwifi_target_board_id = qwifi_read_le32(p + value_off);
+                    terminal_print("[K:QWIFI] TARGET_CAP board_id=");
+                    terminal_print_inline_hex64(g_qwifi_target_board_id);
+                    terminal_flush_log();
+                }
+                if (qmi->type == QWIFI_QMI_RESPONSE &&
+                    qmi->msg_id == QWIFI_QMI_WLANFW_CAP_REQ &&
+                    tlv_type == 0x12u &&
+                    tlv_len >= 4u)
+                {
+                    g_qwifi_target_soc_id = qwifi_read_le32(p + value_off);
+                    terminal_print("[K:QWIFI] TARGET_CAP soc_id=");
+                    terminal_print_inline_hex64(g_qwifi_target_soc_id);
+                    terminal_flush_log();
+                }
                 payload_off = value_off + tlv_len;
             }
         }
     }
 }
+
+static void qwifi_mhi_repost_ipcr_rx_buf(uint32_t rx_index);
 
 static void qwifi_mhi_dump_ipcr_events(const char *tag)
 {
@@ -1484,6 +1839,7 @@ static void qwifi_mhi_dump_ipcr_events(const char *tag)
             {
                 asm_dma_invalidate_range(g_qwifi_ipcr_rx_bufs[rx_index], QWIFI_MHI_IPCR_RX_BUF_BYTES);
                 qwifi_dump_ipcr_payload(g_qwifi_ipcr_rx_bufs[rx_index], len, "rx");
+                qwifi_mhi_repost_ipcr_rx_buf(rx_index);
             }
             else
             {
@@ -1582,6 +1938,105 @@ static void qwifi_mhi_wait_for_qmi_request_mem_events(const char *stage, uint32_
     qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_request_mem_ind_seen);
 }
 
+static void qwifi_mhi_wait_for_qmi_respond_mem_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_respond_mem_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_fw_mem_ready_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_fw_mem_ready_ind_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_fw_ready_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_fw_ready_ind_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_target_cap_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_target_cap_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_bdf_download_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_bdf_download_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_m3_info_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_m3_info_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_wlan_ini_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_wlan_ini_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_wlan_cfg_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_wlan_cfg_resp_seen);
+}
+
+static void qwifi_mhi_wait_for_qmi_wlan_mode_events(const char *stage, uint32_t rounds)
+{
+    qwifi_mhi_wait_for_ipcr_events_until(stage, rounds, &g_qwifi_qmi_wlan_mode_resp_seen);
+}
+
+static int qwifi_qmi_last_response_ok(uint16_t msg_id, uint16_t txn_id, int check_txn)
+{
+    if (g_qwifi_qmi_last_resp_msg != msg_id)
+        return 0;
+    if (check_txn && g_qwifi_qmi_last_resp_txn != txn_id)
+        return 0;
+    return g_qwifi_qmi_last_resp_result == 0u;
+}
+
+static void qwifi_mhi_repost_ipcr_rx_buf(uint32_t rx_index)
+{
+    qwifi_mhi_ring_element *rx_ring = (qwifi_mhi_ring_element *)g_qwifi_ipcr_rx_ring;
+    void *buf;
+    uint64_t buf_pa;
+    uint64_t rx_ring_pa;
+    uint64_t wp_pa;
+    uint32_t idx;
+    int rc;
+
+    if (!rx_ring || !g_qwifi_chan_ctxt || rx_index >= QWIFI_MHI_IPCR_RX_PREPOST ||
+        !g_qwifi_ipcr_bar0_base || !g_qwifi_ipcr_chdboff)
+        return;
+
+    buf = g_qwifi_ipcr_rx_bufs[rx_index];
+    if (!buf)
+        return;
+
+    buf_pa = pmem_virt_to_phys(buf);
+    qwifi_zero(buf, QWIFI_MHI_IPCR_RX_BUF_BYTES);
+    asm_dma_invalidate_range(buf, QWIFI_MHI_IPCR_RX_BUF_BYTES);
+
+    rx_ring_pa = pmem_virt_to_phys(g_qwifi_ipcr_rx_ring);
+    idx = g_qwifi_ipcr_rx_wp_index % QWIFI_MHI_IPCR_ELEMENTS;
+    rx_ring[idx].ptr = buf_pa;
+    rx_ring[idx].dword0 = QWIFI_MHI_IPCR_RX_BUF_BYTES & 0xFFFFu;
+    rx_ring[idx].dword1 = qwifi_mhi_transfer_dword1();
+    asm_dma_clean_range(&rx_ring[idx], sizeof(rx_ring[idx]));
+
+    g_qwifi_ipcr_rx_wp_index = (g_qwifi_ipcr_rx_wp_index + 1u) % QWIFI_MHI_IPCR_ELEMENTS;
+    wp_pa = rx_ring_pa + (uint64_t)g_qwifi_ipcr_rx_wp_index * QWIFI_MHI_TRE_BYTES;
+    g_qwifi_chan_ctxt[QWIFI_MHI_IPCR_RX_CH].wp = wp_pa;
+    asm_dma_clean_range(&g_qwifi_chan_ctxt[QWIFI_MHI_IPCR_RX_CH], sizeof(g_qwifi_chan_ctxt[0]));
+
+    rc = qwifi_mhi_ring_channel_db(g_qwifi_ipcr_bar0_base, g_qwifi_ipcr_chdboff, QWIFI_MHI_IPCR_RX_CH, wp_pa);
+    if (rc != 0)
+    {
+        terminal_print("[K:QWIFI] IPCR RX repost failed idx=");
+        terminal_print_inline_hex64(rx_index);
+        terminal_print(" rc=");
+        terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+        terminal_flush_log();
+    }
+}
+
 static int qwifi_mhi_queue_ipcr_rx(uint64_t bar0_base, uint32_t chdboff)
 {
     qwifi_mhi_ring_element *rx_ring = (qwifi_mhi_ring_element *)g_qwifi_ipcr_rx_ring;
@@ -1644,6 +2099,21 @@ static uint32_t qwifi_qrtr_dst_node(void)
     return g_qwifi_qrtr_remote_node ? g_qwifi_qrtr_remote_node : QWIFI_QRTR_NODE_BCAST;
 }
 
+static uint32_t qwifi_qrtr_next_confirm_rx(void)
+{
+    if (g_qwifi_qrtr_tx_pending < 0xFFFFFFFFu)
+        g_qwifi_qrtr_tx_pending++;
+
+    if (g_qwifi_qrtr_tx_pending == QWIFI_QRTR_TX_FLOW_LOW)
+        return 1u;
+
+    /*
+     * Linux blocks at the high watermark until RESUME_TX arrives. We cannot
+     * sleep this early in bringup, so keep marking packets as confirmable.
+     */
+    return g_qwifi_qrtr_tx_pending >= QWIFI_QRTR_TX_FLOW_HIGH ? 1u : 0u;
+}
+
 static uint32_t qwifi_build_qrtr_control_to(void *buf,
                                             uint32_t cap,
                                             uint32_t type,
@@ -1674,6 +2144,43 @@ static uint32_t qwifi_build_qrtr_control_to(void *buf,
     ctrl.cmd = type;
     ctrl.service = service;
     ctrl.instance = instance;
+
+    qwifi_copy_to_buf(buf, &hdr, sizeof(hdr));
+    off += sizeof(hdr);
+    qwifi_copy_to_buf((uint8_t *)buf + off, &ctrl, sizeof(ctrl));
+    off += sizeof(ctrl);
+    return off;
+}
+
+static uint32_t qwifi_build_qrtr_resume_tx(void *buf,
+                                           uint32_t cap,
+                                           uint32_t remote_node,
+                                           uint32_t remote_port,
+                                           uint32_t local_node,
+                                           uint32_t local_port)
+{
+    qwifi_qrtr_hdr_v1 hdr;
+    qwifi_qrtr_ctrl_pkt ctrl;
+    uint32_t off = 0;
+
+    if (!buf || cap < sizeof(hdr) + sizeof(ctrl))
+        return 0;
+
+    qwifi_zero(&hdr, sizeof(hdr));
+    qwifi_zero(&ctrl, sizeof(ctrl));
+
+    hdr.version = QWIFI_QRTR_PROTO_VER_1;
+    hdr.type = QWIFI_QRTR_TYPE_RESUME_TX;
+    hdr.src_node_id = local_node;
+    hdr.src_port_id = local_port;
+    hdr.confirm_rx = 0u;
+    hdr.size = sizeof(ctrl);
+    hdr.dst_node_id = remote_node;
+    hdr.dst_port_id = remote_port;
+
+    ctrl.cmd = QWIFI_QRTR_TYPE_RESUME_TX;
+    ctrl.service = local_node;
+    ctrl.instance = local_port;
 
     qwifi_copy_to_buf(buf, &hdr, sizeof(hdr));
     off += sizeof(hdr);
@@ -1773,6 +2280,88 @@ static int qwifi_mhi_send_qrtr_control_to(uint64_t bar0_base,
     return rc == 0;
 }
 
+static int qwifi_mhi_send_qrtr_resume_tx(uint64_t bar0_base,
+                                         uint32_t chdboff,
+                                         uint32_t remote_node,
+                                         uint32_t remote_port,
+                                         uint32_t local_node,
+                                         uint32_t local_port)
+{
+    qwifi_mhi_ring_element *tx_ring = (qwifi_mhi_ring_element *)g_qwifi_ipcr_tx_ring;
+    uint64_t tx_ring_pa;
+    uint64_t wp_pa;
+    void *packet;
+    uint64_t packet_pa;
+    uint32_t len;
+    uint32_t idx;
+    int rc;
+
+    if (!tx_ring || !g_qwifi_chan_ctxt || !remote_node || !remote_port)
+        return 0;
+
+    packet = pmem_alloc_pages_lowdma(qwifi_pages_for(QWIFI_MHI_IPCR_TX_BUF_BYTES));
+    if (!packet)
+    {
+        terminal_print("[K:QWIFI] QRTR RESUME_TX alloc failed");
+        terminal_flush_log();
+        return 0;
+    }
+
+    qwifi_zero(packet, QWIFI_MHI_IPCR_TX_BUF_BYTES);
+    len = qwifi_build_qrtr_resume_tx(packet,
+                                     QWIFI_MHI_IPCR_TX_BUF_BYTES,
+                                     remote_node,
+                                     remote_port,
+                                     local_node,
+                                     local_port);
+    if (!len)
+    {
+        terminal_print("[K:QWIFI] QRTR RESUME_TX build failed");
+        terminal_flush_log();
+        return 0;
+    }
+
+    packet_pa = pmem_virt_to_phys(packet);
+    asm_dma_clean_range(packet, len);
+
+    tx_ring_pa = pmem_virt_to_phys(g_qwifi_ipcr_tx_ring);
+    idx = g_qwifi_ipcr_tx_wp_index % QWIFI_MHI_IPCR_ELEMENTS;
+    tx_ring[idx].ptr = packet_pa;
+    tx_ring[idx].dword0 = len & 0xFFFFu;
+    tx_ring[idx].dword1 = qwifi_mhi_transfer_dword1();
+    asm_dma_clean_range(&tx_ring[idx], sizeof(tx_ring[idx]));
+
+    g_qwifi_ipcr_tx_wp_index = (g_qwifi_ipcr_tx_wp_index + 1u) % QWIFI_MHI_IPCR_ELEMENTS;
+    wp_pa = tx_ring_pa + (uint64_t)g_qwifi_ipcr_tx_wp_index * QWIFI_MHI_TRE_BYTES;
+    g_qwifi_chan_ctxt[QWIFI_MHI_IPCR_TX_CH].wp = wp_pa;
+    asm_dma_clean_range(&g_qwifi_chan_ctxt[QWIFI_MHI_IPCR_TX_CH], sizeof(g_qwifi_chan_ctxt[0]));
+
+    terminal_print("[K:QWIFI] QRTR RESUME_TX tx_pa=");
+    terminal_print_inline_hex64(packet_pa);
+    terminal_print(" len=");
+    terminal_print_inline_hex64(len);
+    terminal_print(" idx=");
+    terminal_print_inline_hex64(idx);
+    terminal_print(" local=");
+    terminal_print_inline_hex64(local_node);
+    terminal_print(":");
+    terminal_print_inline_hex64(local_port);
+    terminal_print(" remote=");
+    terminal_print_inline_hex64(remote_node);
+    terminal_print(":");
+    terminal_print_inline_hex64(remote_port);
+    terminal_flush_log();
+
+    rc = qwifi_mhi_ring_channel_db(bar0_base, chdboff, QWIFI_MHI_IPCR_TX_CH, wp_pa);
+    terminal_print("[K:QWIFI] QRTR RESUME_TX doorbell wp=");
+    terminal_print_inline_hex64(wp_pa);
+    terminal_print(" rc=");
+    terminal_print_inline_hex64((uint64_t)(int64_t)rc);
+    terminal_flush_log();
+
+    return rc == 0;
+}
+
 static uint32_t qwifi_build_qrtr_qmi_request(void *buf,
                                              uint32_t cap,
                                              uint16_t msg_id,
@@ -1795,7 +2384,7 @@ static uint32_t qwifi_build_qrtr_qmi_request(void *buf,
     hdr.type = QWIFI_QRTR_TYPE_DATA;
     hdr.src_node_id = QWIFI_QRTR_LOCAL_NODE;
     hdr.src_port_id = QWIFI_QRTR_LOCAL_PORT;
-    hdr.confirm_rx = 0u;
+    hdr.confirm_rx = qwifi_qrtr_next_confirm_rx();
     hdr.size = sizeof(qmi) + payload_len;
     hdr.dst_node_id = g_qwifi_qrtr_wlan_node;
     hdr.dst_port_id = g_qwifi_qrtr_wlan_port;
@@ -1883,6 +2472,58 @@ static uint32_t qwifi_qmi_put_tlv_bytes(uint8_t *buf,
     return off;
 }
 
+static uint32_t qwifi_qmi_put_tlv_string(uint8_t *buf,
+                                         uint32_t cap,
+                                         uint32_t off,
+                                         uint8_t type,
+                                         const char *value)
+{
+    return qwifi_qmi_put_tlv_bytes(buf, cap, off, type, (const uint8_t *)value, (uint16_t)qwifi_cstr_len(value));
+}
+
+static uint32_t qwifi_qmi_put_tlv_data_u16_len(uint8_t *buf,
+                                               uint32_t cap,
+                                               uint32_t off,
+                                               uint8_t type,
+                                               const uint8_t *value,
+                                               uint16_t len)
+{
+    if (!buf || (!value && len) || off + 5u + len > cap)
+        return 0;
+
+    buf[off++] = type;
+    buf[off++] = (uint8_t)((len + 2u) & 0xFFu);
+    buf[off++] = (uint8_t)(((len + 2u) >> 8) & 0xFFu);
+    buf[off++] = (uint8_t)(len & 0xFFu);
+    buf[off++] = (uint8_t)((len >> 8) & 0xFFu);
+    for (uint16_t i = 0; i < len; ++i)
+        buf[off++] = value[i];
+    return off;
+}
+
+static uint32_t qwifi_qmi_put_tlv_records_u8_len(uint8_t *buf,
+                                                 uint32_t cap,
+                                                 uint32_t off,
+                                                 uint8_t type,
+                                                 const uint8_t *records,
+                                                 uint8_t count,
+                                                 uint8_t record_bytes)
+{
+    uint32_t data_len = (uint32_t)count * (uint32_t)record_bytes;
+    uint32_t value_len = 1u + data_len;
+
+    if (!buf || (!records && data_len) || off + 3u + value_len > cap)
+        return 0;
+
+    buf[off++] = type;
+    buf[off++] = (uint8_t)(value_len & 0xFFu);
+    buf[off++] = (uint8_t)((value_len >> 8) & 0xFFu);
+    buf[off++] = count;
+    for (uint32_t i = 0; i < data_len; ++i)
+        buf[off++] = records[i];
+    return off;
+}
+
 static uint16_t qwifi_build_ind_register_payload(uint8_t *buf, uint32_t cap)
 {
     uint32_t off = 0;
@@ -1966,6 +2607,641 @@ static uint16_t qwifi_build_host_cap_payload(uint8_t *buf, uint32_t cap)
     return (uint16_t)off;
 }
 
+static int qwifi_alloc_requested_mem_segments(void)
+{
+    if (!g_qwifi_mem_seg_count || g_qwifi_mem_seg_count > QWIFI_QMI_MEM_MAX_SEG)
+        return 0;
+
+    for (uint32_t i = 0; i < g_qwifi_mem_seg_count; ++i)
+    {
+        uint32_t size = g_qwifi_mem_seg_size[i];
+        void *buf;
+
+        if (!size)
+            return 0;
+
+        if (!g_qwifi_mem_seg_virt[i])
+        {
+            buf = pmem_alloc_pages_lowdma(qwifi_pages_for(size));
+            if (!buf)
+            {
+                terminal_print("[K:QWIFI] REQUEST_MEM alloc failed seg=");
+                terminal_print_inline_hex64(i);
+                terminal_print(" size=");
+                terminal_print_inline_hex64(size);
+                terminal_flush_log();
+                return 0;
+            }
+
+            qwifi_zero(buf, qwifi_pages_for(size) << 12);
+            asm_dma_clean_range(buf, qwifi_pages_for(size) << 12);
+            g_qwifi_mem_seg_virt[i] = buf;
+            g_qwifi_mem_seg_phys[i] = pmem_virt_to_phys(buf);
+        }
+
+        terminal_print("[K:QWIFI] REQUEST_MEM alloc seg=");
+        terminal_print_inline_hex64(i);
+        terminal_print(" pa=");
+        terminal_print_inline_hex64(g_qwifi_mem_seg_phys[i]);
+        terminal_print(" size=");
+        terminal_print_inline_hex64(size);
+        terminal_print(" type=");
+        terminal_print_inline_hex64(g_qwifi_mem_seg_type[i]);
+        terminal_flush_log();
+    }
+
+    return 1;
+}
+
+static uint16_t qwifi_build_respond_mem_payload(uint8_t *buf, uint32_t cap)
+{
+    uint32_t count = g_qwifi_mem_seg_count;
+    uint32_t value_len = 1u + count * 17u;
+    uint32_t off = 0;
+
+    if (!buf || !count || count > QWIFI_QMI_MEM_MAX_SEG || cap < 3u + value_len)
+        return 0;
+
+    buf[off++] = 0x01u;
+    buf[off++] = (uint8_t)(value_len & 0xFFu);
+    buf[off++] = (uint8_t)((value_len >> 8) & 0xFFu);
+    buf[off++] = (uint8_t)count;
+
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        qwifi_write_le64(buf + off, g_qwifi_mem_seg_phys[i]);
+        off += 8u;
+        qwifi_write_le32(buf + off, g_qwifi_mem_seg_size[i]);
+        off += 4u;
+        qwifi_write_le32(buf + off, g_qwifi_mem_seg_type[i]);
+        off += 4u;
+        buf[off++] = 0u; /* restore: fresh memory, not a restored target dump */
+    }
+
+    return (uint16_t)off;
+}
+
+static int qwifi_mhi_send_qmi_request(uint64_t bar0_base,
+                                      uint32_t chdboff,
+                                      uint16_t msg_id,
+                                      uint16_t txn_id,
+                                      const void *payload,
+                                      uint16_t payload_len,
+                                      const char *label);
+
+typedef struct
+{
+    const uint8_t *data;
+    uint32_t len;
+    uint8_t bdf_type;
+    uint32_t name_len;
+    const char *selected_name;
+    uint32_t rank;
+} qwifi_board_match;
+
+static uint32_t qwifi_align4(uint32_t value)
+{
+    return (value + 3u) & ~3u;
+}
+
+static int qwifi_board_name_matches_wcn7850_lenovo(const uint8_t *name, uint32_t name_len)
+{
+    return qwifi_ascii_contains(name, name_len, "bus=pci") &&
+           qwifi_ascii_contains(name, name_len, "vendor=17cb") &&
+           qwifi_ascii_contains(name, name_len, "device=1107") &&
+           qwifi_ascii_contains(name, name_len, "subsystem-vendor=17aa") &&
+           qwifi_ascii_contains(name, name_len, "subsystem-device=e0e9") &&
+           qwifi_ascii_contains(name, name_len, "qmi-chip-id=2") &&
+           qwifi_ascii_contains(name, name_len, "qmi-board-id=255");
+}
+
+static uint32_t qwifi_board_name_preferred_rank(const uint8_t *name, uint32_t name_len, const char **selected_name)
+{
+    if (selected_name)
+        *selected_name = "fallback";
+
+    if (qwifi_ascii_contains(name, name_len, "variant=LE_C590"))
+    {
+        if (selected_name)
+            *selected_name = "variant=LE_C590";
+        return 3u;
+    }
+
+    if (qwifi_ascii_contains(name, name_len, "variant=LES790"))
+    {
+        if (selected_name)
+            *selected_name = "variant=LES790";
+        return 2u;
+    }
+
+    if (qwifi_ascii_contains(name, name_len, "variant=LE_Altai"))
+    {
+        if (selected_name)
+            *selected_name = "variant=LE_Altai";
+        return 1u;
+    }
+
+    return 0u;
+}
+
+static int qwifi_board_name_matches_regdb(const uint8_t *name, uint32_t name_len)
+{
+    return (name_len == 7u && qwifi_bytes_match(name, name_len, "bus=pci")) ||
+           qwifi_board_name_matches_wcn7850_lenovo(name, name_len);
+}
+
+static void qwifi_store_board_match(qwifi_board_match *match,
+                                    const uint8_t *data,
+                                    uint32_t data_len,
+                                    uint8_t bdf_type,
+                                    uint32_t name_len,
+                                    const char *selected_name,
+                                    uint32_t rank)
+{
+    match->data = data;
+    match->len = data_len;
+    match->bdf_type = bdf_type;
+    match->name_len = name_len;
+    match->selected_name = selected_name ? selected_name : "fallback";
+    match->rank = rank;
+}
+
+static int qwifi_find_wcn7850_board2_ie(const boot_info *bi,
+                                        uint32_t wanted_ie,
+                                        qwifi_board_match *match)
+{
+    uint64_t board_phys = 0;
+    uint64_t board_size64 = 0;
+    const uint8_t *board;
+    uint32_t board_size;
+    uint32_t off;
+    int have_fallback = 0;
+
+    if (!match)
+        return 0;
+
+    match->data = 0;
+    match->len = 0;
+    match->bdf_type = QWIFI_QMI_BDF_TYPE_ELF;
+    match->name_len = 0;
+    match->selected_name = "none";
+    match->rank = 0u;
+
+    if (!qwifi_get_fw_blob(bi, BOOTINFO_WIFI_FW_BOARD, &board_phys, &board_size64) ||
+        !board_phys || board_size64 < 0x30u || board_size64 > 0xFFFFFFFFull)
+    {
+        terminal_print("[K:QWIFI] BDF lookup skipped: board-2 firmware missing/invalid");
+        terminal_flush_log();
+        return 0;
+    }
+
+    board = (const uint8_t *)pmem_phys_to_virt(board_phys);
+    board_size = (uint32_t)board_size64;
+    if (!board || !qwifi_bytes_match(board, 16u, "QCA-ATH12K-BOARD"))
+    {
+        terminal_print("[K:QWIFI] BDF lookup skipped: board-2 magic mismatch");
+        terminal_flush_log();
+        return 0;
+    }
+
+    off = qwifi_align4(qwifi_cstr_len("QCA-ATH12K-BOARD") + 1u);
+    while (off + 8u <= board_size)
+    {
+        uint32_t ie_id = qwifi_read_le32(board + off);
+        uint32_t ie_len = qwifi_read_le32(board + off + 4u);
+        uint32_t ie_data = off + 8u;
+        uint32_t ie_end;
+        uint32_t sub;
+        const uint8_t *name = 0;
+        uint32_t name_len = 0;
+
+        if (ie_len > board_size - ie_data)
+            break;
+
+        ie_end = ie_data + ie_len;
+        if (ie_id != wanted_ie)
+        {
+            off = ie_data + qwifi_align4(ie_len);
+            continue;
+        }
+
+        sub = ie_data;
+        while (sub + 8u <= ie_end)
+        {
+            uint32_t sub_id = qwifi_read_le32(board + sub);
+            uint32_t sub_len = qwifi_read_le32(board + sub + 4u);
+            uint32_t sub_data = sub + 8u;
+            int name_matches = 0;
+
+            if (sub_len > ie_end - sub_data)
+                break;
+
+            if (sub_id == QWIFI_BOARD2_SUBIE_NAME)
+            {
+                name = board + sub_data;
+                name_len = sub_len;
+            }
+            else if (sub_id == QWIFI_BOARD2_SUBIE_DATA && name && name_len)
+            {
+                if (wanted_ie == QWIFI_BOARD2_IE_BOARD)
+                    name_matches = qwifi_board_name_matches_wcn7850_lenovo(name, name_len);
+                else if (wanted_ie == QWIFI_BOARD2_IE_REGDB)
+                    name_matches = qwifi_board_name_matches_regdb(name, name_len);
+
+                if (name_matches)
+                {
+                    const char *selected_name = "fallback";
+                    uint8_t bdf_type;
+                    uint32_t rank;
+
+                    if (wanted_ie == QWIFI_BOARD2_IE_REGDB)
+                    {
+                        bdf_type = QWIFI_QMI_BDF_TYPE_REGDB;
+                        rank = (name_len == 7u && qwifi_bytes_match(name, name_len, "bus=pci")) ? 1u : 2u;
+                        selected_name = (rank == 1u) ? "regdb=bus=pci" : "regdb=device";
+                    }
+                    else
+                    {
+                        bdf_type = (uint8_t)((sub_len >= 4u && qwifi_bytes_match(board + sub_data, 4u, "\x7F""ELF")) ?
+                                             QWIFI_QMI_BDF_TYPE_ELF :
+                                             QWIFI_QMI_BDF_TYPE_BIN);
+                        rank = qwifi_board_name_preferred_rank(name, name_len, &selected_name);
+                    }
+
+                    if (!have_fallback || rank >= match->rank)
+                    {
+                        qwifi_store_board_match(match,
+                                                board + sub_data,
+                                                sub_len,
+                                                bdf_type,
+                                                name_len,
+                                                selected_name,
+                                                rank);
+                        have_fallback = 1;
+                    }
+                }
+            }
+
+            sub = sub_data + qwifi_align4(sub_len);
+        }
+
+        off = ie_data + qwifi_align4(ie_len);
+    }
+
+    if (have_fallback)
+    {
+        terminal_print("[K:QWIFI] board-2 match ");
+        terminal_print(match->selected_name);
+        terminal_print(" len=");
+        terminal_print_inline_hex64(match->len);
+        terminal_print(" type=");
+        terminal_print_inline_hex64(match->bdf_type);
+        terminal_print(" name_len=");
+        terminal_print_inline_hex64(match->name_len);
+        terminal_print(" rank=");
+        terminal_print_inline_hex64(match->rank);
+        terminal_flush_log();
+        return 1;
+    }
+
+    terminal_print("[K:QWIFI] board-2 match missing ie=");
+    terminal_print_inline_hex64(wanted_ie);
+    terminal_flush_log();
+    return 0;
+}
+
+static int qwifi_find_wcn7850_regdb_data(const boot_info *bi, qwifi_board_match *match)
+{
+    return qwifi_find_wcn7850_board2_ie(bi, QWIFI_BOARD2_IE_REGDB, match);
+}
+
+static int qwifi_find_wcn7850_board_data(const boot_info *bi, qwifi_board_match *match)
+{
+    return qwifi_find_wcn7850_board2_ie(bi, QWIFI_BOARD2_IE_BOARD, match);
+}
+
+static uint16_t qwifi_build_bdf_download_payload(uint8_t *buf,
+                                                 uint32_t cap,
+                                                 const uint8_t *data,
+                                                 uint32_t remaining,
+                                                 uint32_t seg_id,
+                                                 uint16_t chunk_len,
+                                                 uint8_t end,
+                                                 uint8_t bdf_type)
+{
+    uint32_t off = 0;
+    uint32_t file_id = g_qwifi_target_board_id ? g_qwifi_target_board_id : QWIFI_QMI_WCN7850_BOARD_ID_DEFAULT;
+
+    if (!buf || (!data && chunk_len))
+        return 0;
+
+    off = qwifi_qmi_put_tlv_u8(buf, cap, off, 0x01u, 1u);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u32(buf, cap, off, 0x10u, file_id);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u32(buf, cap, off, 0x11u, remaining);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u32(buf, cap, off, 0x12u, seg_id);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_data_u16_len(buf, cap, off, 0x13u, data, chunk_len);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u8(buf, cap, off, 0x14u, end);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u8(buf, cap, off, 0x15u, bdf_type);
+    return (uint16_t)off;
+}
+
+static int qwifi_send_bdf_match_download(uint64_t bar0_base,
+                                         uint32_t chdboff,
+                                         const qwifi_board_match *match,
+                                         const char *label)
+{
+    uint32_t sent = 0;
+    uint32_t seg_id = 0;
+
+    if (!match || !match->data || !match->len)
+        return 0;
+
+    terminal_print("[K:QWIFI] ");
+    terminal_print(label ? label : "BDF");
+    terminal_print(" download begin total=");
+    terminal_print_inline_hex64(match->len);
+    terminal_print(" type=");
+    terminal_print_inline_hex64(match->bdf_type);
+    terminal_print(" board_id=");
+    terminal_print_inline_hex64(g_qwifi_target_board_id ? g_qwifi_target_board_id : QWIFI_QMI_WCN7850_BOARD_ID_DEFAULT);
+    terminal_flush_log();
+
+    while (sent < match->len)
+    {
+        static uint8_t payload[QWIFI_QMI_BDF_CHUNK_BYTES + 64u];
+        uint32_t remaining = match->len - sent;
+        uint16_t chunk = (uint16_t)((remaining > QWIFI_QMI_BDF_CHUNK_BYTES) ? QWIFI_QMI_BDF_CHUNK_BYTES : remaining);
+        uint16_t payload_len;
+        uint16_t txn_id = (uint16_t)(QWIFI_QMI_TXN_BDF_DOWNLOAD + seg_id);
+        uint8_t end = (chunk == remaining) ? 1u : 0u;
+
+        qwifi_zero(payload, sizeof(payload));
+        payload_len = qwifi_build_bdf_download_payload(payload,
+                                                       sizeof(payload),
+                                                       match->data + sent,
+                                                       remaining,
+                                                       seg_id,
+                                                       chunk,
+                                                       end,
+                                                       match->bdf_type);
+        if (!payload_len)
+        {
+            terminal_print("[K:QWIFI] ");
+            terminal_print(label ? label : "BDF");
+            terminal_print(" payload build failed seg=");
+            terminal_print_inline_hex64(seg_id);
+            terminal_flush_log();
+            return 0;
+        }
+
+        terminal_print("[K:QWIFI] ");
+        terminal_print(label ? label : "BDF");
+        terminal_print(" chunk seg=");
+        terminal_print_inline_hex64(seg_id);
+        terminal_print(" off=");
+        terminal_print_inline_hex64(sent);
+        terminal_print(" chunk=");
+        terminal_print_inline_hex64(chunk);
+        terminal_print(" remaining=");
+        terminal_print_inline_hex64(remaining);
+        terminal_print(" end=");
+        terminal_print_inline_hex64(end);
+        terminal_print(" txn=");
+        terminal_print_inline_hex64(txn_id);
+        terminal_flush_log();
+
+        g_qwifi_qmi_bdf_download_resp_seen = 0u;
+        if (!qwifi_mhi_send_qmi_request(bar0_base,
+                                        chdboff,
+                                        QWIFI_QMI_WLANFW_BDF_DOWNLOAD_REQ,
+                                        txn_id,
+                                        payload,
+                                        payload_len,
+                                        label ? label : "WLANFW_BDF_DOWNLOAD_REQ"))
+            return 0;
+
+        qwifi_mhi_wait_for_qmi_bdf_download_events("after-qmi-bdf", 2048u);
+        if (!g_qwifi_qmi_bdf_download_resp_seen ||
+            !qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_BDF_DOWNLOAD_REQ,
+                                        txn_id,
+                                        1))
+        {
+            terminal_print("[K:QWIFI] ");
+            terminal_print(label ? label : "BDF");
+            terminal_print(" chunk rejected/timeout seg=");
+            terminal_print_inline_hex64(seg_id);
+            terminal_print(" result=");
+            terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+            terminal_print(" error=");
+            terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+            terminal_flush_log();
+            g_qwifi_qmi_bdf_download_resp_seen = 0u;
+            return 0;
+        }
+
+        for (uint32_t pace = 0; pace < 4u; ++pace)
+            short_delay();
+
+        sent += chunk;
+        seg_id++;
+    }
+
+    terminal_print("[K:QWIFI] ");
+    terminal_print(label ? label : "BDF");
+    terminal_print(" download complete chunks=");
+    terminal_print_inline_hex64(seg_id);
+    terminal_flush_log();
+    return 1;
+}
+
+static int qwifi_send_regdb_download(uint64_t bar0_base, uint32_t chdboff, const boot_info *bi)
+{
+    qwifi_board_match match;
+
+    if (!qwifi_find_wcn7850_regdb_data(bi, &match) || !match.data || !match.len)
+    {
+        terminal_print("[K:QWIFI] REGDB download skipped: no board-2 regdb match");
+        terminal_flush_log();
+        return 0;
+    }
+
+    return qwifi_send_bdf_match_download(bar0_base, chdboff, &match, "REGDB");
+}
+
+static int qwifi_send_bdf_download(uint64_t bar0_base, uint32_t chdboff, const boot_info *bi)
+{
+    qwifi_board_match match;
+
+    if (!qwifi_find_wcn7850_board_data(bi, &match) || !match.data || !match.len)
+        return 0;
+
+    return qwifi_send_bdf_match_download(bar0_base, chdboff, &match, "BDF");
+}
+
+static int qwifi_prepare_m3_blob(const boot_info *bi, uint64_t *m3_phys, uint32_t *m3_size)
+{
+    uint64_t src_phys = 0;
+    uint64_t src_size = 0;
+
+    if (!m3_phys || !m3_size)
+        return 0;
+
+    if (g_qwifi_m3_phys && g_qwifi_m3_size)
+    {
+        *m3_phys = g_qwifi_m3_phys;
+        *m3_size = g_qwifi_m3_size;
+        return 1;
+    }
+
+    if (!qwifi_get_fw_blob(bi, BOOTINFO_WIFI_FW_M3, &src_phys, &src_size) ||
+        !src_phys || !src_size || src_size > 0xFFFFFFFFull)
+    {
+        terminal_print("[K:QWIFI] M3 skipped: m3 firmware missing/invalid");
+        terminal_flush_log();
+        return 0;
+    }
+
+    g_qwifi_m3_virt = pmem_alloc_pages_lowdma(qwifi_pages_for(src_size));
+    if (!g_qwifi_m3_virt)
+    {
+        terminal_print("[K:QWIFI] M3 alloc failed size=");
+        terminal_print_inline_hex64(src_size);
+        terminal_flush_log();
+        return 0;
+    }
+
+    qwifi_zero(g_qwifi_m3_virt, qwifi_pages_for(src_size) << 12);
+    qwifi_copy_from_phys(g_qwifi_m3_virt, src_phys, src_size);
+    asm_dma_clean_range(g_qwifi_m3_virt, qwifi_pages_for(src_size) << 12);
+    g_qwifi_m3_phys = pmem_virt_to_phys(g_qwifi_m3_virt);
+    g_qwifi_m3_size = (uint32_t)src_size;
+
+    terminal_print("[K:QWIFI] M3 prepared pa=");
+    terminal_print_inline_hex64(g_qwifi_m3_phys);
+    terminal_print(" size=");
+    terminal_print_inline_hex64(g_qwifi_m3_size);
+    terminal_flush_log();
+
+    *m3_phys = g_qwifi_m3_phys;
+    *m3_size = g_qwifi_m3_size;
+    return 1;
+}
+
+static uint16_t qwifi_build_m3_info_payload(uint8_t *buf, uint32_t cap, uint64_t m3_phys, uint32_t m3_size)
+{
+    uint32_t off = 0;
+
+    off = qwifi_qmi_put_tlv_u64(buf, cap, off, 0x01u, m3_phys);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u32(buf, cap, off, 0x02u, m3_size);
+    return (uint16_t)off;
+}
+
+static void qwifi_put_record_u32(uint8_t *buf, uint32_t *off, uint32_t value)
+{
+    qwifi_write_le32(buf + *off, value);
+    *off += 4u;
+}
+
+static uint16_t qwifi_build_wlan_cfg_payload(uint8_t *buf, uint32_t cap)
+{
+    static const uint32_t ce_cfg[][5] = {
+        {0u, QWIFI_CE_PIPEDIR_OUT, 32u, 2048u, 0u},
+        {1u, QWIFI_CE_PIPEDIR_IN, 32u, 2048u, 0u},
+        {2u, QWIFI_CE_PIPEDIR_IN, 32u, 2048u, 0u},
+        {3u, QWIFI_CE_PIPEDIR_OUT, 32u, 2048u, 0u},
+        {4u, QWIFI_CE_PIPEDIR_OUT, 256u, 256u, QWIFI_CE_ATTR_DIS_INTR},
+        {5u, QWIFI_CE_PIPEDIR_IN, 32u, 2048u, 0u},
+        {6u, QWIFI_CE_PIPEDIR_INOUT, 32u, 16384u, 0u},
+        {7u, QWIFI_CE_PIPEDIR_INOUT_H2H, 0u, 0u, QWIFI_CE_ATTR_DIS_INTR},
+        {8u, QWIFI_CE_PIPEDIR_INOUT, 32u, 16384u, 0u},
+    };
+    static const uint32_t svc_cfg[][3] = {
+        {QWIFI_HTC_SVC_WMI_DATA_VO, QWIFI_CE_PIPEDIR_OUT, 3u},
+        {QWIFI_HTC_SVC_WMI_DATA_VO, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_WMI_DATA_BK, QWIFI_CE_PIPEDIR_OUT, 3u},
+        {QWIFI_HTC_SVC_WMI_DATA_BK, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_WMI_DATA_BE, QWIFI_CE_PIPEDIR_OUT, 3u},
+        {QWIFI_HTC_SVC_WMI_DATA_BE, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_WMI_DATA_VI, QWIFI_CE_PIPEDIR_OUT, 3u},
+        {QWIFI_HTC_SVC_WMI_DATA_VI, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_WMI_CONTROL, QWIFI_CE_PIPEDIR_OUT, 3u},
+        {QWIFI_HTC_SVC_WMI_CONTROL, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_RSVD_CTRL, QWIFI_CE_PIPEDIR_OUT, 0u},
+        {QWIFI_HTC_SVC_RSVD_CTRL, QWIFI_CE_PIPEDIR_IN, 2u},
+        {QWIFI_HTC_SVC_HTT_DATA_MSG, QWIFI_CE_PIPEDIR_OUT, 4u},
+        {QWIFI_HTC_SVC_HTT_DATA_MSG, QWIFI_CE_PIPEDIR_IN, 1u},
+        {0u, 0u, 0u},
+    };
+    uint8_t ce_records[sizeof(ce_cfg)];
+    uint8_t svc_records[sizeof(svc_cfg)];
+    uint32_t rec_off = 0;
+    uint32_t off = 0;
+
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(ce_cfg) / sizeof(ce_cfg[0])); ++i)
+    {
+        for (uint32_t j = 0; j < 5u; ++j)
+            qwifi_put_record_u32(ce_records, &rec_off, ce_cfg[i][j]);
+    }
+
+    rec_off = 0;
+    for (uint32_t i = 0; i < (uint32_t)(sizeof(svc_cfg) / sizeof(svc_cfg[0])); ++i)
+    {
+        for (uint32_t j = 0; j < 3u; ++j)
+            qwifi_put_record_u32(svc_records, &rec_off, svc_cfg[i][j]);
+    }
+
+    off = qwifi_qmi_put_tlv_string(buf, cap, off, 0x10u, "WIN");
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_records_u8_len(buf,
+                                           cap,
+                                           off,
+                                           0x11u,
+                                           ce_records,
+                                           (uint8_t)(sizeof(ce_cfg) / sizeof(ce_cfg[0])),
+                                           20u);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_records_u8_len(buf,
+                                           cap,
+                                           off,
+                                           0x12u,
+                                           svc_records,
+                                           (uint8_t)(sizeof(svc_cfg) / sizeof(svc_cfg[0])),
+                                           12u);
+    return (uint16_t)off;
+}
+
+static uint16_t qwifi_build_wlan_ini_payload(uint8_t *buf, uint32_t cap)
+{
+    return (uint16_t)qwifi_qmi_put_tlv_u8(buf, cap, 0u, 0x10u, 1u);
+}
+
+static uint16_t qwifi_build_wlan_mode_payload(uint8_t *buf, uint32_t cap)
+{
+    uint32_t off = 0;
+
+    off = qwifi_qmi_put_tlv_u32(buf, cap, off, 0x01u, QWIFI_QMI_FW_MODE_NORMAL);
+    if (!off)
+        return 0;
+    off = qwifi_qmi_put_tlv_u8(buf, cap, off, 0x10u, 0u); /* hw_debug */
+    return (uint16_t)off;
+}
+
 static int qwifi_mhi_send_qmi_request(uint64_t bar0_base,
                                       uint32_t chdboff,
                                       uint16_t msg_id,
@@ -2041,6 +3317,10 @@ static int qwifi_mhi_send_qmi_request(uint64_t bar0_base,
     terminal_print_inline_hex64(len);
     terminal_print(" tx_len=");
     terminal_print_inline_hex64(tx_len);
+    terminal_print(" pending=");
+    terminal_print_inline_hex64(g_qwifi_qrtr_tx_pending);
+    terminal_print(" confirm=");
+    terminal_print_inline_hex64(((const qwifi_qrtr_hdr_v1 *)packet)->confirm_rx);
     terminal_print(" idx=");
     terminal_print_inline_hex64(idx);
     terminal_flush_log();
@@ -2094,7 +3374,7 @@ static int qwifi_mhi_send_qrtr_lookup(uint64_t bar0_base, uint32_t chdboff)
                                        "NEW_LOOKUP");
 }
 
-static void qwifi_mhi_probe_qrtr_wlanfw(uint64_t bar0_base, uint32_t chdboff)
+static void qwifi_mhi_probe_qrtr_wlanfw(uint64_t bar0_base, uint32_t chdboff, const boot_info *bi)
 {
     if (!qwifi_mhi_queue_ipcr_rx(bar0_base, chdboff))
     {
@@ -2198,9 +3478,259 @@ static void qwifi_mhi_probe_qrtr_wlanfw(uint64_t bar0_base, uint32_t chdboff)
             }
         }
     }
+
+    if (g_qwifi_qmi_request_mem_ind_seen)
+    {
+        uint8_t mem_payload[192];
+        uint16_t mem_len = 0;
+
+        if (qwifi_alloc_requested_mem_segments())
+        {
+            qwifi_zero(mem_payload, sizeof(mem_payload));
+            mem_len = qwifi_build_respond_mem_payload(mem_payload, sizeof(mem_payload));
+        }
+
+        terminal_print("[K:QWIFI] QMI RESPOND_MEM payload len=");
+        terminal_print_inline_hex64(mem_len);
+        terminal_flush_log();
+
+        if (mem_len &&
+            qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_RESPOND_MEM_REQ,
+                                       QWIFI_QMI_TXN_RESPOND_MEM,
+                                       mem_payload,
+                                       mem_len,
+                                       "WLANFW_RESPOND_MEM_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_respond_mem_events("after-qmi-respond-mem", 256u);
+            terminal_print("[K:QWIFI] QMI WLANFW RESPOND_MEM done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_respond_mem_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+
+            if (g_qwifi_qmi_respond_mem_resp_seen)
+            {
+                qwifi_mhi_wait_for_qmi_fw_mem_ready_events("after-qmi-respond-mem-ready", 512u);
+                terminal_print("[K:QWIFI] QMI WLANFW FW_MEM_READY done seen=");
+                terminal_print_inline_hex64(g_qwifi_qmi_fw_mem_ready_ind_seen ? 1u : 0u);
+                terminal_flush_log();
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_fw_mem_ready_ind_seen)
+    {
+        g_qwifi_qmi_target_cap_resp_seen = 0u;
+        if (qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_CAP_REQ,
+                                       QWIFI_QMI_TXN_TARGET_CAP,
+                                       0,
+                                       0,
+                                       "WLANFW_TARGET_CAP_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_target_cap_events("after-qmi-target-cap", 512u);
+            terminal_print("[K:QWIFI] QMI WLANFW TARGET_CAP done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_target_cap_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            if (!qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_CAP_REQ, QWIFI_QMI_TXN_TARGET_CAP, 1))
+            {
+                terminal_print("[K:QWIFI] TARGET_CAP rejected result=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                terminal_print(" error=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                terminal_flush_log();
+                g_qwifi_qmi_target_cap_resp_seen = 0u;
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_target_cap_resp_seen)
+    {
+        if (!qwifi_send_regdb_download(bar0_base, chdboff, bi))
+        {
+            terminal_print("[K:QWIFI] QMI WLANFW REGDB download failed/stopped");
+            terminal_flush_log();
+            g_qwifi_qmi_bdf_download_resp_seen = 0u;
+        }
+        else if (!qwifi_send_bdf_download(bar0_base, chdboff, bi))
+        {
+            terminal_print("[K:QWIFI] QMI WLANFW BDF download failed/stopped");
+            terminal_flush_log();
+            g_qwifi_qmi_bdf_download_resp_seen = 0u;
+        }
+    }
+
+    if (g_qwifi_qmi_target_cap_resp_seen && g_qwifi_qmi_bdf_download_resp_seen)
+    {
+        uint8_t m3_payload[32];
+        uint64_t m3_phys = 0;
+        uint32_t m3_size = 0;
+        uint16_t m3_len = 0;
+
+        if (qwifi_prepare_m3_blob(bi, &m3_phys, &m3_size))
+        {
+            qwifi_zero(m3_payload, sizeof(m3_payload));
+            m3_len = qwifi_build_m3_info_payload(m3_payload, sizeof(m3_payload), m3_phys, m3_size);
+        }
+
+        terminal_print("[K:QWIFI] QMI M3_INFO payload len=");
+        terminal_print_inline_hex64(m3_len);
+        terminal_flush_log();
+
+        g_qwifi_qmi_m3_info_resp_seen = 0u;
+        if (m3_len &&
+            qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_M3_INFO_REQ,
+                                       QWIFI_QMI_TXN_M3_INFO,
+                                       m3_payload,
+                                       m3_len,
+                                       "WLANFW_M3_INFO_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_m3_info_events("after-qmi-m3-info", 512u);
+            terminal_print("[K:QWIFI] QMI WLANFW M3_INFO done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_m3_info_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            if (!qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_M3_INFO_REQ, QWIFI_QMI_TXN_M3_INFO, 1))
+            {
+                terminal_print("[K:QWIFI] M3_INFO rejected result=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                terminal_print(" error=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                terminal_flush_log();
+                g_qwifi_qmi_m3_info_resp_seen = 0u;
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_m3_info_resp_seen)
+    {
+        qwifi_mhi_wait_for_qmi_fw_ready_events("after-qmi-m3-fw-ready", 1024u);
+        terminal_print("[K:QWIFI] QMI WLANFW FW_READY done seen=");
+        terminal_print_inline_hex64(g_qwifi_qmi_fw_ready_ind_seen ? 1u : 0u);
+        terminal_flush_log();
+    }
+
+    if (g_qwifi_qmi_fw_ready_ind_seen)
+    {
+        uint8_t ini_payload[16];
+        uint16_t ini_len;
+
+        qwifi_zero(ini_payload, sizeof(ini_payload));
+        ini_len = qwifi_build_wlan_ini_payload(ini_payload, sizeof(ini_payload));
+        terminal_print("[K:QWIFI] QMI WLAN_INI payload len=");
+        terminal_print_inline_hex64(ini_len);
+        terminal_flush_log();
+
+        g_qwifi_qmi_wlan_ini_resp_seen = 0u;
+        if (ini_len &&
+            qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_WLAN_INI_REQ,
+                                       QWIFI_QMI_TXN_WLAN_INI,
+                                       ini_payload,
+                                       ini_len,
+                                       "WLANFW_WLAN_INI_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_wlan_ini_events("after-qmi-wlan-ini", 512u);
+            terminal_print("[K:QWIFI] QMI WLANFW WLAN_INI done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_wlan_ini_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            if (!qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_WLAN_INI_REQ, QWIFI_QMI_TXN_WLAN_INI, 1))
+            {
+                terminal_print("[K:QWIFI] WLAN_INI rejected result=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                terminal_print(" error=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                terminal_flush_log();
+                g_qwifi_qmi_wlan_ini_resp_seen = 0u;
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_wlan_ini_resp_seen)
+    {
+        uint8_t cfg_payload[512];
+        uint16_t cfg_len;
+
+        qwifi_zero(cfg_payload, sizeof(cfg_payload));
+        cfg_len = qwifi_build_wlan_cfg_payload(cfg_payload, sizeof(cfg_payload));
+        terminal_print("[K:QWIFI] QMI WLAN_CFG payload len=");
+        terminal_print_inline_hex64(cfg_len);
+        terminal_flush_log();
+
+        g_qwifi_qmi_wlan_cfg_resp_seen = 0u;
+        if (cfg_len &&
+            qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_WLAN_CFG_REQ,
+                                       QWIFI_QMI_TXN_WLAN_CFG,
+                                       cfg_payload,
+                                       cfg_len,
+                                       "WLANFW_WLAN_CFG_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_wlan_cfg_events("after-qmi-wlan-cfg", 512u);
+            terminal_print("[K:QWIFI] QMI WLANFW WLAN_CFG done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_wlan_cfg_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            if (!qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_WLAN_CFG_REQ, QWIFI_QMI_TXN_WLAN_CFG, 1))
+            {
+                terminal_print("[K:QWIFI] WLAN_CFG rejected result=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                terminal_print(" error=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                terminal_flush_log();
+                g_qwifi_qmi_wlan_cfg_resp_seen = 0u;
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_wlan_cfg_resp_seen)
+    {
+        uint8_t mode_payload[32];
+        uint16_t mode_len;
+
+        qwifi_zero(mode_payload, sizeof(mode_payload));
+        mode_len = qwifi_build_wlan_mode_payload(mode_payload, sizeof(mode_payload));
+        terminal_print("[K:QWIFI] QMI WLAN_MODE payload len=");
+        terminal_print_inline_hex64(mode_len);
+        terminal_flush_log();
+
+        g_qwifi_qmi_wlan_mode_resp_seen = 0u;
+        if (mode_len &&
+            qwifi_mhi_send_qmi_request(bar0_base,
+                                       chdboff,
+                                       QWIFI_QMI_WLANFW_WLAN_MODE_REQ,
+                                       QWIFI_QMI_TXN_WLAN_MODE,
+                                       mode_payload,
+                                       mode_len,
+                                       "WLANFW_WLAN_MODE_REQ"))
+        {
+            qwifi_mhi_wait_for_qmi_wlan_mode_events("after-qmi-wlan-mode", 512u);
+            terminal_print("[K:QWIFI] QMI WLANFW WLAN_MODE done seen=");
+            terminal_print_inline_hex64(g_qwifi_qmi_wlan_mode_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            if (!qwifi_qmi_last_response_ok(QWIFI_QMI_WLANFW_WLAN_MODE_REQ, QWIFI_QMI_TXN_WLAN_MODE, 1))
+            {
+                terminal_print("[K:QWIFI] WLAN_MODE rejected result=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_result);
+                terminal_print(" error=");
+                terminal_print_inline_hex64(g_qwifi_qmi_last_resp_error);
+                terminal_flush_log();
+                g_qwifi_qmi_wlan_mode_resp_seen = 0u;
+            }
+        }
+    }
+
+    if (g_qwifi_qmi_wlan_mode_resp_seen)
+    {
+        terminal_print("[K:QWIFI] HTC/WMI next: CE rings can now be brought up on WCN7850 pipes 0/1/2/3/4");
+        terminal_flush_log();
+    }
 }
 
-static int qwifi_mhi_start_ipcr_channels(uint64_t bar0_base, uint32_t chdboff)
+static int qwifi_mhi_start_ipcr_channels(uint64_t bar0_base, uint32_t chdboff, const boot_info *bi)
 {
     static int attempted = 0;
     uint64_t tx_pa;
@@ -2212,6 +3742,8 @@ static int qwifi_mhi_start_ipcr_channels(uint64_t bar0_base, uint32_t chdboff)
     if (attempted)
         return 0;
     attempted = 1;
+    g_qwifi_ipcr_bar0_base = bar0_base;
+    g_qwifi_ipcr_chdboff = chdboff;
 
     if (!g_qwifi_chan_ctxt || g_qwifi_chan_count <= QWIFI_MHI_IPCR_RX_CH)
     {
@@ -2279,7 +3811,7 @@ static int qwifi_mhi_start_ipcr_channels(uint64_t bar0_base, uint32_t chdboff)
     terminal_flush_log();
 
     if (tx_ok && rx_ok)
-        qwifi_mhi_probe_qrtr_wlanfw(bar0_base, chdboff);
+        qwifi_mhi_probe_qrtr_wlanfw(bar0_base, chdboff, bi);
 
     return tx_ok && rx_ok;
 }
@@ -2692,7 +4224,7 @@ static void qwifi_dump_ath12k_probe_regs(uint64_t bar0_base, const boot_info *bi
         {
             int amss_ok = qwifi_bhie_try_load_amss(bar0_base, bhioff, bhieoff, bi);
             if (amss_ok)
-                (void)qwifi_mhi_start_ipcr_channels(bar0_base, chdboff);
+                (void)qwifi_mhi_start_ipcr_channels(bar0_base, chdboff, bi);
         }
         else
         {
