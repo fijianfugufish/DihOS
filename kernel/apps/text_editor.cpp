@@ -279,7 +279,7 @@ namespace
 
     static int token_has_known_namespace(const char *token, uint32_t token_len)
     {
-        static const char *kNamespaces[] = {"sys", "fs", "hw"};
+        static const char *kNamespaces[] = {"sys", "fs", "hw", "wifi"};
         uint32_t colon = token_len;
 
         if (!token || token_len == 0u)

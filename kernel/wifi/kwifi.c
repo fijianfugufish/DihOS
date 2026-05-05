@@ -237,6 +237,16 @@ uint32_t kwifi_network_hidden(uint32_t index)
     return pci_kernel_wifi_network_hidden(index);
 }
 
+int kwifi_network_refresh(void)
+{
+    return pci_kernel_wifi_trigger_scan();
+}
+
+int kwifi_network_poll(uint32_t rounds)
+{
+    return pci_kernel_wifi_poll_events(rounds);
+}
+
 void kwifi_init(boot_info *bi, int storage_mounted)
 {
     uint32_t net_hints = 0;

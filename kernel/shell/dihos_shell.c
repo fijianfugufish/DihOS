@@ -179,7 +179,7 @@ static const dihos_shell_command G_commands[] = {
     {"sys:status", "sys:status", "Show current shell and device status.", 0u, dihos_cmd_sys_status},
     {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
     {"sys:run", "sys:run [path] [args...] [out=name] [window=yes|no]", "Run a .sac script or .sacx app.", 1u, dihos_cmd_sys_run},
-    {"wifi:networks", "wifi:networks", "Print WiFi networks discovered so far.", 0u, dihos_cmd_wifi_networks},
+    {"wifi:networks", "wifi:networks [refresh=yes]", "Print WiFi networks, auto-scanning when the cache is empty.", 0u, dihos_cmd_wifi_networks},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -1424,8 +1424,42 @@ static int dihos_cmd_sys_time(dihos_shell_stage *stage)
 
 static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
 {
-    uint32_t count = kwifi_network_count();
-    (void)stage;
+    const char *refresh_text = dihos_stage_named(stage, "refresh");
+    uint32_t count = 0u;
+    int refresh = dihos_is_yes(refresh_text);
+    int auto_refresh = 0;
+
+    terminal_print_inline("\n");
+
+    if (!refresh)
+    {
+        (void)kwifi_network_poll(32u);
+        count = kwifi_network_count();
+        if (count == 0u)
+        {
+            refresh = 1;
+            auto_refresh = 1;
+        }
+    }
+
+    if (refresh)
+    {
+        if (kwifi_network_refresh())
+        {
+            terminal_success(auto_refresh ? "wifi scan auto-refresh queued" : "wifi scan refresh queued");
+            terminal_print_inline("\n");
+            terminal_print_inline("wifi scan listening for results...\n");
+            (void)kwifi_network_poll(512u);
+        }
+        else
+        {
+            terminal_warn("wifi scan refresh skipped");
+            terminal_print_inline("\n");
+            (void)kwifi_network_poll(32u);
+        }
+    }
+
+    count = kwifi_network_count();
 
     terminal_print("wifi networks: ");
     dihos_print_dec_value(count);
