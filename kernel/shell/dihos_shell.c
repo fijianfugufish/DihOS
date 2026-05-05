@@ -15,6 +15,7 @@
 #include "kwrappers/string.h"
 #include "system/dihos_time.h"
 #include "terminal/terminal_api.h"
+#include "wifi/kwifi.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -149,6 +150,7 @@ static int dihos_cmd_sys_history(dihos_shell_stage *stage);
 static int dihos_cmd_sys_status(dihos_shell_stage *stage);
 static int dihos_cmd_sys_time(dihos_shell_stage *stage);
 static int dihos_cmd_sys_run(dihos_shell_stage *stage);
+static int dihos_cmd_wifi_networks(dihos_shell_stage *stage);
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_cd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_list(dihos_shell_stage *stage);
@@ -177,6 +179,7 @@ static const dihos_shell_command G_commands[] = {
     {"sys:status", "sys:status", "Show current shell and device status.", 0u, dihos_cmd_sys_status},
     {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
     {"sys:run", "sys:run [path] [args...] [out=name] [window=yes|no]", "Run a .sac script or .sacx app.", 1u, dihos_cmd_sys_run},
+    {"wifi:networks", "wifi:networks", "Print WiFi networks discovered so far.", 0u, dihos_cmd_wifi_networks},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -1413,6 +1416,38 @@ static int dihos_cmd_sys_time(dihos_shell_stage *stage)
     else
     {
         dihos_print_dec_value(value);
+        terminal_print_inline("\n");
+    }
+
+    return 0;
+}
+
+static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
+{
+    uint32_t count = kwifi_network_count();
+    (void)stage;
+
+    terminal_print("wifi networks: ");
+    dihos_print_dec_value(count);
+    terminal_print_inline("\n");
+
+    if (count == 0u)
+    {
+        terminal_warn("no WiFi networks discovered yet");
+        return 0;
+    }
+
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        const char *name = kwifi_network_name(i);
+
+        terminal_print_inline("  #");
+        dihos_print_dec_value(i + 1u);
+        terminal_print_inline(": ");
+        if (kwifi_network_hidden(i) || !name || name[0] == 0)
+            terminal_print_inline("<hidden>");
+        else
+            terminal_print_inline(name);
         terminal_print_inline("\n");
     }
 
