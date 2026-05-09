@@ -143,6 +143,7 @@ static void dihos_shell_capture_end(dihos_shell_session *session);
 
 static int dihos_cmd_sys_help(dihos_shell_stage *stage);
 static int dihos_cmd_sys_clear(dihos_shell_stage *stage);
+static int dihos_cmd_sys_flush(dihos_shell_stage *stage);
 static int dihos_cmd_sys_echo(dihos_shell_stage *stage);
 static int dihos_cmd_sys_about(dihos_shell_stage *stage);
 static int dihos_cmd_sys_boot(dihos_shell_stage *stage);
@@ -172,6 +173,7 @@ static int dihos_cmd_text_count(dihos_shell_stage *stage);
 static const dihos_shell_command G_commands[] = {
     {"sys:help", "sys:help [command]", "Show DIHOS shell help.", 0u, dihos_cmd_sys_help},
     {"sys:clear", "sys:clear", "Clear the terminal surface.", 0u, dihos_cmd_sys_clear},
+    {"sys:flush", "sys:flush", "Flush the terminal log to storage.", 0u, dihos_cmd_sys_flush},
     {"sys:echo", "sys:echo [text...]", "Print text or forwarded stdin.", 1u, dihos_cmd_sys_echo},
     {"sys:about", "sys:about", "Show DIHOS shell info.", 0u, dihos_cmd_sys_about},
     {"sys:boot", "sys:boot", "Show boot and firmware hints.", 0u, dihos_cmd_sys_boot},
@@ -1272,6 +1274,15 @@ static int dihos_cmd_sys_clear(dihos_shell_stage *stage)
     return 0;
 }
 
+static int dihos_cmd_sys_flush(dihos_shell_stage *stage)
+{
+    (void)stage;
+
+    terminal_success("log flushed");
+    terminal_flush_log();
+    return 0;
+}
+
 static int dihos_cmd_sys_echo(dihos_shell_stage *stage)
 {
     char joined[1024];
@@ -1435,10 +1446,16 @@ static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
     {
         (void)kwifi_network_poll(32u);
         count = kwifi_network_count();
-        if (count == 0u)
+        if (count == 0u && !kwifi_network_scan_running())
         {
             refresh = 1;
             auto_refresh = 1;
+        }
+        else if (count == 0u)
+        {
+            terminal_warn("wifi scan already running; waiting for results");
+            terminal_print_inline("\n");
+            (void)kwifi_network_poll(KWIFI_NETWORK_SCAN_POLL_ROUNDS);
         }
     }
 
@@ -1449,13 +1466,13 @@ static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
             terminal_success(auto_refresh ? "wifi scan auto-refresh queued" : "wifi scan refresh queued");
             terminal_print_inline("\n");
             terminal_print_inline("wifi scan listening for results...\n");
-            (void)kwifi_network_poll(512u);
+            (void)kwifi_network_poll(KWIFI_NETWORK_SCAN_POLL_ROUNDS);
         }
         else
         {
-            terminal_warn("wifi scan refresh skipped");
+            terminal_warn(kwifi_network_scan_running() ? "wifi scan refresh skipped; previous scan still running" : "wifi scan refresh skipped");
             terminal_print_inline("\n");
-            (void)kwifi_network_poll(32u);
+            (void)kwifi_network_poll(kwifi_network_scan_running() ? KWIFI_NETWORK_SCAN_POLL_ROUNDS : 32u);
         }
     }
 

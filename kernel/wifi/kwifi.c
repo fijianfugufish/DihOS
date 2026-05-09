@@ -247,6 +247,11 @@ int kwifi_network_poll(uint32_t rounds)
     return pci_kernel_wifi_poll_events(rounds);
 }
 
+uint32_t kwifi_network_scan_running(void)
+{
+    return pci_kernel_wifi_scan_running();
+}
+
 void kwifi_init(boot_info *bi, int storage_mounted)
 {
     uint32_t net_hints = 0;

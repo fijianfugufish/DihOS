@@ -9,3 +9,4 @@ const char *pci_kernel_wifi_network_name(uint32_t index);
 uint32_t pci_kernel_wifi_network_hidden(uint32_t index);
 int pci_kernel_wifi_trigger_scan(void);
 int pci_kernel_wifi_poll_events(uint32_t rounds);
+uint32_t pci_kernel_wifi_scan_running(void);
