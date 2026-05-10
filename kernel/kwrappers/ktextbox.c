@@ -2,6 +2,7 @@
 #include "kwrappers/kinput.h"
 #include "kwrappers/kmouse.h"
 #include "kwrappers/kwindow.h"
+#include "system/kclipboard.h"
 
 #ifndef KTEXTBOX_MAX
 #define KTEXTBOX_MAX 32
@@ -336,6 +337,11 @@ static uint8_t ktextbox_key_repeat_trigger(uint8_t usage)
 static uint8_t ktextbox_shift_down(void)
 {
     return (kinput_key_down(KEY_LSHIFT) || kinput_key_down(KEY_RSHIFT)) ? 1u : 0u;
+}
+
+static uint8_t ktextbox_ctrl_down(void)
+{
+    return (kinput_key_down(KEY_LCTRL) || kinput_key_down(KEY_RCTRL)) ? 1u : 0u;
 }
 
 static char ktextbox_usage_to_char(uint8_t usage, uint8_t shift, uint8_t caps_lock)
@@ -787,6 +793,7 @@ void ktextbox_update_all(void)
     {
         ktextbox_slot *slot = &G_boxes[G_focused_idx];
         uint8_t shift = ktextbox_shift_down();
+        uint8_t ctrl = ktextbox_ctrl_down();
 
         if (kinput_key_pressed(KEY_ESCAPE))
         {
@@ -839,19 +846,33 @@ void ktextbox_update_all(void)
 
             if (slot)
             {
-                for (uint32_t i = 0; i < (uint32_t)(sizeof(G_printable_usages) / sizeof(G_printable_usages[0])); ++i)
+                if (ctrl && kinput_key_pressed(KEY_V))
                 {
-                    uint8_t usage = G_printable_usages[i];
-                    char ch = 0;
+                    char clip[KTEXTBOX_TEXT_CAP];
+                    uint32_t clip_len = kclipboard_copy_text(clip, sizeof(clip));
 
-                    if (!ktextbox_key_repeat_trigger(usage))
-                        continue;
-
-                    ch = ktextbox_usage_to_char(usage, shift, G_caps_lock);
-                    if (ch)
-                    {
-                        ktextbox_insert_char(slot, ch);
+                    for (uint32_t i = 0u; i < clip_len; ++i)
+                        ktextbox_insert_char(slot, clip[i]);
+                    if (clip_len > 0u)
                         ktextbox_reset_caret_blink();
+                }
+
+                if (!ctrl)
+                {
+                    for (uint32_t i = 0; i < (uint32_t)(sizeof(G_printable_usages) / sizeof(G_printable_usages[0])); ++i)
+                    {
+                        uint8_t usage = G_printable_usages[i];
+                        char ch = 0;
+
+                        if (!ktextbox_key_repeat_trigger(usage))
+                            continue;
+
+                        ch = ktextbox_usage_to_char(usage, shift, G_caps_lock);
+                        if (ch)
+                        {
+                            ktextbox_insert_char(slot, ch);
+                            ktextbox_reset_caret_blink();
+                        }
                     }
                 }
 

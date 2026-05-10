@@ -14,6 +14,7 @@ extern "C"
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
+#include "system/kclipboard.h"
 }
 
 namespace
@@ -1449,6 +1450,7 @@ namespace
             clipboard_[i] = buffer_[start + i];
         clipboard_[count] = 0;
         clipboard_len_ = count;
+        (void)kclipboard_set_text(clipboard_, clipboard_len_);
     }
 
     void TextEditor::CutSelectionToClipboard()
@@ -2640,7 +2642,21 @@ namespace
 
             if (kinput_key_pressed(KEY_V))
             {
-                if (clipboard_len_ > 0u)
+                char clip[TEXT_CAP];
+                uint32_t clip_len = kclipboard_copy_text(clip, sizeof(clip));
+
+                if (clip_len > 0u)
+                {
+                    SaveUndoSnapshot();
+                    ClearRedoSnapshot();
+                    ReplaceSelectionWithText(clip);
+                    clipboard_len_ = clip_len;
+                    for (uint32_t i = 0u; i < clip_len; ++i)
+                        clipboard_[i] = clip[i];
+                    clipboard_[clip_len] = 0;
+                    SetStatus("pasted", rgb(188, 202, 224));
+                }
+                else if (clipboard_len_ > 0u)
                 {
                     SaveUndoSnapshot();
                     ClearRedoSnapshot();

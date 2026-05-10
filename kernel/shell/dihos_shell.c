@@ -155,6 +155,8 @@ static int dihos_cmd_wifi_networks(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_connect(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_current(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_supplicant(dihos_shell_stage *stage);
+static int dihos_cmd_wifi_get(dihos_shell_stage *stage);
+static int dihos_cmd_wifi_rx(dihos_shell_stage *stage);
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_cd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_list(dihos_shell_stage *stage);
@@ -185,9 +187,11 @@ static const dihos_shell_command G_commands[] = {
     {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
     {"sys:run", "sys:run [path] [args...] [out=name] [window=yes|no]", "Run a .sac script or .sacx app.", 1u, dihos_cmd_sys_run},
     {"wifi:networks", "wifi:networks [refresh=yes]", "Print WiFi networks, auto-scanning when the cache is empty.", 0u, dihos_cmd_wifi_networks},
-    {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER] [automate=yes|no]", "Save a WiFi connect request for the selected SSID and auto-complete enterprise auth unless automate=no.", 0u, dihos_cmd_wifi_connect},
+    {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER] [bssid=AA:BB:CC:DD:EE:FF] [channel=40|5200] [automate=yes|no]", "Save a WiFi connect request and optionally pin AP BSSID/channel; enterprise mode polls state but does not fake PEAP key install.", 0u, dihos_cmd_wifi_connect},
     {"wifi:current", "wifi:current", "Show current WiFi connect target and state.", 0u, dihos_cmd_wifi_current},
-    {"wifi:supplicant", "wifi:supplicant ready=yes|no", "Set enterprise supplicant readiness for controlled-port auth.", 0u, dihos_cmd_wifi_supplicant},
+    {"wifi:supplicant", "wifi:supplicant ready=yes|no", "Set enterprise supplicant readiness hint (does not by itself prove firmware key install).", 0u, dihos_cmd_wifi_supplicant},
+    {"wifi:get", "wifi:get [url] [max=8192]", "Fetch text content for file:// URLs; reports HTTP transport readiness for http(s).", 0u, dihos_cmd_wifi_get},
+    {"wifi:rx", "wifi:rx [drain=yes|no] [max=4]", "Show WiFi RX queue state and optionally drain captured frames.", 0u, dihos_cmd_wifi_rx},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -318,6 +322,23 @@ static int dihos_append_cstr(char *dst, uint32_t cap, const char *src)
 
     dst[len + i] = 0;
     return 0;
+}
+
+static int dihos_starts_with(const char *text, const char *prefix)
+{
+    uint32_t i = 0u;
+
+    if (!text || !prefix)
+        return 0;
+
+    while (prefix[i])
+    {
+        if (text[i] != prefix[i])
+            return 0;
+        ++i;
+    }
+
+    return 1;
 }
 
 static void dihos_shell_default_print(const char *text, void *user)
@@ -1516,6 +1537,8 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
     const char *ssid = dihos_stage_named(stage, "ssid");
     const char *username = dihos_stage_named(stage, "username");
     const char *password = dihos_stage_named(stage, "password");
+    const char *bssid = dihos_stage_named(stage, "bssid");
+    const char *channel = dihos_stage_named(stage, "channel");
     const char *automate_text = dihos_stage_named(stage, "automate");
     uint32_t automate = 1u;
 
@@ -1537,7 +1560,7 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
         return -1;
     }
 
-    if (!kwifi_connect_request(ssid, username, password))
+    if (!kwifi_connect_request(ssid, username, password, bssid, channel))
     {
         terminal_error("wifi connect request failed");
         return -1;
@@ -1547,10 +1570,21 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
     {
         for (uint32_t i = 0u; i < 4u; ++i)
             (void)kwifi_poll_connection(32u);
+
         if (kwifi_set_supplicant_ready(1u))
-            terminal_success("enterprise auth auto-complete done");
+        {
+            for (uint32_t i = 0u; i < 4u; ++i)
+                (void)kwifi_poll_connection(32u);
+
+            if (kwifi_current_connected())
+                terminal_success("enterprise supplicant readiness auto-enabled; link reports connected");
+            else
+                terminal_warn("enterprise supplicant readiness auto-enabled; waiting for firmware key install/auth completion");
+        }
         else
-            terminal_warn("enterprise auth automation deferred");
+        {
+            terminal_warn("enterprise auth staged: waiting for PEAP/EAPOL controlled-port authorization");
+        }
     }
 
     terminal_success("wifi connect request queued");
@@ -1594,6 +1628,11 @@ static int dihos_cmd_wifi_current(dihos_shell_stage *stage)
     terminal_print_inline("  status: ");
     terminal_print_inline((status && status[0]) ? status : "idle");
     terminal_print_inline("\n");
+    terminal_print_inline("  rx_queue: ");
+    dihos_print_dec_value(kwifi_rx_queue_count());
+    terminal_print_inline(" (dropped ");
+    dihos_print_dec_value(kwifi_rx_queue_dropped());
+    terminal_print_inline(")\n");
     return 0;
 }
 
@@ -1615,7 +1654,190 @@ static int dihos_cmd_wifi_supplicant(dihos_shell_stage *stage)
         return -1;
     }
 
-    terminal_success(ready ? "enterprise supplicant marked ready" : "enterprise supplicant marked not-ready");
+    terminal_success(ready ? "enterprise supplicant readiness hint set to ready" : "enterprise supplicant readiness hint set to not-ready");
+    return 0;
+}
+
+static int dihos_cmd_wifi_get(dihos_shell_stage *stage)
+{
+    const char *url = dihos_stage_named(stage, "url");
+    const char *max_text = dihos_stage_named(stage, "max");
+    uint32_t max_bytes = 8192u;
+
+    if (!url && stage->positional_count > 0u)
+        url = stage->positional[0];
+
+    if (!url || !url[0])
+    {
+        terminal_error("wifi:get needs a URL");
+        return -1;
+    }
+
+    if (max_text && max_text[0])
+    {
+        if (dihos_parse_u32(max_text, &max_bytes) != 0)
+        {
+            terminal_error("wifi:get max must be an integer");
+            return -1;
+        }
+
+        if (max_bytes < 128u)
+            max_bytes = 128u;
+        if (max_bytes > 65536u)
+            max_bytes = 65536u;
+    }
+
+    if (!kwifi_current_connected())
+    {
+        terminal_error("wifi:get requires an active WiFi connection");
+        return -1;
+    }
+
+    if (dihos_starts_with(url, "file://"))
+    {
+        const char *path = url + 7u;
+        char friendly[DIHOS_SHELL_PATH_CAP];
+        char raw[DIHOS_SHELL_PATH_CAP];
+        const char *open_path = 0;
+        KFile file;
+        char buf[512];
+        uint32_t total = 0u;
+        uint8_t saw_output = 0u;
+        uint8_t ended_with_newline = 1u;
+
+        if (!path || !path[0])
+        {
+            terminal_error("wifi:get file:// URL is missing a path");
+            return -1;
+        }
+
+        if (path[0] && path[1] && path[2] && path[1] == ':' && path[2] == '/')
+            open_path = path;
+        else
+        {
+            if (dihos_resolve_raw_path(path, friendly, raw) != 0)
+            {
+                terminal_error("wifi:get file:// path is invalid");
+                return -1;
+            }
+            open_path = raw;
+        }
+
+        if (kfile_open(&file, open_path, KFILE_READ) != 0)
+        {
+            terminal_error("wifi:get cannot open file URL target");
+            return -1;
+        }
+
+        for (;;)
+        {
+            uint32_t got = 0u;
+            uint32_t want = (uint32_t)sizeof(buf) - 1u;
+            uint32_t remaining = (total < max_bytes) ? (max_bytes - total) : 0u;
+            if (remaining < want)
+                want = remaining;
+            if (want == 0u)
+                break;
+
+            if (kfile_read(&file, buf, want, &got) != 0 || got == 0u)
+                break;
+
+            buf[got] = 0;
+            terminal_print_inline(buf);
+            ended_with_newline = (buf[got - 1u] == '\n') ? 1u : 0u;
+            saw_output = 1u;
+            total += got;
+        }
+
+        kfile_close(&file);
+
+        if (saw_output && !ended_with_newline)
+            terminal_print_inline("\n");
+
+        if (total >= max_bytes)
+            terminal_warn("wifi:get output truncated by max= limit");
+
+        return 0;
+    }
+
+    if (dihos_starts_with(url, "http://") || dihos_starts_with(url, "https://"))
+    {
+        terminal_error("wifi:get http(s) transport not ready");
+        terminal_print("note: WiFi auth is up, but DHCP/DNS/TCP/HTTP data path is not integrated yet");
+        return -1;
+    }
+
+    terminal_error("wifi:get supports file://, http://, or https:// URLs");
+    return -1;
+}
+
+static int dihos_cmd_wifi_rx(dihos_shell_stage *stage)
+{
+    const char *drain_text = dihos_stage_named(stage, "drain");
+    const char *max_text = dihos_stage_named(stage, "max");
+    uint32_t drain = 0u;
+    uint32_t max_frames = 4u;
+    uint32_t queued = kwifi_rx_queue_count();
+    uint32_t dropped = kwifi_rx_queue_dropped();
+
+    if (drain_text && drain_text[0])
+        drain = dihos_is_yes(drain_text) ? 1u : 0u;
+    if (max_text && max_text[0])
+    {
+        if (dihos_parse_u32(max_text, &max_frames) != 0)
+        {
+            terminal_error("wifi:rx max must be an integer");
+            return -1;
+        }
+        if (max_frames == 0u)
+            max_frames = 1u;
+        if (max_frames > 32u)
+            max_frames = 32u;
+    }
+
+    terminal_print("wifi rx:");
+    terminal_print_inline("  queued: ");
+    dihos_print_dec_value(queued);
+    terminal_print_inline("\n");
+    terminal_print_inline("  dropped: ");
+    dihos_print_dec_value(dropped);
+    terminal_print_inline("\n");
+
+    if (!drain)
+        return 0;
+
+    for (uint32_t i = 0u; i < max_frames; ++i)
+    {
+        uint8_t frame[2048];
+        uint32_t frame_len = 0u;
+        uint32_t frame_kind = 0u;
+        uint32_t preview = 0u;
+
+        if (!kwifi_rx_frame_pop(frame, sizeof(frame), &frame_len, &frame_kind))
+            break;
+
+        terminal_print("  frame ");
+        dihos_print_dec_value(i + 1u);
+        terminal_print(" kind=");
+        terminal_print_inline_hex64(frame_kind);
+        terminal_print(" len=");
+        dihos_print_dec_value(frame_len);
+        terminal_print_inline("\n");
+
+        preview = frame_len;
+        if (preview > 24u)
+            preview = 24u;
+        terminal_print_inline("    bytes:");
+        for (uint32_t b = 0u; b < preview; ++b)
+        {
+            terminal_print_inline(" ");
+            terminal_print_inline_hex8(frame[b]);
+        }
+        if (frame_len > preview)
+            terminal_print_inline(" ...");
+        terminal_print_inline("\n");
+    }
+
     return 0;
 }
 

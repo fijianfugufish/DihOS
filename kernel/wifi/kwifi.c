@@ -83,6 +83,78 @@ static void kwifi_copy_trunc(char *dst, uint32_t cap, const char *src)
     dst[i] = 0;
 }
 
+static int kwifi_hex_nibble(char ch, uint8_t *out)
+{
+    if (!out)
+        return 0;
+    if (ch >= '0' && ch <= '9')
+    {
+        *out = (uint8_t)(ch - '0');
+        return 1;
+    }
+    if (ch >= 'a' && ch <= 'f')
+    {
+        *out = (uint8_t)(ch - 'a' + 10);
+        return 1;
+    }
+    if (ch >= 'A' && ch <= 'F')
+    {
+        *out = (uint8_t)(ch - 'A' + 10);
+        return 1;
+    }
+    return 0;
+}
+
+static int kwifi_parse_bssid(const char *text, uint8_t out[6])
+{
+    uint32_t pos = 0u;
+    uint32_t bi = 0u;
+
+    if (!text || !out)
+        return 0;
+
+    while (text[pos] && bi < 6u)
+    {
+        uint8_t hi;
+        uint8_t lo;
+
+        if (!kwifi_hex_nibble(text[pos], &hi) || !text[pos + 1u] || !kwifi_hex_nibble(text[pos + 1u], &lo))
+            return 0;
+        out[bi++] = (uint8_t)((hi << 4) | lo);
+        pos += 2u;
+        if (bi < 6u)
+        {
+            if (text[pos] != ':' && text[pos] != '-')
+                return 0;
+            pos++;
+        }
+    }
+
+    return (bi == 6u && text[pos] == 0) ? 1 : 0;
+}
+
+static int kwifi_parse_u32(const char *text, uint32_t *out)
+{
+    uint64_t acc = 0u;
+    uint32_t i = 0u;
+
+    if (!text || !text[0] || !out)
+        return 0;
+
+    while (text[i])
+    {
+        char ch = text[i++];
+        if (ch < '0' || ch > '9')
+            return 0;
+        acc = acc * 10u + (uint64_t)(ch - '0');
+        if (acc > 0xFFFFFFFFull)
+            return 0;
+    }
+
+    *out = (uint32_t)acc;
+    return 1;
+}
+
 static uint32_t kwifi_have_visible_network(const char *ssid)
 {
     uint32_t count = kwifi_network_count();
@@ -357,12 +429,35 @@ uint32_t kwifi_network_scan_running(void)
     return pci_kernel_wifi_scan_running();
 }
 
-int kwifi_connect_request(const char *ssid, const char *username, const char *password)
+uint32_t kwifi_rx_queue_count(void)
+{
+    return pci_kernel_wifi_rx_queue_count();
+}
+
+uint32_t kwifi_rx_queue_dropped(void)
+{
+    return pci_kernel_wifi_rx_queue_dropped();
+}
+
+int kwifi_rx_frame_pop(uint8_t *out_frame, uint32_t out_cap, uint32_t *out_len, uint32_t *out_kind)
+{
+    return pci_kernel_wifi_rx_frame_pop(out_frame, out_cap, out_len, out_kind);
+}
+
+int kwifi_connect_request(const char *ssid,
+                          const char *username,
+                          const char *password,
+                          const char *bssid_text,
+                          const char *channel_text)
 {
     uint32_t ssid_len;
     uint32_t user_len;
     uint32_t pass_len;
     uint32_t found;
+    uint8_t bssid[6];
+    uint32_t bssid_valid = 0u;
+    uint32_t chan_mhz = 0u;
+    uint32_t chan_value = 0u;
 
     if (!ssid || !ssid[0])
     {
@@ -395,6 +490,38 @@ int kwifi_connect_request(const char *ssid, const char *username, const char *pa
         return 0;
     }
 
+    if (bssid_text && bssid_text[0])
+    {
+        if (!kwifi_parse_bssid(bssid_text, bssid))
+        {
+            terminal_print("[K:WIFI] connect rejected: invalid bssid format");
+            return 0;
+        }
+        bssid_valid = 1u;
+    }
+
+    if (channel_text && channel_text[0])
+    {
+        if (!kwifi_parse_u32(channel_text, &chan_value))
+        {
+            terminal_print("[K:WIFI] connect rejected: invalid channel value");
+            return 0;
+        }
+        if (chan_value >= 2000u)
+            chan_mhz = chan_value;
+        else if (chan_value == 14u)
+            chan_mhz = 2484u;
+        else if (chan_value >= 1u && chan_value <= 13u)
+            chan_mhz = 2407u + chan_value * 5u;
+        else if (chan_value >= 32u && chan_value <= 177u)
+            chan_mhz = 5000u + chan_value * 5u;
+        else
+        {
+            terminal_print("[K:WIFI] connect rejected: channel unsupported");
+            return 0;
+        }
+    }
+
     found = kwifi_have_visible_network(ssid);
     if (!found && !kwifi_network_scan_running())
     {
@@ -415,6 +542,12 @@ int kwifi_connect_request(const char *ssid, const char *username, const char *pa
                      g_kwifi_connect.enterprise ? "wpa2-enterprise" : "non-enterprise");
     kwifi_set_eap_phase(0u, "none");
     kwifi_set_peap_phase(0u, "none");
+
+    if (!pci_kernel_wifi_set_connect_override(bssid, bssid_valid, chan_mhz))
+    {
+        terminal_print("[K:WIFI] connect rejected: override setup failed");
+        return 0;
+    }
 
     if (!found)
     {
@@ -494,12 +627,17 @@ const char *kwifi_current_peap_phase(void)
 
 int kwifi_set_supplicant_ready(uint32_t ready)
 {
+    uint32_t key_done;
+    uint32_t assoc_done;
+    uint32_t roam_reason;
+
     if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
         return 0;
 
     g_kwifi_connect.supplicant_ready = ready ? 1u : 0u;
     if (!ready)
     {
+        (void)pci_kernel_wifi_set_peer_authorize(0u);
         g_kwifi_connect.control_port_authorized = 0u;
         g_kwifi_connect.connected = 0u;
         kwifi_set_eap_phase(2u, "controlled-port-unauthorized");
@@ -509,21 +647,37 @@ int kwifi_set_supplicant_ready(uint32_t ready)
     }
 
     g_kwifi_connect.control_port_authorized = 1u;
-    g_kwifi_connect.connected = 1u;
+    key_done = pci_kernel_wifi_install_key_done();
+    assoc_done = pci_kernel_wifi_peer_assoc_done();
+    roam_reason = pci_kernel_wifi_roam_reason();
+    (void)pci_kernel_wifi_set_peer_authorize(1u);
+    g_kwifi_connect.connected = (key_done || (assoc_done && roam_reason != 2u)) ? 1u : 0u;
     kwifi_set_eap_phase(3u, "supplicant-running");
     kwifi_set_peap_phase(3u, "peap-running");
-    kwifi_set_status("supplicant marked ready; controlled port authorized");
+    if (key_done)
+        kwifi_set_status("supplicant marked ready; firmware key install already complete");
+    else if (assoc_done && roam_reason != 2u)
+        kwifi_set_status("supplicant marked ready; peer assoc is stable (install-key event not observed yet)");
+    else
+        kwifi_set_status("supplicant marked ready; waiting for real enterprise key-install confirmation");
     return 1;
 }
 
 int kwifi_poll_connection(uint32_t rounds)
 {
+    uint32_t assoc_done;
+    uint32_t key_done;
+    uint32_t roam_reason;
+
     if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
         return 0;
 
     if (rounds == 0u)
         rounds = 32u;
     (void)pci_kernel_wifi_poll_events(rounds);
+    assoc_done = pci_kernel_wifi_peer_assoc_done();
+    key_done = pci_kernel_wifi_install_key_done();
+    roam_reason = pci_kernel_wifi_roam_reason();
 
     /*
      * Proper Linux-style ownership split:
@@ -537,7 +691,9 @@ int kwifi_poll_connection(uint32_t rounds)
         g_kwifi_connect.control_port_authorized = 0u;
         kwifi_set_eap_phase(2u, "controlled-port-unauthorized");
         kwifi_set_peap_phase(2u, "peap-supplicant-required");
-        kwifi_set_status("waiting for integrated PEAP supplicant (EAPOL control port path)");
+        kwifi_set_status(assoc_done
+                             ? "peer assoc confirmed; waiting for PEAP/EAPOL controlled-port authorization"
+                             : "waiting for firmware peer-assoc confirmation");
         return 1;
     }
 
@@ -545,18 +701,39 @@ int kwifi_poll_connection(uint32_t rounds)
     {
         if (!g_kwifi_connect.supplicant_ready)
         {
-            kwifi_set_status(g_kwifi_connect.control_port_authorized
-                                 ? "association done; waiting for enterprise key install"
-                                 : "association done; enterprise auth blocked until PEAP supplicant is integrated");
+            if (roam_reason == 2u)
+                kwifi_set_status("peer assoc confirmed but firmware reports beacon-miss; link not stable yet");
+            else
+                kwifi_set_status(assoc_done
+                                     ? "peer assoc confirmed; waiting for PEAP supplicant readiness"
+                                     : "association pending; waiting for firmware peer-assoc confirmation");
             return 0;
         }
 
         g_kwifi_connect.control_port_authorized = 1u;
-        g_kwifi_connect.connected = 1u;
+        (void)pci_kernel_wifi_set_peer_authorize(1u);
+        g_kwifi_connect.connected = (key_done || (assoc_done && roam_reason != 2u)) ? 1u : 0u;
         kwifi_set_eap_phase(3u, "supplicant-running");
         kwifi_set_peap_phase(3u, "peap-running");
-        kwifi_set_status("PEAP supplicant running");
+        if (key_done)
+            kwifi_set_status("PEAP/EAPOL path reports firmware key install complete");
+        else if (assoc_done && roam_reason != 2u)
+            kwifi_set_status("PEAP/EAPOL path reports stable peer assoc; install-key event still pending");
+        else if (roam_reason == 2u)
+            kwifi_set_status("supplicant running, but firmware reports beacon-miss; waiting for stable link/auth completion");
+        else
+            kwifi_set_status("PEAP/EAPOL host path running; waiting for firmware key-install completion");
         return 1;
+    }
+
+    if (g_kwifi_connect.eap_phase >= 3u)
+    {
+        if (key_done)
+        {
+            g_kwifi_connect.connected = 1u;
+            kwifi_set_status("enterprise key install complete; link authorized");
+            return 1;
+        }
     }
 
     return 0;
