@@ -21,3 +21,4 @@ const char *kwifi_current_auth_mode(void);
 const char *kwifi_current_eap_phase(void);
 const char *kwifi_current_peap_phase(void);
 int kwifi_poll_connection(uint32_t rounds);
+int kwifi_set_supplicant_ready(uint32_t ready);

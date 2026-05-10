@@ -19,8 +19,8 @@ typedef struct
     uint8_t enterprise;
     uint8_t eap_phase;
     uint8_t peap_phase;
-    uint8_t eapol_start_retries;
-    uint32_t mgmt_tx_seen;
+    uint8_t control_port_authorized;
+    uint8_t supplicant_ready;
     char ssid[KWIFI_CONNECT_SSID_MAX];
     char username[KWIFI_CONNECT_USER_MAX];
     char password[KWIFI_CONNECT_PASS_MAX];
@@ -116,78 +116,6 @@ static void kwifi_set_peap_phase(uint8_t phase, const char *name)
 {
     g_kwifi_connect.peap_phase = phase;
     kwifi_copy_trunc(g_kwifi_connect.peap_phase_text, sizeof(g_kwifi_connect.peap_phase_text), name ? name : "none");
-}
-
-static void kwifi_write_be16(uint8_t *p, uint16_t value)
-{
-    p[0] = (uint8_t)((value >> 8) & 0xFFu);
-    p[1] = (uint8_t)(value & 0xFFu);
-}
-
-static void kwifi_write_eapol_eth_hdr(uint8_t *out)
-{
-    /* 802.1X PAE group address */
-    out[0] = 0x01u;
-    out[1] = 0x80u;
-    out[2] = 0xC2u;
-    out[3] = 0x00u;
-    out[4] = 0x00u;
-    out[5] = 0x03u;
-
-    /* Matches current vdev MAC in pci_kernel_nic_probe.c */
-    out[6] = 0x02u;
-    out[7] = 0x11u;
-    out[8] = 0x22u;
-    out[9] = 0x33u;
-    out[10] = 0x44u;
-    out[11] = 0x55u;
-
-    /* Ethertype: EAPOL */
-    out[12] = 0x88u;
-    out[13] = 0x8Eu;
-}
-
-static uint32_t kwifi_build_eapol_start(uint8_t *out, uint32_t cap)
-{
-    if (!out || cap < 18u)
-        return 0u;
-
-    kwifi_write_eapol_eth_hdr(out);
-
-    /* EAPOL: version 2, type Start(1), body length 0 */
-    out[14] = 2u;
-    out[15] = 1u;
-    out[16] = 0u;
-    out[17] = 0u;
-    return 18u;
-}
-
-static uint32_t kwifi_build_eap_response_identity(const char *identity, uint8_t identifier,
-                                                  uint8_t *out, uint32_t cap)
-{
-    uint32_t id_len = kwifi_cstr_len_cap(identity, 240u);
-    uint16_t eap_len = (uint16_t)(5u + id_len);
-    uint16_t eapol_len = eap_len;
-
-    if (!out || cap < (uint32_t)(18u + eap_len))
-        return 0u;
-
-    kwifi_write_eapol_eth_hdr(out);
-
-    /* EAPOL header */
-    out[14] = 2u;
-    out[15] = 0u; /* EAP-Packet */
-    kwifi_write_be16(out + 16u, eapol_len);
-
-    /* EAP packet: Response(2), Identifier, Length, Type Identity(1), identity bytes */
-    out[18u] = 2u;
-    out[19u] = identifier;
-    kwifi_write_be16(out + 20u, eap_len);
-    out[22u] = 1u;
-    for (uint32_t i = 0u; i < id_len; ++i)
-        out[23u + i] = (uint8_t)identity[i];
-
-    return 18u + (uint32_t)eap_len;
 }
 
 static int kwifi_fw_have_kind(const boot_info *bi, uint32_t kind)
@@ -478,8 +406,8 @@ int kwifi_connect_request(const char *ssid, const char *username, const char *pa
     g_kwifi_connect.requested = 1u;
     g_kwifi_connect.connected = 0u;
     g_kwifi_connect.enterprise = (username && username[0]) ? 1u : 0u;
-    g_kwifi_connect.eapol_start_retries = 0u;
-    g_kwifi_connect.mgmt_tx_seen = 0u;
+    g_kwifi_connect.control_port_authorized = g_kwifi_connect.enterprise ? 0u : 1u;
+    g_kwifi_connect.supplicant_ready = 0u;
     kwifi_copy_trunc(g_kwifi_connect.ssid, sizeof(g_kwifi_connect.ssid), ssid);
     kwifi_copy_trunc(g_kwifi_connect.username, sizeof(g_kwifi_connect.username), username ? username : "");
     kwifi_copy_trunc(g_kwifi_connect.password, sizeof(g_kwifi_connect.password), password);
@@ -497,10 +425,6 @@ int kwifi_connect_request(const char *ssid, const char *username, const char *pa
 
     if (username && username[0])
     {
-        uint32_t tx_count = 0u;
-        uint32_t tx_desc = 0u;
-        uint32_t tx_status = 0u;
-
         if (!pci_kernel_wifi_connect_ssid(ssid))
         {
             kwifi_set_status("enterprise connect failed before association");
@@ -508,12 +432,16 @@ int kwifi_connect_request(const char *ssid, const char *username, const char *pa
             return 0;
         }
 
-        if (pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status))
-            g_kwifi_connect.mgmt_tx_seen = tx_count;
-        kwifi_set_eap_phase(1u, "identity-ready");
-        kwifi_set_peap_phase(1u, "profile-loaded");
-        kwifi_set_status("enterprise connect staged; association sent, EAPOL pending");
-        terminal_print("[K:WIFI] enterprise connect staged; association + EAP state initialized");
+        /*
+         * Linux-style model:
+         * - association is done by driver/firmware
+         * - controlled port remains unauthorized
+         * - userspace/host supplicant runs PEAP/EAPOL and authorizes port
+         */
+        kwifi_set_eap_phase(1u, "assoc-staged");
+        kwifi_set_peap_phase(1u, "supplicant-pending");
+        kwifi_set_status("associated; controlled port unauthorized, waiting for PEAP supplicant");
+        terminal_print("[K:WIFI] enterprise connect staged; controlled-port auth now required");
         return 1;
     }
 
@@ -564,106 +492,70 @@ const char *kwifi_current_peap_phase(void)
     return g_kwifi_connect.requested ? g_kwifi_connect.peap_phase_text : "none";
 }
 
-int kwifi_poll_connection(uint32_t rounds)
+int kwifi_set_supplicant_ready(uint32_t ready)
 {
-    uint8_t eapol[320];
-    uint32_t tx_len;
-    uint32_t tx_count = 0u;
-    uint32_t tx_desc = 0u;
-    uint32_t tx_status = 0u;
-    (void)rounds;
-    (void)tx_desc;
-
     if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
         return 0;
 
+    g_kwifi_connect.supplicant_ready = ready ? 1u : 0u;
+    if (!ready)
+    {
+        g_kwifi_connect.control_port_authorized = 0u;
+        g_kwifi_connect.connected = 0u;
+        kwifi_set_eap_phase(2u, "controlled-port-unauthorized");
+        kwifi_set_peap_phase(2u, "peap-supplicant-required");
+        kwifi_set_status("supplicant marked not-ready; controlled port unauthorized");
+        return 1;
+    }
+
+    g_kwifi_connect.control_port_authorized = 1u;
+    g_kwifi_connect.connected = 1u;
+    kwifi_set_eap_phase(3u, "supplicant-running");
+    kwifi_set_peap_phase(3u, "peap-running");
+    kwifi_set_status("supplicant marked ready; controlled port authorized");
+    return 1;
+}
+
+int kwifi_poll_connection(uint32_t rounds)
+{
+    if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
+        return 0;
+
+    if (rounds == 0u)
+        rounds = 32u;
+    (void)pci_kernel_wifi_poll_events(rounds);
+
     /*
-     * Stage 1: enterprise connect state machine scaffold.
-     * Real EAPOL tx/rx and PEAP handshake are next-stage work.
+     * Proper Linux-style ownership split:
+     * - driver/firmware performs association
+     * - 802.1X controlled port stays unauthorized
+     * - supplicant handles PEAP/EAPOL state machine and eventually authorizes
+     *   the port.
      */
     if (g_kwifi_connect.eap_phase == 1u)
     {
-        tx_len = kwifi_build_eapol_start(eapol, sizeof(eapol));
-        if (!tx_len || !pci_kernel_wifi_tx_l2_frame(eapol, tx_len))
-        {
-            kwifi_set_eap_phase(2u, "eapol-start-failed");
-            kwifi_set_peap_phase(2u, "eapol-start");
-            kwifi_set_status("EAPOL-Start send failed: data-plane TX unavailable");
-            return 0;
-        }
-
-        kwifi_set_eap_phase(2u, "eapol-start-pending");
-        kwifi_set_peap_phase(2u, "eapol-start");
-        kwifi_set_status("EAPOL-Start queued; waiting for tx completion");
+        g_kwifi_connect.control_port_authorized = 0u;
+        kwifi_set_eap_phase(2u, "controlled-port-unauthorized");
+        kwifi_set_peap_phase(2u, "peap-supplicant-required");
+        kwifi_set_status("waiting for integrated PEAP supplicant (EAPOL control port path)");
         return 1;
     }
 
     if (g_kwifi_connect.eap_phase == 2u)
     {
-        if (!pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status) ||
-            tx_count == g_kwifi_connect.mgmt_tx_seen)
+        if (!g_kwifi_connect.supplicant_ready)
         {
-            kwifi_set_status("waiting for EAPOL-Start tx completion");
+            kwifi_set_status(g_kwifi_connect.control_port_authorized
+                                 ? "association done; waiting for enterprise key install"
+                                 : "association done; enterprise auth blocked until PEAP supplicant is integrated");
             return 0;
         }
 
-        g_kwifi_connect.mgmt_tx_seen = tx_count;
-        if (tx_status != 0u)
-        {
-            if (g_kwifi_connect.eapol_start_retries == 0u)
-            {
-                g_kwifi_connect.eapol_start_retries = 1u;
-                kwifi_set_eap_phase(1u, "eapol-start-retry");
-                kwifi_set_status("EAPOL-Start tx error; retrying with alternate tx path");
-                return 1;
-            }
-            kwifi_set_eap_phase(3u, "eapol-start-tx-error");
-            kwifi_set_peap_phase(3u, "peap-tls-start");
-            kwifi_set_status("EAPOL-Start tx completion returned error");
-            return 0;
-        }
-
-        tx_len = kwifi_build_eap_response_identity(g_kwifi_connect.username, 1u, eapol, sizeof(eapol));
-        if (!tx_len || !pci_kernel_wifi_tx_l2_frame(eapol, tx_len))
-        {
-            kwifi_set_eap_phase(3u, "identity-send-failed");
-            kwifi_set_peap_phase(3u, "peap-tls-start");
-            kwifi_set_status("EAP identity send failed: data-plane TX unavailable");
-            return 0;
-        }
-
-        kwifi_set_eap_phase(3u, "identity-sent-pending");
-        kwifi_set_peap_phase(3u, "peap-tls-start");
-        kwifi_set_status("EAP identity sent; waiting for tx completion");
-        return 1;
-    }
-
-    if (g_kwifi_connect.eap_phase == 3u && g_kwifi_connect.peap_phase == 3u)
-    {
-        if (!pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status) ||
-            tx_count == g_kwifi_connect.mgmt_tx_seen)
-        {
-            kwifi_set_status("waiting for EAP identity tx completion");
-            return 0;
-        }
-
-        g_kwifi_connect.mgmt_tx_seen = tx_count;
-        if (tx_status != 0u)
-        {
-            kwifi_set_peap_phase(4u, "identity-tx-error");
-            kwifi_set_status("EAP identity tx completion returned error");
-            return 0;
-        }
-
-        kwifi_set_peap_phase(4u, "tls-tunnel-pending");
-        kwifi_set_status("PEAP phase1 pending: TLS tunnel engine missing");
-        return 1;
-    }
-
-    if (g_kwifi_connect.eap_phase == 3u && g_kwifi_connect.peap_phase == 4u)
-    {
-        kwifi_set_peap_phase(5u, "inner-mschapv2-pending");
-        kwifi_set_status("PEAP phase2 pending: MSCHAPv2 engine missing");
+        g_kwifi_connect.control_port_authorized = 1u;
+        g_kwifi_connect.connected = 1u;
+        kwifi_set_eap_phase(3u, "supplicant-running");
+        kwifi_set_peap_phase(3u, "peap-running");
+        kwifi_set_status("PEAP supplicant running");
         return 1;
     }
 
