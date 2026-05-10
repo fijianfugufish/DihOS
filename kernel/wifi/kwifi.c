@@ -8,9 +8,186 @@
 
 #include <stdint.h>
 
+#define KWIFI_CONNECT_SSID_MAX 64u
+#define KWIFI_CONNECT_USER_MAX 96u
+#define KWIFI_CONNECT_PASS_MAX 128u
+
+typedef struct
+{
+    uint8_t requested;
+    uint8_t connected;
+    uint8_t enterprise;
+    uint8_t eap_phase;
+    uint8_t peap_phase;
+    uint8_t eapol_start_retries;
+    uint32_t mgmt_tx_seen;
+    char ssid[KWIFI_CONNECT_SSID_MAX];
+    char username[KWIFI_CONNECT_USER_MAX];
+    char password[KWIFI_CONNECT_PASS_MAX];
+    char auth_mode[24];
+    char eap_phase_text[32];
+    char peap_phase_text[40];
+    char status[96];
+} kwifi_connect_state;
+
+static kwifi_connect_state g_kwifi_connect;
+
 static uint64_t kwifi_pages_for_bytes(uint64_t bytes)
 {
     return (bytes + 4095ull) >> 12;
+}
+
+static uint32_t kwifi_cstr_len_cap(const char *text, uint32_t cap)
+{
+    uint32_t len = 0u;
+
+    if (!text)
+        return 0u;
+
+    while (text[len] && len < cap)
+        ++len;
+    return len;
+}
+
+static int kwifi_str_eq(const char *a, const char *b)
+{
+    uint32_t i = 0u;
+
+    if (!a || !b)
+        return 0;
+
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i])
+            return 0;
+        ++i;
+    }
+
+    return a[i] == b[i];
+}
+
+static void kwifi_copy_trunc(char *dst, uint32_t cap, const char *src)
+{
+    uint32_t i = 0u;
+
+    if (!dst || cap == 0u)
+        return;
+    if (!src)
+        src = "";
+
+    while (src[i] && i + 1u < cap)
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = 0;
+}
+
+static uint32_t kwifi_have_visible_network(const char *ssid)
+{
+    uint32_t count = kwifi_network_count();
+
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        const char *name;
+        if (kwifi_network_hidden(i))
+            continue;
+
+        name = kwifi_network_name(i);
+        if (name && kwifi_str_eq(name, ssid))
+            return 1u;
+    }
+
+    return 0u;
+}
+
+static void kwifi_set_status(const char *status)
+{
+    kwifi_copy_trunc(g_kwifi_connect.status, sizeof(g_kwifi_connect.status), status);
+}
+
+static void kwifi_set_eap_phase(uint8_t phase, const char *name)
+{
+    g_kwifi_connect.eap_phase = phase;
+    kwifi_copy_trunc(g_kwifi_connect.eap_phase_text, sizeof(g_kwifi_connect.eap_phase_text), name ? name : "none");
+}
+
+static void kwifi_set_peap_phase(uint8_t phase, const char *name)
+{
+    g_kwifi_connect.peap_phase = phase;
+    kwifi_copy_trunc(g_kwifi_connect.peap_phase_text, sizeof(g_kwifi_connect.peap_phase_text), name ? name : "none");
+}
+
+static void kwifi_write_be16(uint8_t *p, uint16_t value)
+{
+    p[0] = (uint8_t)((value >> 8) & 0xFFu);
+    p[1] = (uint8_t)(value & 0xFFu);
+}
+
+static void kwifi_write_eapol_eth_hdr(uint8_t *out)
+{
+    /* 802.1X PAE group address */
+    out[0] = 0x01u;
+    out[1] = 0x80u;
+    out[2] = 0xC2u;
+    out[3] = 0x00u;
+    out[4] = 0x00u;
+    out[5] = 0x03u;
+
+    /* Matches current vdev MAC in pci_kernel_nic_probe.c */
+    out[6] = 0x02u;
+    out[7] = 0x11u;
+    out[8] = 0x22u;
+    out[9] = 0x33u;
+    out[10] = 0x44u;
+    out[11] = 0x55u;
+
+    /* Ethertype: EAPOL */
+    out[12] = 0x88u;
+    out[13] = 0x8Eu;
+}
+
+static uint32_t kwifi_build_eapol_start(uint8_t *out, uint32_t cap)
+{
+    if (!out || cap < 18u)
+        return 0u;
+
+    kwifi_write_eapol_eth_hdr(out);
+
+    /* EAPOL: version 2, type Start(1), body length 0 */
+    out[14] = 2u;
+    out[15] = 1u;
+    out[16] = 0u;
+    out[17] = 0u;
+    return 18u;
+}
+
+static uint32_t kwifi_build_eap_response_identity(const char *identity, uint8_t identifier,
+                                                  uint8_t *out, uint32_t cap)
+{
+    uint32_t id_len = kwifi_cstr_len_cap(identity, 240u);
+    uint16_t eap_len = (uint16_t)(5u + id_len);
+    uint16_t eapol_len = eap_len;
+
+    if (!out || cap < (uint32_t)(18u + eap_len))
+        return 0u;
+
+    kwifi_write_eapol_eth_hdr(out);
+
+    /* EAPOL header */
+    out[14] = 2u;
+    out[15] = 0u; /* EAP-Packet */
+    kwifi_write_be16(out + 16u, eapol_len);
+
+    /* EAP packet: Response(2), Identifier, Length, Type Identity(1), identity bytes */
+    out[18u] = 2u;
+    out[19u] = identifier;
+    kwifi_write_be16(out + 20u, eap_len);
+    out[22u] = 1u;
+    for (uint32_t i = 0u; i < id_len; ++i)
+        out[23u + i] = (uint8_t)identity[i];
+
+    return 18u + (uint32_t)eap_len;
 }
 
 static int kwifi_fw_have_kind(const boot_info *bi, uint32_t kind)
@@ -250,6 +427,247 @@ int kwifi_network_poll(uint32_t rounds)
 uint32_t kwifi_network_scan_running(void)
 {
     return pci_kernel_wifi_scan_running();
+}
+
+int kwifi_connect_request(const char *ssid, const char *username, const char *password)
+{
+    uint32_t ssid_len;
+    uint32_t user_len;
+    uint32_t pass_len;
+    uint32_t found;
+
+    if (!ssid || !ssid[0])
+    {
+        terminal_print("[K:WIFI] connect rejected: missing ssid");
+        return 0;
+    }
+
+    ssid_len = kwifi_cstr_len_cap(ssid, KWIFI_CONNECT_SSID_MAX);
+    if (ssid_len == 0u || ssid_len >= KWIFI_CONNECT_SSID_MAX)
+    {
+        terminal_print("[K:WIFI] connect rejected: ssid too long");
+        return 0;
+    }
+
+    user_len = kwifi_cstr_len_cap(username, KWIFI_CONNECT_USER_MAX);
+    pass_len = kwifi_cstr_len_cap(password, KWIFI_CONNECT_PASS_MAX);
+    if (user_len >= KWIFI_CONNECT_USER_MAX)
+    {
+        terminal_print("[K:WIFI] connect rejected: username too long");
+        return 0;
+    }
+    if (pass_len >= KWIFI_CONNECT_PASS_MAX)
+    {
+        terminal_print("[K:WIFI] connect rejected: password too long");
+        return 0;
+    }
+    if (pass_len == 0u)
+    {
+        terminal_print("[K:WIFI] connect rejected: missing password");
+        return 0;
+    }
+
+    found = kwifi_have_visible_network(ssid);
+    if (!found && !kwifi_network_scan_running())
+    {
+        (void)kwifi_network_refresh();
+        (void)kwifi_network_poll(256u);
+        found = kwifi_have_visible_network(ssid);
+    }
+
+    g_kwifi_connect.requested = 1u;
+    g_kwifi_connect.connected = 0u;
+    g_kwifi_connect.enterprise = (username && username[0]) ? 1u : 0u;
+    g_kwifi_connect.eapol_start_retries = 0u;
+    g_kwifi_connect.mgmt_tx_seen = 0u;
+    kwifi_copy_trunc(g_kwifi_connect.ssid, sizeof(g_kwifi_connect.ssid), ssid);
+    kwifi_copy_trunc(g_kwifi_connect.username, sizeof(g_kwifi_connect.username), username ? username : "");
+    kwifi_copy_trunc(g_kwifi_connect.password, sizeof(g_kwifi_connect.password), password);
+    kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode),
+                     g_kwifi_connect.enterprise ? "wpa2-enterprise" : "non-enterprise");
+    kwifi_set_eap_phase(0u, "none");
+    kwifi_set_peap_phase(0u, "none");
+
+    if (!found)
+    {
+        kwifi_set_status("requested; target SSID not in latest scan yet");
+        terminal_print("[K:WIFI] connect request saved; SSID not visible yet");
+        return 1;
+    }
+
+    if (username && username[0])
+    {
+        uint32_t tx_count = 0u;
+        uint32_t tx_desc = 0u;
+        uint32_t tx_status = 0u;
+
+        if (!pci_kernel_wifi_connect_ssid(ssid))
+        {
+            kwifi_set_status("enterprise connect failed before association");
+            terminal_print("[K:WIFI] enterprise connect attempt failed before association");
+            return 0;
+        }
+
+        if (pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status))
+            g_kwifi_connect.mgmt_tx_seen = tx_count;
+        kwifi_set_eap_phase(1u, "identity-ready");
+        kwifi_set_peap_phase(1u, "profile-loaded");
+        kwifi_set_status("enterprise connect staged; association sent, EAPOL pending");
+        terminal_print("[K:WIFI] enterprise connect staged; association + EAP state initialized");
+        return 1;
+    }
+
+    if (pci_kernel_wifi_connect_ssid(ssid))
+    {
+        kwifi_set_status("firmware association attempt sent; awaiting auth/link confirmation");
+        terminal_print("[K:WIFI] connect attempt sent to firmware");
+        return 1;
+    }
+
+    kwifi_set_status("connect attempt failed before association");
+    terminal_print("[K:WIFI] connect attempt failed");
+    return 0;
+}
+
+uint32_t kwifi_current_connected(void)
+{
+    return g_kwifi_connect.connected ? 1u : 0u;
+}
+
+const char *kwifi_current_ssid(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.ssid : "";
+}
+
+const char *kwifi_current_username(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.username : "";
+}
+
+const char *kwifi_current_status(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.status : "idle";
+}
+
+const char *kwifi_current_auth_mode(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.auth_mode : "none";
+}
+
+const char *kwifi_current_eap_phase(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.eap_phase_text : "none";
+}
+
+const char *kwifi_current_peap_phase(void)
+{
+    return g_kwifi_connect.requested ? g_kwifi_connect.peap_phase_text : "none";
+}
+
+int kwifi_poll_connection(uint32_t rounds)
+{
+    uint8_t eapol[320];
+    uint32_t tx_len;
+    uint32_t tx_count = 0u;
+    uint32_t tx_desc = 0u;
+    uint32_t tx_status = 0u;
+    (void)rounds;
+    (void)tx_desc;
+
+    if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
+        return 0;
+
+    /*
+     * Stage 1: enterprise connect state machine scaffold.
+     * Real EAPOL tx/rx and PEAP handshake are next-stage work.
+     */
+    if (g_kwifi_connect.eap_phase == 1u)
+    {
+        tx_len = kwifi_build_eapol_start(eapol, sizeof(eapol));
+        if (!tx_len || !pci_kernel_wifi_tx_l2_frame(eapol, tx_len))
+        {
+            kwifi_set_eap_phase(2u, "eapol-start-failed");
+            kwifi_set_peap_phase(2u, "eapol-start");
+            kwifi_set_status("EAPOL-Start send failed: data-plane TX unavailable");
+            return 0;
+        }
+
+        kwifi_set_eap_phase(2u, "eapol-start-pending");
+        kwifi_set_peap_phase(2u, "eapol-start");
+        kwifi_set_status("EAPOL-Start queued; waiting for tx completion");
+        return 1;
+    }
+
+    if (g_kwifi_connect.eap_phase == 2u)
+    {
+        if (!pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status) ||
+            tx_count == g_kwifi_connect.mgmt_tx_seen)
+        {
+            kwifi_set_status("waiting for EAPOL-Start tx completion");
+            return 0;
+        }
+
+        g_kwifi_connect.mgmt_tx_seen = tx_count;
+        if (tx_status != 0u)
+        {
+            if (g_kwifi_connect.eapol_start_retries == 0u)
+            {
+                g_kwifi_connect.eapol_start_retries = 1u;
+                kwifi_set_eap_phase(1u, "eapol-start-retry");
+                kwifi_set_status("EAPOL-Start tx error; retrying with alternate tx path");
+                return 1;
+            }
+            kwifi_set_eap_phase(3u, "eapol-start-tx-error");
+            kwifi_set_peap_phase(3u, "peap-tls-start");
+            kwifi_set_status("EAPOL-Start tx completion returned error");
+            return 0;
+        }
+
+        tx_len = kwifi_build_eap_response_identity(g_kwifi_connect.username, 1u, eapol, sizeof(eapol));
+        if (!tx_len || !pci_kernel_wifi_tx_l2_frame(eapol, tx_len))
+        {
+            kwifi_set_eap_phase(3u, "identity-send-failed");
+            kwifi_set_peap_phase(3u, "peap-tls-start");
+            kwifi_set_status("EAP identity send failed: data-plane TX unavailable");
+            return 0;
+        }
+
+        kwifi_set_eap_phase(3u, "identity-sent-pending");
+        kwifi_set_peap_phase(3u, "peap-tls-start");
+        kwifi_set_status("EAP identity sent; waiting for tx completion");
+        return 1;
+    }
+
+    if (g_kwifi_connect.eap_phase == 3u && g_kwifi_connect.peap_phase == 3u)
+    {
+        if (!pci_kernel_wifi_mgmt_tx_status(&tx_count, &tx_desc, &tx_status) ||
+            tx_count == g_kwifi_connect.mgmt_tx_seen)
+        {
+            kwifi_set_status("waiting for EAP identity tx completion");
+            return 0;
+        }
+
+        g_kwifi_connect.mgmt_tx_seen = tx_count;
+        if (tx_status != 0u)
+        {
+            kwifi_set_peap_phase(4u, "identity-tx-error");
+            kwifi_set_status("EAP identity tx completion returned error");
+            return 0;
+        }
+
+        kwifi_set_peap_phase(4u, "tls-tunnel-pending");
+        kwifi_set_status("PEAP phase1 pending: TLS tunnel engine missing");
+        return 1;
+    }
+
+    if (g_kwifi_connect.eap_phase == 3u && g_kwifi_connect.peap_phase == 4u)
+    {
+        kwifi_set_peap_phase(5u, "inner-mschapv2-pending");
+        kwifi_set_status("PEAP phase2 pending: MSCHAPv2 engine missing");
+        return 1;
+    }
+
+    return 0;
 }
 
 void kwifi_init(boot_info *bi, int storage_mounted)

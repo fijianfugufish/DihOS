@@ -152,6 +152,8 @@ static int dihos_cmd_sys_status(dihos_shell_stage *stage);
 static int dihos_cmd_sys_time(dihos_shell_stage *stage);
 static int dihos_cmd_sys_run(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_networks(dihos_shell_stage *stage);
+static int dihos_cmd_wifi_connect(dihos_shell_stage *stage);
+static int dihos_cmd_wifi_current(dihos_shell_stage *stage);
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_cd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_list(dihos_shell_stage *stage);
@@ -182,6 +184,8 @@ static const dihos_shell_command G_commands[] = {
     {"sys:time", "sys:time [mode=ticks|seconds|fattime] [base=dec|hex]", "Show kernel time counters.", 0u, dihos_cmd_sys_time},
     {"sys:run", "sys:run [path] [args...] [out=name] [window=yes|no]", "Run a .sac script or .sacx app.", 1u, dihos_cmd_sys_run},
     {"wifi:networks", "wifi:networks [refresh=yes]", "Print WiFi networks, auto-scanning when the cache is empty.", 0u, dihos_cmd_wifi_networks},
+    {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER]", "Save a WiFi connect request for the selected SSID.", 0u, dihos_cmd_wifi_connect},
+    {"wifi:current", "wifi:current", "Show current WiFi connect target and state.", 0u, dihos_cmd_wifi_current},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -1502,6 +1506,80 @@ static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
         terminal_print_inline("\n");
     }
 
+    return 0;
+}
+
+static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
+{
+    const char *ssid = dihos_stage_named(stage, "ssid");
+    const char *username = dihos_stage_named(stage, "username");
+    const char *password = dihos_stage_named(stage, "password");
+
+    if (!ssid && stage->positional_count > 0u)
+        ssid = stage->positional[0];
+
+    if (!ssid || !ssid[0])
+    {
+        terminal_error("wifi:connect needs ssid=NAME");
+        return -1;
+    }
+
+    if (!password || !password[0])
+    {
+        terminal_error("wifi:connect needs password=PASS");
+        return -1;
+    }
+
+    if (!kwifi_connect_request(ssid, username, password))
+    {
+        terminal_error("wifi connect request failed");
+        return -1;
+    }
+
+    terminal_success("wifi connect request queued");
+    return 0;
+}
+
+static int dihos_cmd_wifi_current(dihos_shell_stage *stage)
+{
+    const char *ssid = kwifi_current_ssid();
+    const char *username = kwifi_current_username();
+    const char *status = kwifi_current_status();
+    const char *auth_mode = kwifi_current_auth_mode();
+    const char *eap_phase = kwifi_current_eap_phase();
+    const char *peap_phase = kwifi_current_peap_phase();
+    (void)stage;
+
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (!kwifi_poll_connection(32u))
+            break;
+    }
+    status = kwifi_current_status();
+    eap_phase = kwifi_current_eap_phase();
+    peap_phase = kwifi_current_peap_phase();
+
+    terminal_print("wifi current:");
+    terminal_print_inline("  connected: ");
+    terminal_print_inline(kwifi_current_connected() ? "yes\n" : "no\n");
+    terminal_print_inline("  ssid: ");
+    terminal_print_inline((ssid && ssid[0]) ? ssid : "<none>");
+    terminal_print_inline("\n");
+    terminal_print_inline("  username: ");
+    terminal_print_inline((username && username[0]) ? username : "<none>");
+    terminal_print_inline("\n");
+    terminal_print_inline("  auth_mode: ");
+    terminal_print_inline((auth_mode && auth_mode[0]) ? auth_mode : "none");
+    terminal_print_inline("\n");
+    terminal_print_inline("  eap_phase: ");
+    terminal_print_inline((eap_phase && eap_phase[0]) ? eap_phase : "none");
+    terminal_print_inline("\n");
+    terminal_print_inline("  peap_phase: ");
+    terminal_print_inline((peap_phase && peap_phase[0]) ? peap_phase : "none");
+    terminal_print_inline("\n");
+    terminal_print_inline("  status: ");
+    terminal_print_inline((status && status[0]) ? status : "idle");
+    terminal_print_inline("\n");
     return 0;
 }
 

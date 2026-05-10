@@ -10,3 +10,6 @@ uint32_t pci_kernel_wifi_network_hidden(uint32_t index);
 int pci_kernel_wifi_trigger_scan(void);
 int pci_kernel_wifi_poll_events(uint32_t rounds);
 uint32_t pci_kernel_wifi_scan_running(void);
+int pci_kernel_wifi_connect_ssid(const char *ssid);
+int pci_kernel_wifi_tx_l2_frame(const uint8_t *frame, uint32_t len);
+int pci_kernel_wifi_mgmt_tx_status(uint32_t *count, uint32_t *last_desc, uint32_t *last_status);
