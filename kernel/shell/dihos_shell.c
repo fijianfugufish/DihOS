@@ -105,6 +105,7 @@ typedef struct
 
 static dihos_shell_session G_default_shell;
 static dihos_shell_session *G_active_shell = &G_default_shell;
+static char G_console_scratch[DIHOS_SHELL_CAPTURE_CAP];
 
 static void dihos_shell_default_print(const char *text, void *user);
 static void dihos_shell_default_print_inline(const char *text, void *user);
@@ -1170,6 +1171,19 @@ static int dihos_resolve_path_or_cwd(const char *input, char *friendly, char *ra
     return 0;
 }
 
+static int dihos_is_console_runtime_token(const char *text)
+{
+    return text && strcmp(text, "%console%") == 0;
+}
+
+static const char *dihos_current_console_text(void)
+{
+    if (dihos_shell_session_console_text(dihos_current_shell(), G_console_scratch,
+                                         sizeof(G_console_scratch)) != 0)
+        G_console_scratch[0] = 0;
+    return G_console_scratch;
+}
+
 static int dihos_join_positionals(const dihos_shell_stage *stage, uint32_t start, char *out, uint32_t cap)
 {
     uint32_t i = 0;
@@ -1187,6 +1201,8 @@ static int dihos_join_positionals(const dihos_shell_stage *stage, uint32_t start
 
         if (!piece)
             continue;
+        if (dihos_is_console_runtime_token(piece))
+            piece = dihos_current_console_text();
 
         piece_len = (uint32_t)strlen(piece);
         if (len + piece_len + 2u >= cap)
@@ -1820,9 +1836,78 @@ static int dihos_cmd_wifi_rx(dihos_shell_stage *stage)
         dihos_print_dec_value(i + 1u);
         terminal_print(" kind=");
         terminal_print_inline_hex64(frame_kind);
+        uint8_t is_dp_payload = 0u;
+        uint8_t is_htt_msg = 0u;
+        uint8_t is_mgmt_frame = 0u;
+        terminal_print(" class=");
+        if (frame_kind & 0x80000000u)
+        {
+            is_dp_payload = 1u;
+            terminal_print_inline("dp-payload");
+        }
+        else if (frame_kind & 0x40000000u)
+            terminal_print_inline("dp-unmatched-desc");
+        else if ((frame_kind & 0xFF000000u) == 0x20000000u || frame_kind <= 0xFFu)
+        {
+            is_htt_msg = 1u;
+            terminal_print_inline("htt-msg");
+        }
+        else if ((frame_kind & 0xFF000000u) == 0x10000000u)
+        {
+            is_mgmt_frame = 1u;
+            terminal_print_inline("wmi-mgmt-rx");
+        }
+        else
+            terminal_print_inline("unknown");
         terminal_print(" len=");
         dihos_print_dec_value(frame_len);
         terminal_print_inline("\n");
+
+        if (is_dp_payload && frame_len >= 14u)
+        {
+            uint16_t ethertype = (uint16_t)((uint16_t)frame[12] << 8) | (uint16_t)frame[13];
+            terminal_print_inline("    ethertype: ");
+            terminal_print_inline_hex8((uint8_t)(ethertype >> 8));
+            terminal_print_inline_hex8((uint8_t)(ethertype & 0xFFu));
+            if (ethertype == 0x0800u)
+                terminal_print_inline(" (IPv4)");
+            else if (ethertype == 0x0806u)
+                terminal_print_inline(" (ARP)");
+            else if (ethertype == 0x86DDu)
+                terminal_print_inline(" (IPv6)");
+            terminal_print_inline("\n");
+        }
+        else if (is_htt_msg)
+        {
+            uint8_t msg_id = (uint8_t)(frame_kind & 0xFFu);
+            terminal_print_inline("    htt_msg_id: ");
+            terminal_print_inline_hex8(msg_id);
+            terminal_print_inline("\n");
+        }
+        else if (is_mgmt_frame && frame_len >= 2u)
+        {
+            uint16_t fc = (uint16_t)frame[0] | ((uint16_t)frame[1] << 8);
+            uint8_t subtype = (uint8_t)((fc >> 4) & 0xFu);
+            terminal_print_inline("    mgmt_subtype: ");
+            terminal_print_inline_hex8(subtype);
+            if (subtype == 0u)
+                terminal_print_inline(" (assoc-req)");
+            else if (subtype == 1u)
+                terminal_print_inline(" (assoc-resp)");
+            else if (subtype == 2u)
+                terminal_print_inline(" (reassoc-req)");
+            else if (subtype == 3u)
+                terminal_print_inline(" (reassoc-resp)");
+            else if (subtype == 10u)
+                terminal_print_inline(" (disassoc)");
+            else if (subtype == 11u)
+                terminal_print_inline(" (auth)");
+            else if (subtype == 12u)
+                terminal_print_inline(" (deauth)");
+            else if (subtype == 13u)
+                terminal_print_inline(" (action)");
+            terminal_print_inline("\n");
+        }
 
         preview = frame_len;
         if (preview > 24u)
@@ -2229,9 +2314,15 @@ static int dihos_cmd_fs_write(dihos_shell_stage *stage)
     {
         text = stage->stdin_text;
     }
+    else if (stage->positional_count == 2u && dihos_is_console_runtime_token(stage->positional[1]))
+    {
+        text = dihos_current_console_text();
+    }
     else if (dihos_stage_named(stage, "text"))
     {
         text = dihos_stage_named(stage, "text");
+        if (dihos_is_console_runtime_token(text))
+            text = dihos_current_console_text();
     }
     else
     {
@@ -3017,4 +3108,19 @@ void dihos_shell_session_error(dihos_shell_session *session, const char *text)
 void dihos_shell_session_success(dihos_shell_session *session, const char *text)
 {
     dihos_shell_output_success(session ? session : &G_default_shell, text);
+}
+
+int dihos_shell_session_console_text(dihos_shell_session *session, char *out, uint32_t out_cap)
+{
+    if (!out || out_cap == 0u)
+        return -1;
+
+    out[0] = 0;
+    if (!session)
+        session = &G_default_shell;
+
+    if (session->io.console_text)
+        return session->io.console_text(out, out_cap, session->io.user);
+
+    return 0;
 }

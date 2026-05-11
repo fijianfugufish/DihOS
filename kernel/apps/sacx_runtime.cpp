@@ -3022,6 +3022,20 @@ extern "C" int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_
     return 0;
 }
 
+extern "C" int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message)
+{
+    sacx_task *task = sacx_find_task_by_id(task_id);
+
+    if (!task)
+        return -1;
+
+    if (task->state == SACX_TASK_EXITED || task->state == SACX_TASK_FAULTED)
+        return 0;
+
+    sacx_task_finish(task, status, message ? message : "closed", SACX_TASK_EXITED);
+    return 0;
+}
+
 extern "C" int sacx_runtime_task_release(uint32_t task_id)
 {
     sacx_task *task = sacx_find_task_by_id(task_id);

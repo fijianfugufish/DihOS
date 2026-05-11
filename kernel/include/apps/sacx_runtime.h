@@ -53,6 +53,7 @@ extern "C"
                                uint32_t *out_task_id);
 
     int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_status);
+    int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message);
     int sacx_runtime_task_release(uint32_t task_id);
 
 #ifdef __cplusplus

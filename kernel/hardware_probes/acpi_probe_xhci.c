@@ -111,26 +111,39 @@ static void xhci_add(uint64_t *out, uint32_t *count, uint32_t max_count, uint64_
 
 static int xhci_caps_ok(uint64_t mmio)
 {
-    /*
-      DO NOT touch MMIO here.
-
-      ACPI _CRS contains many memory resources that are not xHCI.
-      Probing them here can crash the kernel before USB init/fallback.
-    */
     if (!sane_ptr(mmio))
         return 0;
 
+    /* Must be 4KB aligned */
     if ((mmio & 0xFFFu) != 0)
         return 0;
 
     /*
-      Keep this tight for your Snapdragon low-MMIO region.
-      Known-good examples: 0x0A600000, 0x0A000000, 0x0A800000.
+      Snapdragon / ARM low-MMIO window
+      Known-good:
+        0x0A000000
+        0x0A400000
+        0x0A600000
+        0x0A800000
     */
-    if (mmio < 0x08000000ull || mmio > 0x0FFFFFFFull)
-        return 0;
+    if (mmio >= 0x08000000ull &&
+        mmio <= 0x0FFFFFFFull)
+        return 1;
 
-    return 1;
+    /*
+      x64 Intel xHCI high-MMIO window
+
+      Your controllers:
+        0x622F260000
+        0x622F270000
+
+      Give it a little breathing room.
+    */
+    if (mmio >= 0x622F000000ull &&
+        mmio <= 0x622FFFFFFFull)
+        return 1;
+
+    return 0;
 }
 
 /*

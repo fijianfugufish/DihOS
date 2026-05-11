@@ -211,6 +211,14 @@ static void terminal_session_clear(void *user)
         terminal->ClearNoFlush();
 }
 
+static int terminal_session_console_text(char *out, uint32_t out_cap, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (!terminal)
+        return -1;
+    return terminal->CopyConsoleText(out, out_cap);
+}
+
 static void terminal_i32_to_dec(int value, char *out, uint32_t cap)
 {
     char tmp[16];
@@ -325,6 +333,7 @@ void Terminal::ResetState()
     script_done_reported = 0u;
     sacx_active = 0u;
     sacx_done_reported = 0u;
+    program_window_expected_visible = 0u;
     sacx_task_id = 0u;
     memset(&shell, 0, sizeof(shell));
     memset(&script, 0, sizeof(script));
@@ -723,6 +732,7 @@ void Terminal::Initialize(kfont *font, const char *title, int new_slot_index)
     io.error = terminal_session_error;
     io.success = terminal_session_success;
     io.clear = terminal_session_clear;
+    io.console_text = terminal_session_console_text;
     io.user = this;
     dihos_shell_session_init(&shell, &io);
 
@@ -946,6 +956,51 @@ void Terminal::Success(const char *text)
     WriteStyledText(text, green, 1);
 }
 
+int Terminal::CopyConsoleText(char *out, uint32_t cap) const
+{
+    uint32_t total = 0u;
+    uint32_t skip = 0u;
+    uint32_t len = 0u;
+
+    if (!out || cap == 0u)
+        return -1;
+
+    out[0] = 0;
+    for (int i = 0; i < line_count; ++i)
+        total += (uint32_t)lines[i].len + 1u;
+
+    if (total + 1u > cap)
+        skip = total - (cap - 1u);
+
+    for (int i = 0; i < line_count && len + 1u < cap; ++i)
+    {
+        for (uint32_t j = 0u; j < lines[i].len && len + 1u < cap; ++j)
+        {
+            if (skip)
+            {
+                --skip;
+                continue;
+            }
+            out[len++] = lines[i].text[j];
+        }
+
+        if (len + 1u < cap)
+        {
+            if (skip)
+            {
+                --skip;
+            }
+            else
+            {
+                out[len++] = '\n';
+            }
+        }
+    }
+
+    out[len] = 0;
+    return 0;
+}
+
 void Terminal::ToggleQuiet()
 {
     terminal_quiet = terminal_quiet ? 0 : 1;
@@ -962,6 +1017,8 @@ void Terminal::Activate()
 
     kwindow_set_visible(window, 1);
     (void)kwindow_raise(window);
+    if (ProgramActive())
+        program_window_expected_visible = 1u;
 
     if (input_box.idx >= 0)
         ktextbox_set_focus(input_box, 1);
@@ -976,6 +1033,8 @@ void Terminal::SetWindowVisible(uint32_t visible)
         return;
 
     kwindow_set_visible(window, visible ? 1u : 0u);
+    if (ProgramActive())
+        program_window_expected_visible = visible ? 1u : 0u;
     if (input_box.idx >= 0)
         ktextbox_set_focus(input_box, visible ? 1u : 0u);
 }
@@ -1000,6 +1059,45 @@ int Terminal::ProgramActive() const
 int Terminal::ScriptActive() const
 {
     return script_active ? 1 : 0;
+}
+
+int Terminal::CancelProgramIfClosed()
+{
+    if (!ProgramActive())
+        return 0;
+
+    if (!program_window_expected_visible || Visible())
+        return 0;
+
+    if (script_active)
+    {
+        script_active = 0u;
+        script_done_reported = 1u;
+        memset(&script, 0, sizeof(script));
+    }
+
+    if (sacx_active)
+    {
+        if (sacx_task_id)
+        {
+            (void)sacx_runtime_task_cancel(sacx_task_id, -1, "closed");
+            (void)sacx_runtime_task_release(sacx_task_id);
+        }
+        sacx_active = 0u;
+        sacx_done_reported = 1u;
+        sacx_task_id = 0u;
+    }
+
+    program_window_expected_visible = 0u;
+    if (input_box.idx >= 0)
+    {
+        ktextbox_clear(input_box);
+        ktextbox_set_focus(input_box, 0u);
+        ktextbox_set_enabled(input_box, 1u);
+    }
+    if (window.idx >= 0)
+        kwindow_set_title(window, "Terminal");
+    return 1;
 }
 
 int Terminal::StartProgram(const char *raw_path, const char *friendly_path, uint32_t launch_flags)
@@ -1126,6 +1224,9 @@ void Terminal::UpdateScript()
     if (!script_active)
         return;
 
+    if (CancelProgramIfClosed())
+        return;
+
     was_waiting = dihos_script_waiting_input(&script);
     (void)dihos_script_step(&script, DIHOS_SCRIPT_STEP_BUDGET);
     if (!was_waiting && dihos_script_waiting_input(&script))
@@ -1134,6 +1235,7 @@ void Terminal::UpdateScript()
         return;
 
     script_active = 0u;
+    program_window_expected_visible = 0u;
     if (script_done_reported)
         return;
 
@@ -1160,10 +1262,14 @@ void Terminal::UpdateSacx()
     if (!sacx_active || !sacx_task_id)
         return;
 
+    if (CancelProgramIfClosed())
+        return;
+
     if (sacx_runtime_task_status(sacx_task_id, &st) != 0)
     {
         sacx_active = 0u;
         sacx_done_reported = 1u;
+        program_window_expected_visible = 0u;
         sacx_task_id = 0u;
         return;
     }
@@ -1172,6 +1278,7 @@ void Terminal::UpdateSacx()
         return;
 
     sacx_active = 0u;
+    program_window_expected_visible = 0u;
     if (sacx_done_reported)
         return;
 

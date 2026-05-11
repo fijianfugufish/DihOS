@@ -58,6 +58,43 @@ static char script_lower_ascii(char ch)
     return ch;
 }
 
+static int script_text_equals_ci(const char *a, const char *b)
+{
+    uint32_t i = 0u;
+
+    if (!a || !b)
+        return 0;
+
+    while (a[i] && b[i])
+    {
+        if (script_lower_ascii(a[i]) != script_lower_ascii(b[i]))
+            return 0;
+        ++i;
+    }
+
+    return a[i] == 0 && b[i] == 0;
+}
+
+static int script_parse_bool_literal(const char *text, int *out)
+{
+    if (!text || !out)
+        return -1;
+
+    if (script_text_equals_ci(text, "true"))
+    {
+        *out = 1;
+        return 0;
+    }
+
+    if (script_text_equals_ci(text, "false"))
+    {
+        *out = 0;
+        return 0;
+    }
+
+    return -1;
+}
+
 static void script_copy(char *dst, uint32_t cap, const char *src)
 {
     uint32_t i = 0u;
@@ -184,7 +221,7 @@ static void script_i32_to_dec(int value, char *out, uint32_t cap)
         out[0] = '-';
         if (cap <= 1u)
             return;
-        magnitude = (uint32_t)(-value);
+        magnitude = (uint32_t)(-(value + 1)) + 1u;
         script_u32_to_dec(magnitude, out + 1u, cap - 1u);
         return;
     }
@@ -200,6 +237,9 @@ static int script_parse_i32(const char *text, int *out)
 
     if (!text || !text[0] || !out)
         return -1;
+
+    if (script_parse_bool_literal(text, out) == 0)
+        return 0;
 
     if (text[0] == '-')
     {
@@ -236,6 +276,15 @@ static int script_parse_double(const char *text, double *out)
 
     if (!text || !text[0] || !out)
         return -1;
+
+    {
+        int bool_value = 0;
+        if (script_parse_bool_literal(text, &bool_value) == 0)
+        {
+            *out = (double)bool_value;
+            return 0;
+        }
+    }
 
     if (text[i] == '-')
     {
@@ -414,6 +463,48 @@ static int script_name_valid(const char *name)
     return 1;
 }
 
+static int script_is_void_name(const char *name)
+{
+    return script_text_equals_ci(name, "void");
+}
+
+static int script_name_reserved(const char *name)
+{
+    static const char *reserved[] = {
+        "if", "else", "while", "for", "from", "to", "step", "fn", "end",
+        "continue", "break", "return", "let", "unset",
+        "goto", "call", "exit", "input",
+        "add", "sub", "mul", "div", "pow", "mod",
+        "rand", "seed", "pick",
+        "and", "nand", "or", "xor", "nor", "not",
+        "band", "bnand", "bor", "bxor", "bnor", "bnot", "shl", "shr", "rol", "ror",
+        "cmp", "eq", "neq", "lt", "lte", "gt", "gte", "abs",
+        "exists", "isfile", "isdir", "true", "false", "void",
+        "script", "script_raw", "script_dir", "status", "status_text",
+        "stdin", "argc", "cwd", "ticks", "seconds", "fattime", "console"};
+
+    if (!name)
+        return 0;
+
+    for (uint32_t i = 0u; i < sizeof(reserved) / sizeof(reserved[0]); ++i)
+        if (script_text_equals_ci(name, reserved[i]))
+            return 1;
+
+    return 0;
+}
+
+static int script_var_target_valid(const char *name)
+{
+    if (!script_name_valid(name))
+        return 0;
+    return (!script_name_reserved(name) || script_is_void_name(name)) ? 1 : 0;
+}
+
+static int script_var_declaration_valid(const char *name)
+{
+    return (script_name_valid(name) && !script_name_reserved(name)) ? 1 : 0;
+}
+
 static dihos_script_call_frame *script_current_frame(dihos_script_runner *runner)
 {
     if (!runner || runner->call_depth == 0u)
@@ -475,26 +566,43 @@ static void script_unset_var_in_list(dihos_script_var *vars, uint32_t *count, co
     (*count)--;
 }
 
-static const char *script_user_var_value(dihos_script_runner *runner, const char *name)
+static int script_user_var_lookup(dihos_script_runner *runner, const char *name, const char **out_value)
 {
     dihos_script_call_frame *frame = 0;
     int idx = -1;
 
-    if (!runner || !name)
-        return "";
+    if (out_value)
+        *out_value = "";
+    if (!runner || !name || !out_value)
+        return -1;
 
     frame = script_current_frame(runner);
     if (frame)
     {
         idx = script_find_var_in_list(frame->vars, frame->var_count, name);
         if (idx >= 0)
-            return frame->vars[idx].value;
+        {
+            *out_value = frame->vars[idx].value;
+            return 0;
+        }
     }
 
     idx = script_find_var_in_list(runner->vars, runner->var_count, name);
     if (idx >= 0)
-        return runner->vars[idx].value;
+    {
+        *out_value = runner->vars[idx].value;
+        return 0;
+    }
 
+    return -1;
+}
+
+static const char *script_user_var_value(dihos_script_runner *runner, const char *name)
+{
+    const char *value = "";
+
+    if (script_user_var_lookup(runner, name, &value) == 0)
+        return value;
     return "";
 }
 
@@ -512,6 +620,10 @@ static int script_set_user_var(dihos_script_runner *runner, const char *name, co
 
     if (!runner)
         return -1;
+    if (script_is_void_name(name))
+        return 0;
+    if (script_name_reserved(name))
+        return -1;
 
     if (frame)
     {
@@ -527,6 +639,10 @@ static void script_unset_user_var(dihos_script_runner *runner, const char *name)
     dihos_script_call_frame *frame = script_current_frame(runner);
 
     if (!runner || !script_name_valid(name))
+        return;
+    if (script_is_void_name(name))
+        return;
+    if (script_name_reserved(name))
         return;
 
     if (frame)
@@ -692,13 +808,32 @@ static int script_runtime_value(dihos_script_runner *runner, const char *name, c
         script_u64_to_dec((uint64_t)dihos_time_seconds(), out, out_cap);
     else if (strcmp(name, "fattime") == 0)
         script_u32_to_dec((uint32_t)dihos_time_fattime(), out, out_cap);
+    else if (strcmp(name, "console") == 0)
+        return dihos_shell_session_console_text(runner->session, out, out_cap);
     else
         return -1;
 
     return 0;
 }
 
-static int script_expand_vars(dihos_script_runner *runner, const char *input, char *out, uint32_t cap)
+static void script_set_expand_error(char *err, uint32_t err_cap, const char *message, const char *name)
+{
+    ksb b;
+
+    if (!err || err_cap == 0u)
+        return;
+
+    ksb_init(&b, err, err_cap);
+    ksb_puts(&b, message ? message : "variable expansion failed");
+    if (name && name[0])
+    {
+        ksb_puts(&b, " $");
+        ksb_puts(&b, name);
+    }
+}
+
+static int script_expand_vars(dihos_script_runner *runner, const char *input, char *out, uint32_t cap,
+                              char *err, uint32_t err_cap)
 {
     ksb b;
     uint32_t i = 0u;
@@ -706,6 +841,9 @@ static int script_expand_vars(dihos_script_runner *runner, const char *input, ch
 
     if (!runner || !input || !out || cap == 0u)
         return -1;
+
+    if (err && err_cap)
+        err[0] = 0;
 
     ksb_init(&b, out, cap);
     while (input[i])
@@ -729,10 +867,21 @@ static int script_expand_vars(dihos_script_runner *runner, const char *input, ch
                 while (input[i] && input[i] != '}' && n + 1u < sizeof(name))
                     name[n++] = input[i++];
                 if (input[i] != '}')
+                {
+                    script_set_expand_error(err, err_cap, "bad variable expansion", "");
                     return -1;
+                }
                 name[n] = 0;
                 ++i;
-                ksb_puts(&b, script_user_var_value(runner, name));
+                {
+                    const char *value = 0;
+                    if (script_user_var_lookup(runner, name, &value) != 0)
+                    {
+                        script_set_expand_error(err, err_cap, "undefined variable", name);
+                        return -1;
+                    }
+                    ksb_puts(&b, value);
+                }
                 continue;
             }
 
@@ -744,7 +893,15 @@ static int script_expand_vars(dihos_script_runner *runner, const char *input, ch
                 while (script_is_name_char(input[i]) && n + 1u < sizeof(name))
                     name[n++] = input[i++];
                 name[n] = 0;
-                ksb_puts(&b, script_user_var_value(runner, name));
+                {
+                    const char *value = 0;
+                    if (script_user_var_lookup(runner, name, &value) != 0)
+                    {
+                        script_set_expand_error(err, err_cap, "undefined variable", name);
+                        return -1;
+                    }
+                    ksb_puts(&b, value);
+                }
                 continue;
             }
 
@@ -791,23 +948,42 @@ static int script_expand_vars(dihos_script_runner *runner, const char *input, ch
                 while (input[i] && input[i] != '%' && n + 1u < sizeof(name))
                     name[n++] = input[i++];
                 if (input[i] != '%')
+                {
+                    script_set_expand_error(err, err_cap, "bad runtime expansion", "");
                     return -1;
+                }
                 ++i;
                 name[n] = 0;
 
+                if (strcmp(name, "console") == 0)
+                {
+                    ksb_puts(&b, "%console%");
+                    continue;
+                }
+
                 if (script_runtime_value(runner, name, runtime_buf, sizeof(runtime_buf)) != 0)
+                {
+                    script_set_expand_error(err, err_cap, "unknown runtime value", name);
                     return -1;
+                }
                 ksb_puts(&b, runtime_buf);
                 continue;
             }
 
+            script_set_expand_error(err, err_cap, "bad runtime expansion", "");
             return -1;
         }
 
         ksb_putc(&b, input[i++]);
     }
 
-    return b.overflow ? -1 : 0;
+    if (b.overflow)
+    {
+        script_set_expand_error(err, err_cap, "expanded line is too long", "");
+        return -1;
+    }
+
+    return 0;
 }
 
 static int script_path_kind(dihos_script_runner *runner, const char *path)
@@ -854,6 +1030,42 @@ static char *script_strip_quotes(char *text)
     }
 
     return text;
+}
+
+static char *script_parse_text_tail(char *text)
+{
+    char *read = text;
+    char *start = 0;
+    char *write = 0;
+
+    if (!read)
+        return read;
+
+    while (script_is_space(*read))
+        ++read;
+
+    if (*read != '"')
+        return script_trim(read);
+
+    ++read;
+    start = read;
+    write = read;
+    while (*read)
+    {
+        if (*read == '"')
+        {
+            *write = 0;
+            return start;
+        }
+
+        if (*read == '\\' && read[1])
+            ++read;
+
+        *write++ = *read++;
+    }
+
+    *write = 0;
+    return start;
 }
 
 static int script_eval_condition(dihos_script_runner *runner, char *condition, int *out_true)
@@ -904,7 +1116,16 @@ static int script_eval_condition(dihos_script_runner *runner, char *condition, i
     }
 
     if (!op_pos || !op_text)
-        return -1;
+    {
+        int truth_value = 0;
+        char *bare = script_strip_quotes(expr);
+
+        if (script_parse_i32(bare, &truth_value) != 0)
+            return -1;
+
+        *out_true = truth_value != 0;
+        return 0;
+    }
 
     memset(lhs_buf, 0, sizeof(lhs_buf));
     memset(rhs_buf, 0, sizeof(rhs_buf));
@@ -923,12 +1144,18 @@ static int script_eval_condition(dihos_script_runner *runner, char *condition, i
 
     if (strcmp(op_text, "==") == 0)
     {
-        *out_true = strcmp(lhs, rhs) == 0;
+        if (script_parse_double(lhs, &lhs_num) == 0 && script_parse_double(rhs, &rhs_num) == 0)
+            *out_true = lhs_num == rhs_num;
+        else
+            *out_true = strcmp(lhs, rhs) == 0;
         return 0;
     }
     if (strcmp(op_text, "!=") == 0)
     {
-        *out_true = strcmp(lhs, rhs) != 0;
+        if (script_parse_double(lhs, &lhs_num) == 0 && script_parse_double(rhs, &rhs_num) == 0)
+            *out_true = lhs_num != rhs_num;
+        else
+            *out_true = strcmp(lhs, rhs) != 0;
         return 0;
     }
 
@@ -1058,13 +1285,13 @@ static int script_parse_fn_header(char *line, dihos_script_function *out_fn)
     memset(out_fn, 0, sizeof(*out_fn));
 
     name = script_next_token(&cursor);
-    if (!name || !script_name_valid(name))
+    if (!name || script_name_reserved(name))
         return -1;
     script_copy(out_fn->name, sizeof(out_fn->name), name);
 
     while ((arg = script_next_token(&cursor)) != 0)
     {
-        if (!script_name_valid(arg) || out_fn->arg_count >= DIHOS_SCRIPT_FUNC_MAX_ARGS)
+        if (!script_var_declaration_valid(arg) || out_fn->arg_count >= DIHOS_SCRIPT_FUNC_MAX_ARGS)
             return -1;
         script_copy(out_fn->arg_names[out_fn->arg_count],
                     sizeof(out_fn->arg_names[out_fn->arg_count]), arg);
@@ -1410,7 +1637,7 @@ static int script_parse_for_header(char *line, char *name_out, uint32_t name_cap
 
     if (!name || !from_kw || !from_text || !to_kw || !to_text)
         return -1;
-    if (!script_name_valid(name))
+    if (!script_var_declaration_valid(name))
         return -1;
     if (strcmp(from_kw, "from") != 0 || strcmp(to_kw, "to") != 0)
         return -1;
@@ -1470,7 +1697,9 @@ static int script_handle_math_op(dihos_script_runner *runner, char *line, const 
 {
     char *cursor = line + strlen(keyword);
     char *name = 0;
-    char *rhs_text = 0;
+    char *lhs_arg = 0;
+    char *rhs_arg = 0;
+    const char *rhs_text = 0;
     const char *lhs_text = 0;
     double lhs = 0.0;
     double rhs = 0.0;
@@ -1479,12 +1708,23 @@ static int script_handle_math_op(dihos_script_runner *runner, char *line, const 
     int exp_value = 0;
 
     name = script_next_token(&cursor);
-    rhs_text = script_next_token(&cursor);
+    lhs_arg = script_next_token(&cursor);
+    rhs_arg = script_next_token(&cursor);
 
-    if (!name || !rhs_text || script_next_token(&cursor) || !script_name_valid(name))
+    if (!name || !lhs_arg || script_next_token(&cursor) || !script_var_target_valid(name))
         return -1;
 
-    lhs_text = script_user_var_value(runner, name);
+    if (rhs_arg)
+    {
+        lhs_text = lhs_arg;
+        rhs_text = rhs_arg;
+    }
+    else
+    {
+        lhs_text = script_user_var_value(runner, name);
+        rhs_text = lhs_arg;
+    }
+
     if (script_parse_double(lhs_text && lhs_text[0] ? lhs_text : "0", &lhs) != 0 ||
         script_parse_double(rhs_text, &rhs) != 0)
         return -1;
@@ -1524,6 +1764,337 @@ static int script_handle_math_op(dihos_script_runner *runner, char *line, const 
     return 0;
 }
 
+static int script_set_user_var_i32(dihos_script_runner *runner, const char *name, int value)
+{
+    char out_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
+
+    script_i32_to_dec(value, out_text, sizeof(out_text));
+    return script_set_user_var(runner, name, out_text);
+}
+
+static uint32_t script_rol32(uint32_t value, uint32_t count)
+{
+    count &= 31u;
+    if (!count)
+        return value;
+    return (value << count) | (value >> (32u - count));
+}
+
+static uint32_t script_ror32(uint32_t value, uint32_t count)
+{
+    count &= 31u;
+    if (!count)
+        return value;
+    return (value >> count) | (value << (32u - count));
+}
+
+static int script_resolve_i32_operand(dihos_script_runner *runner, const char *text, int *out)
+{
+    const char *lookup = 0;
+
+    if (!text || !out)
+        return -1;
+
+    if (script_parse_i32(text[0] ? text : "0", out) == 0)
+        return 0;
+
+    if (script_user_var_lookup(runner, text, &lookup) != 0)
+        return -1;
+
+    return script_parse_i32(lookup && lookup[0] ? lookup : "0", out);
+}
+
+static int script_handle_int_binary_op(dihos_script_runner *runner, char *line, const char *keyword, int op)
+{
+    char *cursor = line + strlen(keyword);
+    char *name = script_next_token(&cursor);
+    char *lhs_arg = script_next_token(&cursor);
+    char *rhs_arg = script_next_token(&cursor);
+    const char *lhs_text = 0;
+    const char *rhs_text = 0;
+    int lhs = 0;
+    int rhs = 0;
+    int result = 0;
+    uint32_t lhs_u = 0u;
+    uint32_t rhs_u = 0u;
+
+    if (!name || !lhs_arg || script_next_token(&cursor) || !script_var_target_valid(name))
+        return -1;
+
+    if (rhs_arg)
+    {
+        lhs_text = lhs_arg;
+        rhs_text = rhs_arg;
+    }
+    else
+    {
+        lhs_text = script_user_var_value(runner, name);
+        rhs_text = lhs_arg;
+    }
+
+    if (script_resolve_i32_operand(runner, lhs_text, &lhs) != 0 ||
+        script_resolve_i32_operand(runner, rhs_text, &rhs) != 0)
+        return -1;
+
+    lhs_u = (uint32_t)lhs;
+    rhs_u = (uint32_t)rhs;
+
+    if (op == 1)
+    {
+        if (rhs == 0)
+            return -1;
+        result = lhs % rhs;
+    }
+    else if (op == 2)
+        result = (int)(lhs_u & rhs_u);
+    else if (op == 3)
+        result = (int)(lhs_u | rhs_u);
+    else if (op == 4)
+        result = (int)(lhs_u ^ rhs_u);
+    else if (op == 9)
+        result = (int)(~(lhs_u & rhs_u));
+    else if (op == 10)
+        result = (int)(~(lhs_u | rhs_u));
+    else if (op == 5)
+    {
+        if (rhs < 0)
+            return -1;
+        result = (int)(lhs_u << (rhs_u & 31u));
+    }
+    else if (op == 6)
+    {
+        if (rhs < 0)
+            return -1;
+        result = (int)(lhs_u >> (rhs_u & 31u));
+    }
+    else if (op == 7)
+    {
+        if (rhs < 0)
+            return -1;
+        result = (int)script_rol32(lhs_u, rhs_u);
+    }
+    else if (op == 8)
+    {
+        if (rhs < 0)
+            return -1;
+        result = (int)script_ror32(lhs_u, rhs_u);
+    }
+    else
+    {
+        return -1;
+    }
+
+    if (script_set_user_var_i32(runner, name, result) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
+static int script_handle_bool_binary_op(dihos_script_runner *runner, char *line, const char *keyword, int op)
+{
+    char *cursor = line + strlen(keyword);
+    char *name = script_next_token(&cursor);
+    char *lhs_arg = script_next_token(&cursor);
+    char *rhs_arg = script_next_token(&cursor);
+    const char *lhs_text = 0;
+    const char *rhs_text = 0;
+    int lhs = 0;
+    int rhs = 0;
+    int lhs_true = 0;
+    int rhs_true = 0;
+    int result = 0;
+
+    if (!name || !lhs_arg || script_next_token(&cursor) || !script_var_target_valid(name))
+        return -1;
+
+    if (rhs_arg)
+    {
+        lhs_text = lhs_arg;
+        rhs_text = rhs_arg;
+    }
+    else
+    {
+        lhs_text = script_user_var_value(runner, name);
+        rhs_text = lhs_arg;
+    }
+
+    if (script_resolve_i32_operand(runner, lhs_text, &lhs) != 0 ||
+        script_resolve_i32_operand(runner, rhs_text, &rhs) != 0)
+        return -1;
+
+    lhs_true = lhs != 0;
+    rhs_true = rhs != 0;
+
+    if (op == 1)
+        result = (lhs_true && rhs_true) ? 1 : 0;
+    else if (op == 2)
+        result = (lhs_true && rhs_true) ? 0 : 1;
+    else if (op == 3)
+        result = (lhs_true || rhs_true) ? 1 : 0;
+    else if (op == 4)
+        result = (lhs_true != rhs_true) ? 1 : 0;
+    else if (op == 5)
+        result = (lhs_true || rhs_true) ? 0 : 1;
+    else
+        return -1;
+
+    if (script_set_user_var_i32(runner, name, result) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
+static int script_handle_int_not_op(dihos_script_runner *runner, char *line)
+{
+    char *cursor = line + 3u;
+    char *name = script_next_token(&cursor);
+    char *value_arg = script_next_token(&cursor);
+    const char *value_text = 0;
+    int value = 0;
+
+    if (!name || script_next_token(&cursor) || !script_var_target_valid(name))
+        return -1;
+
+    value_text = value_arg ? value_arg : script_user_var_value(runner, name);
+    if (script_resolve_i32_operand(runner, value_text, &value) != 0)
+        return -1;
+
+    if (script_set_user_var_i32(runner, name, value == 0 ? 1 : 0) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
+static int script_handle_int_bnot_op(dihos_script_runner *runner, char *line)
+{
+    char *cursor = line + 4u;
+    char *name = script_next_token(&cursor);
+    char *value_arg = script_next_token(&cursor);
+    const char *value_text = 0;
+    int value = 0;
+
+    if (!name || script_next_token(&cursor) || !script_var_target_valid(name))
+        return -1;
+
+    value_text = value_arg ? value_arg : script_user_var_value(runner, name);
+    if (script_resolve_i32_operand(runner, value_text, &value) != 0)
+        return -1;
+
+    if (script_set_user_var_i32(runner, name, (int)(~((uint32_t)value))) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
+static int script_handle_abs_op(dihos_script_runner *runner, char *line)
+{
+    char *cursor = line + 3u;
+    char *name = script_next_token(&cursor);
+    char *value_arg = script_next_token(&cursor);
+    const char *value_text = 0;
+    double value = 0.0;
+    char out_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
+
+    if (!name || script_next_token(&cursor) || !script_var_target_valid(name))
+        return -1;
+
+    value_text = value_arg ? value_arg : script_user_var_value(runner, name);
+    if (script_parse_double(value_text && value_text[0] ? value_text : "0", &value) != 0)
+        return -1;
+
+    if (value < 0.0)
+        value = -value;
+
+    script_double_to_text(value, out_text, sizeof(out_text));
+    if (script_set_user_var(runner, name, out_text) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
+static int script_compare_values(const char *lhs, const char *rhs, int *out_cmp)
+{
+    double lhs_num = 0.0;
+    double rhs_num = 0.0;
+
+    if (!lhs)
+        lhs = "";
+    if (!rhs)
+        rhs = "";
+    if (!out_cmp)
+        return -1;
+
+    if (script_parse_double(lhs, &lhs_num) == 0 && script_parse_double(rhs, &rhs_num) == 0)
+    {
+        *out_cmp = (lhs_num < rhs_num) ? -1 : (lhs_num > rhs_num) ? 1
+                                                                  : 0;
+        return 0;
+    }
+
+    *out_cmp = strcmp(lhs, rhs);
+    if (*out_cmp < 0)
+        *out_cmp = -1;
+    else if (*out_cmp > 0)
+        *out_cmp = 1;
+    return 0;
+}
+
+static int script_handle_compare_op(dihos_script_runner *runner, char *line, const char *keyword, int op)
+{
+    char *cursor = line + strlen(keyword);
+    char *out_name = script_next_token(&cursor);
+    char *lhs = script_next_token(&cursor);
+    char *rhs = script_next_token(&cursor);
+    int cmp = 0;
+    int result = 0;
+
+    if (!out_name || !lhs || script_next_token(&cursor) || !script_var_target_valid(out_name))
+        return -1;
+
+    if (!rhs)
+    {
+        rhs = lhs;
+        lhs = (char *)script_user_var_value(runner, out_name);
+    }
+
+    if (script_compare_values(lhs, rhs, &cmp) != 0)
+        return -1;
+
+    if (op == 1)
+        result = cmp;
+    else if (op == 2)
+        result = (cmp == 0) ? 1 : 0;
+    else if (op == 3)
+        result = (cmp != 0) ? 1 : 0;
+    else if (op == 4)
+        result = (cmp < 0) ? 1 : 0;
+    else if (op == 5)
+        result = (cmp <= 0) ? 1 : 0;
+    else if (op == 6)
+        result = (cmp > 0) ? 1 : 0;
+    else if (op == 7)
+        result = (cmp >= 0) ? 1 : 0;
+    else
+        return -1;
+
+    if (script_set_user_var_i32(runner, out_name, result) != 0)
+        return -1;
+
+    script_set_status(runner, 0);
+    ++runner->pc;
+    return 0;
+}
+
 static int script_extract_run_out_target(char *line, char *out_name, uint32_t out_cap)
 {
     char *cursor = line;
@@ -1549,7 +2120,7 @@ static int script_extract_run_out_target(char *line, char *out_name, uint32_t ou
 
         if (saw_out_eq)
         {
-            if (script_name_valid(token))
+            if (script_var_target_valid(token))
             {
                 script_copy(out_name, out_cap, token);
                 return 1;
@@ -1566,7 +2137,7 @@ static int script_extract_run_out_target(char *line, char *out_name, uint32_t ou
                 continue;
             }
 
-            if (token[0] == '=' && script_name_valid(token + 1u))
+            if (token[0] == '=' && script_var_target_valid(token + 1u))
             {
                 script_copy(out_name, out_cap, token + 1u);
                 return 1;
@@ -1593,7 +2164,7 @@ static int script_extract_run_out_target(char *line, char *out_name, uint32_t ou
                     continue;
                 }
 
-                if (script_name_valid(eq + 1u))
+                if (script_var_target_valid(eq + 1u))
                 {
                     script_copy(out_name, out_cap, eq + 1u);
                     return 1;
@@ -1660,6 +2231,7 @@ static int script_step_one(dihos_script_runner *runner)
 {
     char expanded[DIHOS_SCRIPT_LINE_CAP];
     char work[DIHOS_SCRIPT_LINE_CAP];
+    char expand_error[128];
     char cmd_scan[DIHOS_SCRIPT_LINE_CAP];
     char *cmd_cursor = 0;
     char *cmd_name = 0;
@@ -1679,9 +2251,10 @@ static int script_step_one(dihos_script_runner *runner)
         return 1;
     }
 
-    if (script_expand_vars(runner, runner->lines[runner->pc], expanded, sizeof(expanded)) != 0)
+    if (script_expand_vars(runner, runner->lines[runner->pc], expanded, sizeof(expanded),
+                           expand_error, sizeof(expand_error)) != 0)
     {
-        script_error(runner, "variable expansion failed");
+        script_error(runner, expand_error[0] ? expand_error : "variable expansion failed");
         return -1;
     }
 
@@ -1765,9 +2338,10 @@ static int script_step_one(dihos_script_runner *runner)
                 return 0;
             }
 
-            if (script_expand_vars(runner, runner->lines[target], branch_expanded, sizeof(branch_expanded)) != 0)
+            if (script_expand_vars(runner, runner->lines[target], branch_expanded, sizeof(branch_expanded),
+                                   expand_error, sizeof(expand_error)) != 0)
             {
-                script_error(runner, "invalid else if condition");
+                script_error(runner, expand_error[0] ? expand_error : "invalid else if condition");
                 return -1;
             }
 
@@ -1993,7 +2567,7 @@ static int script_step_one(dihos_script_runner *runner)
     {
         if (script_handle_math_op(runner, line, "add", 1) != 0)
         {
-            script_error(runner, "add needs name and numeric delta");
+            script_error(runner, "add needs output plus one or two numeric operands");
             return -1;
         }
         return 0;
@@ -2003,7 +2577,7 @@ static int script_step_one(dihos_script_runner *runner)
     {
         if (script_handle_math_op(runner, line, "sub", 2) != 0)
         {
-            script_error(runner, "sub needs name and numeric delta");
+            script_error(runner, "sub needs output plus one or two numeric operands");
             return -1;
         }
         return 0;
@@ -2013,7 +2587,7 @@ static int script_step_one(dihos_script_runner *runner)
     {
         if (script_handle_math_op(runner, line, "mul", 3) != 0)
         {
-            script_error(runner, "mul needs name and numeric factor");
+            script_error(runner, "mul needs output plus one or two numeric operands");
             return -1;
         }
         return 0;
@@ -2023,7 +2597,7 @@ static int script_step_one(dihos_script_runner *runner)
     {
         if (script_handle_math_op(runner, line, "div", 4) != 0)
         {
-            script_error(runner, "div needs name and non-zero numeric divisor");
+            script_error(runner, "div needs output plus operands and non-zero divisor");
             return -1;
         }
         return 0;
@@ -2033,7 +2607,257 @@ static int script_step_one(dihos_script_runner *runner)
     {
         if (script_handle_math_op(runner, line, "pow", 5) != 0)
         {
-            script_error(runner, "pow needs name and integer exponent");
+            script_error(runner, "pow needs output plus operands and integer exponent");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "mod"))
+    {
+        if (script_handle_int_binary_op(runner, line, "mod", 1) != 0)
+        {
+            script_error(runner, "mod needs output plus operands and non-zero divisor");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "and"))
+    {
+        if (script_handle_bool_binary_op(runner, line, "and", 1) != 0)
+        {
+            script_error(runner, "and needs output plus one or two boolean operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "nand"))
+    {
+        if (script_handle_bool_binary_op(runner, line, "nand", 2) != 0)
+        {
+            script_error(runner, "nand needs output plus one or two boolean operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "or"))
+    {
+        if (script_handle_bool_binary_op(runner, line, "or", 3) != 0)
+        {
+            script_error(runner, "or needs output plus one or two boolean operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "xor"))
+    {
+        if (script_handle_bool_binary_op(runner, line, "xor", 4) != 0)
+        {
+            script_error(runner, "xor needs output plus one or two boolean operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "nor"))
+    {
+        if (script_handle_bool_binary_op(runner, line, "nor", 5) != 0)
+        {
+            script_error(runner, "nor needs output plus one or two boolean operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "not"))
+    {
+        if (script_handle_int_not_op(runner, line) != 0)
+        {
+            script_error(runner, "not needs output and optional boolean value");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "band"))
+    {
+        if (script_handle_int_binary_op(runner, line, "band", 2) != 0)
+        {
+            script_error(runner, "band needs output plus one or two integer operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "bnand"))
+    {
+        if (script_handle_int_binary_op(runner, line, "bnand", 9) != 0)
+        {
+            script_error(runner, "bnand needs output plus one or two integer operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "bor"))
+    {
+        if (script_handle_int_binary_op(runner, line, "bor", 3) != 0)
+        {
+            script_error(runner, "bor needs output plus one or two integer operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "bxor"))
+    {
+        if (script_handle_int_binary_op(runner, line, "bxor", 4) != 0)
+        {
+            script_error(runner, "bxor needs output plus one or two integer operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "bnor"))
+    {
+        if (script_handle_int_binary_op(runner, line, "bnor", 10) != 0)
+        {
+            script_error(runner, "bnor needs output plus one or two integer operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "bnot"))
+    {
+        if (script_handle_int_bnot_op(runner, line) != 0)
+        {
+            script_error(runner, "bnot needs output and optional integer value");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "shl"))
+    {
+        if (script_handle_int_binary_op(runner, line, "shl", 5) != 0)
+        {
+            script_error(runner, "shl needs output plus operands and non-negative count");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "shr"))
+    {
+        if (script_handle_int_binary_op(runner, line, "shr", 6) != 0)
+        {
+            script_error(runner, "shr needs output plus operands and non-negative count");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "rol"))
+    {
+        if (script_handle_int_binary_op(runner, line, "rol", 7) != 0)
+        {
+            script_error(runner, "rol needs output plus operands and non-negative count");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "ror"))
+    {
+        if (script_handle_int_binary_op(runner, line, "ror", 8) != 0)
+        {
+            script_error(runner, "ror needs output plus operands and non-negative count");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "abs"))
+    {
+        if (script_handle_abs_op(runner, line) != 0)
+        {
+            script_error(runner, "abs needs output and optional numeric value");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "cmp"))
+    {
+        if (script_handle_compare_op(runner, line, "cmp", 1) != 0)
+        {
+            script_error(runner, "cmp needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "eq"))
+    {
+        if (script_handle_compare_op(runner, line, "eq", 2) != 0)
+        {
+            script_error(runner, "eq needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "neq"))
+    {
+        if (script_handle_compare_op(runner, line, "neq", 3) != 0)
+        {
+            script_error(runner, "neq needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "lt"))
+    {
+        if (script_handle_compare_op(runner, line, "lt", 4) != 0)
+        {
+            script_error(runner, "lt needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "lte"))
+    {
+        if (script_handle_compare_op(runner, line, "lte", 5) != 0)
+        {
+            script_error(runner, "lte needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "gt"))
+    {
+        if (script_handle_compare_op(runner, line, "gt", 6) != 0)
+        {
+            script_error(runner, "gt needs output plus one or two operands");
+            return -1;
+        }
+        return 0;
+    }
+
+    if (script_keyword(line, "gte"))
+    {
+        if (script_handle_compare_op(runner, line, "gte", 7) != 0)
+        {
+            script_error(runner, "gte needs output plus one or two operands");
             return -1;
         }
         return 0;
@@ -2087,7 +2911,7 @@ static int script_step_one(dihos_script_runner *runner)
         char value_text[16];
         int value = 0;
 
-        if (!name || !script_name_valid(name))
+        if (!name || !script_var_target_valid(name))
         {
             script_error(runner, "rand needs a variable name");
             return -1;
@@ -2161,7 +2985,7 @@ static int script_step_one(dihos_script_runner *runner)
         uint32_t choice_count = 0u;
         uint32_t picked = 0u;
 
-        if (!name || !script_name_valid(name))
+        if (!name || !script_var_target_valid(name))
         {
             script_error(runner, "pick needs a variable name");
             return -1;
@@ -2249,9 +3073,9 @@ static int script_step_one(dihos_script_runner *runner)
     {
         char *cursor = line + 5u;
         char *name = script_next_token(&cursor);
-        char *prompt = script_trim(cursor);
+        char *prompt = script_parse_text_tail(cursor);
 
-        if (!name || !script_name_valid(name))
+        if (!name || !script_var_target_valid(name))
         {
             script_error(runner, "input needs a variable name");
             return -1;
@@ -2289,7 +3113,7 @@ static int script_step_one(dihos_script_runner *runner)
             if (strcmp(token, "->") == 0)
             {
                 char *target = script_next_token(&cursor);
-                if (!target || script_next_token(&cursor) != 0 || !script_name_valid(target))
+                if (!target || script_next_token(&cursor) != 0 || !script_var_target_valid(target))
                 {
                     script_error(runner, "call return target is invalid");
                     return -1;
@@ -2300,7 +3124,7 @@ static int script_step_one(dihos_script_runner *runner)
 
             if (strncmp(token, "->", 2u) == 0 && token[2] != 0)
             {
-                if (!script_name_valid(token + 2u))
+                if (!script_var_target_valid(token + 2u))
                 {
                     script_error(runner, "call return target is invalid");
                     return -1;

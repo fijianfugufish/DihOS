@@ -14,6 +14,8 @@ int pci_kernel_wifi_connect_ssid(const char *ssid);
 int pci_kernel_wifi_set_connect_override(const uint8_t *bssid, uint32_t bssid_valid, uint32_t chan_mhz);
 int pci_kernel_wifi_set_peer_authorize(uint32_t authorize);
 int pci_kernel_wifi_tx_l2_frame(const uint8_t *frame, uint32_t len);
+int pci_kernel_wifi_tx_l2_frame_mode(const uint8_t *frame, uint32_t len, uint32_t mode);
+int pci_kernel_wifi_get_local_mac(uint8_t out[6]);
 int pci_kernel_wifi_mgmt_tx_status(uint32_t *count, uint32_t *last_desc, uint32_t *last_status);
 uint32_t pci_kernel_wifi_peer_assoc_done(void);
 uint32_t pci_kernel_wifi_install_key_done(void);

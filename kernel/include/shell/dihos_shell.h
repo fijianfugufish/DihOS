@@ -34,6 +34,7 @@ extern "C"
     typedef void (*dihos_shell_text_fn)(const char *text, void *user);
     typedef void (*dihos_shell_clear_fn)(void *user);
     typedef void (*dihos_shell_capture_sink_fn)(const char *text, uint32_t len, void *user);
+    typedef int (*dihos_shell_console_text_fn)(char *out, uint32_t out_cap, void *user);
 
     typedef struct dihos_shell_io
     {
@@ -43,6 +44,7 @@ extern "C"
         dihos_shell_text_fn error;
         dihos_shell_text_fn success;
         dihos_shell_clear_fn clear;
+        dihos_shell_console_text_fn console_text;
         void *user;
     } dihos_shell_io;
 
@@ -157,6 +159,7 @@ extern "C"
     void dihos_shell_session_warn(dihos_shell_session *session, const char *text);
     void dihos_shell_session_error(dihos_shell_session *session, const char *text);
     void dihos_shell_session_success(dihos_shell_session *session, const char *text);
+    int dihos_shell_session_console_text(dihos_shell_session *session, char *out, uint32_t out_cap);
 
     int dihos_script_load_file(dihos_script_runner *runner, dihos_shell_session *session,
                                const char *raw_path, const char *friendly_path);

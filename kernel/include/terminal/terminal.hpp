@@ -28,6 +28,7 @@ public:
     void Success(const char *text);
     void SubmitInput(const char *text);
     void UpdateInput();
+    int CopyConsoleText(char *out, uint32_t cap) const;
 
     void ToggleQuiet();
     void SetQuiet();
@@ -68,6 +69,7 @@ private:
     void LayoutInputBox(int placeholder_y);
     int MaxTopLine() const;
     int IsAtBottom() const;
+    int CancelProgramIfClosed();
     int EnsureEditableLine(kcolor color);
     int EnsureVisibleHandle(int slot_idx);
     void DropOldestLine();
@@ -114,5 +116,6 @@ private:
     uint8_t script_done_reported;
     uint8_t sacx_active;
     uint8_t sacx_done_reported;
+    uint8_t program_window_expected_visible;
     uint32_t sacx_task_id;
 };

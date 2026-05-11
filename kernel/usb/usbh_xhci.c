@@ -8,6 +8,7 @@
 #include "terminal/terminal_api.h"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/colors.h"
+#include "memory/mmio_map.h"
 #include "asm/asm.h"
 
 /* --- TRB constants (kept here so it compiles even if your header is thin) --- */
@@ -1371,6 +1372,48 @@ static int pci_enable_busmaster_for_mmio(uint64_t rsdp_pa, uint64_t want_mmio)
     return -1;
 }
 
+static int xhci_prepare_mmio_before_caps(uint64_t mmio, uint64_t rsdp_pa)
+{
+#if defined(DIHOS_ARCH_X64) || defined(KERNEL_ARCH_X64) || defined(__x86_64__) || defined(_M_X64)
+    static uint8_t ecam_mapped = 0;
+
+    /*
+      x64 reaches xHCI through PCIe. Before the first capability read, make the
+      BAR identity mapping explicit and then enable PCI memory decoding for the
+      device that owns this BAR. ARM/SoC xHCI intentionally does not take this
+      path.
+    */
+    if (mmio_map_device_identity(mmio, 0x10000ull) != 0)
+    {
+        dot(18, C_ER);
+        return -1;
+    }
+    dot(18, C_OK);
+
+    if (rsdp_pa)
+    {
+        if (!ecam_mapped)
+        {
+            int map_rc = mmio_map_pci_ecams_from_rsdp(rsdp_pa);
+            if (map_rc == 0)
+                ecam_mapped = 1;
+            dot(19, (map_rc == 0) ? C_OK : C_YL);
+        }
+
+        dot(20, (pci_enable_busmaster_for_mmio(rsdp_pa, mmio) == 0) ? C_OK : C_YL);
+    }
+    else
+    {
+        dot(19, C_YL);
+    }
+#else
+    (void)mmio;
+    (void)rsdp_pa;
+#endif
+
+    return 0;
+}
+
 /* Split-out: command ring init (CRCR) */
 static int init_cmd_ring(void)
 {
@@ -1434,6 +1477,7 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     dot(1, 0xFFFFFF);
 
     uint64_t mmio = xhci_mmio_hint;
+
     if (!mmio && acpi_rsdp_hint)
         find_xhci_mmio_from_acpi(acpi_rsdp_hint, &mmio);
 
@@ -1450,6 +1494,9 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     }
 
     g_xhci_initialized = 0;
+
+    if (xhci_prepare_mmio_before_caps(mmio, acpi_rsdp_hint) != 0)
+        return -1;
 
     /* quick sanity: CAPLENGTH in [0x20..0x40], HCIVERSION major == 0x01 */
     {

@@ -265,9 +265,11 @@ namespace
             "continue", "break", "return", "let", "unset",
             "goto", "call", "exit", "input",
             "add", "sub", "mul", "div", "pow", "mod",
-            "rand", "randrange", "seedrand",
-            "and", "or", "xor", "not", "shl", "shr", "rol", "ror",
-            "cmp", "eq", "neq", "lt", "lte", "gt", "gte", "abs"};
+            "rand", "seed", "pick",
+            "and", "nand", "or", "xor", "nor", "not",
+            "band", "bnand", "bor", "bxor", "bnor", "bnot", "shl", "shr", "rol", "ror",
+            "cmp", "eq", "neq", "lt", "lte", "gt", "gte", "abs",
+            "exists", "isfile", "isdir", "true", "false", "void"};
 
         for (uint32_t i = 0u; i < sizeof(kKeywords) / sizeof(kKeywords[0]); ++i)
         {
@@ -389,12 +391,16 @@ namespace
         static const char *kOperator = "FF9DB5";
         static const char *kFnArg = "9FE8A6";
         static const char *kNumber = "F9C780";
+        static const char *kString = "8FEA8D";
+        static const char *kVoid = "D59BFF";
 
         uint32_t out_len = 0u;
         uint32_t i = 0u;
         uint8_t fn_arg_context = 0u;
         uint8_t call_arg_context = 0u;
         uint8_t for_var_context = 0u;
+        uint8_t plain_tail_text = 0u;
+        uint8_t plain_tail_arg_context = 0u;
 
         if (!dst || cap == 0u)
             return;
@@ -407,7 +413,112 @@ namespace
         {
             uint32_t j = 0u;
 
-            if (src[i] == '#')
+            if (src[i] == '"')
+            {
+                line_append_color_set(dst, cap, &out_len, kString);
+                line_append_char(dst, cap, &out_len, src[i++]);
+                while (src[i] && out_len + 1u < cap)
+                {
+                    if (src[i] == '\\' && src[i + 1u])
+                    {
+                        line_append_char(dst, cap, &out_len, src[i++]);
+                        line_append_char(dst, cap, &out_len, src[i++]);
+                        continue;
+                    }
+
+                    if (src[i] == '"')
+                    {
+                        line_append_char(dst, cap, &out_len, src[i++]);
+                        break;
+                    }
+
+                    if (src[i] == '$')
+                    {
+                        j = i + 1u;
+                        if (src[j] == '{')
+                        {
+                            ++j;
+                            while (src[j] && src[j] != '}' && out_len + 1u < cap)
+                                ++j;
+                            if (src[j] == '}')
+                            {
+                                ++j;
+                                line_append_color_reset(dst, cap, &out_len);
+                                line_append_color_set(dst, cap, &out_len, kUserVar);
+                                line_append_span(dst, cap, &out_len, src + i, j - i);
+                                line_append_color_reset(dst, cap, &out_len);
+                                line_append_color_set(dst, cap, &out_len, kString);
+                                i = j;
+                                continue;
+                            }
+                        }
+                        else if (ascii_is_name_start(src[j]))
+                        {
+                            ++j;
+                            while (ascii_is_name_char(src[j]))
+                                ++j;
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kUserVar);
+                            line_append_span(dst, cap, &out_len, src + i, j - i);
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kString);
+                            i = j;
+                            continue;
+                        }
+                    }
+
+                    if (src[i] == '%')
+                    {
+                        j = i + 1u;
+                        if (src[j] == '%')
+                        {
+                            ++j;
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                            line_append_span(dst, cap, &out_len, src + i, j - i);
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kString);
+                            i = j;
+                            continue;
+                        }
+                        if (ascii_is_digit(src[j]))
+                        {
+                            while (ascii_is_digit(src[j]))
+                                ++j;
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                            line_append_span(dst, cap, &out_len, src + i, j - i);
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kString);
+                            i = j;
+                            continue;
+                        }
+                        if (ascii_is_name_start(src[j]))
+                        {
+                            ++j;
+                            while (src[j] && src[j] != '%')
+                                ++j;
+                            if (src[j] == '%')
+                            {
+                                ++j;
+                                line_append_color_reset(dst, cap, &out_len);
+                                line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                                line_append_span(dst, cap, &out_len, src + i, j - i);
+                                line_append_color_reset(dst, cap, &out_len);
+                                line_append_color_set(dst, cap, &out_len, kString);
+                                i = j;
+                                continue;
+                            }
+                        }
+                    }
+
+                    line_append_char(dst, cap, &out_len, src[i++]);
+                }
+                line_append_color_reset(dst, cap, &out_len);
+                continue;
+            }
+
+            if (!plain_tail_text && src[i] == '#')
             {
                 line_append_color_set(dst, cap, &out_len, kComment);
                 while (src[i] && out_len + 1u < cap)
@@ -453,6 +564,15 @@ namespace
             if (src[i] == '%')
             {
                 j = i + 1u;
+                if (src[j] == '%')
+                {
+                    ++j;
+                    line_append_color_set(dst, cap, &out_len, kRuntimeVar);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
                 if (ascii_is_digit(src[j]))
                 {
                     while (ascii_is_digit(src[j]))
@@ -480,7 +600,7 @@ namespace
                 }
             }
 
-            if (sac_line_is_leading_colon_label(src, i))
+            if (!plain_tail_text && sac_line_is_leading_colon_label(src, i))
             {
                 j = i + 1u;
                 while (ascii_is_name_char(src[j]))
@@ -498,10 +618,40 @@ namespace
                 while (ascii_is_name_char(src[j]) || src[j] == ':')
                     ++j;
 
+                if (plain_tail_arg_context)
+                {
+                    line_append_color_set(dst, cap, &out_len,
+                                          token_equals_ci(src + i, j - i, "void") ? kVoid : kFnArg);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    plain_tail_arg_context = 0u;
+                    plain_tail_text = 1u;
+                    i = j;
+                    continue;
+                }
+
+                if (plain_tail_text)
+                {
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    i = j;
+                    continue;
+                }
+
+                if (token_equals_ci(src + i, j - i, "void"))
+                {
+                    line_append_color_set(dst, cap, &out_len, kVoid);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+
                 if (sac_keyword_token(src + i, j - i))
                 {
                     uint8_t is_fn = token_equals_ci(src + i, j - i, "fn") ? 1u : 0u;
                     uint8_t is_call = token_equals_ci(src + i, j - i, "call") ? 1u : 0u;
+                    uint8_t is_input = token_equals_ci(src + i, j - i, "input") ? 1u : 0u;
+                    uint8_t is_pick = token_equals_ci(src + i, j - i, "pick") ? 1u : 0u;
 
                     line_append_color_set(dst, cap, &out_len, kKeyword);
                     line_append_span(dst, cap, &out_len, src + i, j - i);
@@ -525,6 +675,13 @@ namespace
                         fn_arg_context = 0u;
                         call_arg_context = 0u;
                     }
+                    else if (is_input || is_pick)
+                    {
+                        plain_tail_arg_context = 1u;
+                        fn_arg_context = 0u;
+                        call_arg_context = 0u;
+                        for_var_context = 0u;
+                    }
                     else
                     {
                         fn_arg_context = 0u;
@@ -541,6 +698,13 @@ namespace
                     line_append_color_set(dst, cap, &out_len, kCommand);
                     line_append_span(dst, cap, &out_len, src + i, j - i);
                     line_append_color_reset(dst, cap, &out_len);
+                    if (token_equals_ci(src + i, j - i, "sys:echo"))
+                    {
+                        plain_tail_text = 1u;
+                        fn_arg_context = 0u;
+                        call_arg_context = 0u;
+                        for_var_context = 0u;
+                    }
                     i = j;
                     continue;
                 }
@@ -582,6 +746,13 @@ namespace
                         ++j;
                 }
 
+                if (plain_tail_text)
+                {
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    i = j;
+                    continue;
+                }
+
                 line_append_color_set(dst, cap, &out_len, kNumber);
                 line_append_span(dst, cap, &out_len, src + i, j - i);
                 line_append_color_reset(dst, cap, &out_len);
@@ -589,13 +760,14 @@ namespace
                 continue;
             }
 
-            if ((src[i] == '=' && src[i + 1u] == '=') ||
-                (src[i] == '!' && src[i + 1u] == '=') ||
-                (src[i] == '<' && src[i + 1u] == '=') ||
-                (src[i] == '>' && src[i + 1u] == '=') ||
-                (src[i] == '-' && src[i + 1u] == '>') ||
-                (src[i] == '&' && src[i + 1u] == '&') ||
-                (src[i] == '|' && src[i + 1u] == '|'))
+            if (!plain_tail_text &&
+                ((src[i] == '=' && src[i + 1u] == '=') ||
+                 (src[i] == '!' && src[i + 1u] == '=') ||
+                 (src[i] == '<' && src[i + 1u] == '=') ||
+                 (src[i] == '>' && src[i + 1u] == '=') ||
+                 (src[i] == '-' && src[i + 1u] == '>') ||
+                 (src[i] == '&' && src[i + 1u] == '&') ||
+                 (src[i] == '|' && src[i + 1u] == '|')))
             {
                 line_append_color_set(dst, cap, &out_len, kOperator);
                 line_append_char(dst, cap, &out_len, src[i]);
@@ -605,9 +777,10 @@ namespace
                 continue;
             }
 
-            if (src[i] == '=' || src[i] == '<' || src[i] == '>' || src[i] == '!' ||
-                src[i] == '+' || src[i] == '-' || src[i] == '*' || src[i] == '/' ||
-                src[i] == '%' || src[i] == '^' || src[i] == '&' || src[i] == '~')
+            if (!plain_tail_text &&
+                (src[i] == '=' || src[i] == '<' || src[i] == '>' || src[i] == '!' ||
+                 src[i] == '+' || src[i] == '-' || src[i] == '*' || src[i] == '/' ||
+                 src[i] == '%' || src[i] == '^' || src[i] == '&' || src[i] == '~'))
             {
                 line_append_color_set(dst, cap, &out_len, kOperator);
                 line_append_char(dst, cap, &out_len, src[i]);
