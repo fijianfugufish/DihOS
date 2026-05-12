@@ -160,6 +160,15 @@ namespace
         return ch == ')' || ch == ']' || ch == '}' || ch == '"' || ch == '\'' ? 1 : 0;
     }
 
+    static int pair_matches(char left, char right)
+    {
+        return (left == '(' && right == ')') ||
+               (left == '[' && right == ']') ||
+               (left == '{' && right == '}') ||
+               (left == '"' && right == '"') ||
+               (left == '\'' && right == '\'');
+    }
+
     static int ascii_is_space(char ch)
     {
         return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
@@ -281,7 +290,7 @@ namespace
         static const char *kKeywords[] = {
             "if", "else", "while", "for", "from", "to", "step", "fn", "end",
             "continue", "break", "return", "let", "unset",
-            "goto", "call", "exit", "input",
+            "goto", "call", "exit", "input", "wait",
             "add", "sub", "mul", "div", "pow", "mod",
             "rand", "seed", "pick",
             "and", "nand", "or", "xor", "nor", "not",
@@ -430,6 +439,7 @@ namespace
         static const char *kFnArg = "9FE8A6";
         static const char *kNumber = "F9C780";
         static const char *kString = "8FEA8D";
+        static const char *kEscape = "E89A9A";
         static const char *kVoid = "D59BFF";
 
         uint32_t out_len = 0u;
@@ -460,6 +470,17 @@ namespace
                 {
                     if (src[i] == '\\' && src[i + 1u])
                     {
+                        if (src[i + 1u] == 'n')
+                        {
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kEscape);
+                            line_append_char(dst, cap, &out_len, src[i++]);
+                            line_append_char(dst, cap, &out_len, src[i++]);
+                            line_append_color_reset(dst, cap, &out_len);
+                            line_append_color_set(dst, cap, &out_len, kString);
+                            continue;
+                        }
+
                         line_append_char(dst, cap, &out_len, src[i++]);
                         line_append_char(dst, cap, &out_len, src[i++]);
                         continue;
@@ -2602,6 +2623,16 @@ namespace
 
         if (cursor_ == 0u || len_ == 0u)
             return;
+
+        if (cursor_ < len_ && pair_matches(buffer_[cursor_ - 1u], buffer_[cursor_]))
+        {
+            memmove(buffer_ + cursor_ - 1u, buffer_ + cursor_ + 1u, len_ - cursor_);
+            --cursor_;
+            len_ -= 2u;
+            MarkTextChanged();
+            ResetCaretBlink();
+            return;
+        }
 
         if (cursor_ >= 4u)
         {

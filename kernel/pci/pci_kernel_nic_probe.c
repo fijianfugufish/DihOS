@@ -2194,14 +2194,14 @@ static int qwifi_ath12k_window_addr(uint64_t bar0_base, uint32_t offset, uint64_
 
     if (qwifi_ath12k_offset_in_static_window(offset, ATH12K_HAL_SEQ_WCSS_UMAC_OFFSET))
     {
+        window = ((offset >> 19) & 0x3Fu) | ATH12K_STATIC_WINDOW_MAP_VALUE;
         rc = pci_probe_mmio_write32(bar0_base + ATH12K_WINDOW_REG_ADDRESS,
-                                    ATH12K_WINDOW_ENABLE_BIT | ATH12K_STATIC_WINDOW_MAP_VALUE);
+                                    ATH12K_WINDOW_ENABLE_BIT | window);
         if (rc != 0)
             return rc;
         (void)pci_probe_config_read32(bar0_base + ATH12K_WINDOW_REG_ADDRESS, &flush_value);
 
-        *addr_out = bar0_base + (3ull * ATH12K_WINDOW_START) +
-                    (uint64_t)(offset & ATH12K_WINDOW_RANGE_MASK);
+        *addr_out = bar0_base + ATH12K_WINDOW_START + (uint64_t)(offset & ATH12K_WINDOW_RANGE_MASK);
         return 0;
     }
 

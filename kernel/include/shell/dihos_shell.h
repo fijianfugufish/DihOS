@@ -135,11 +135,13 @@ extern "C"
         uint32_t pc;
         uint32_t instruction_count;
         uint32_t rng_state;
+        uint64_t sleep_until_tick;
         int last_status;
         int exit_status;
         uint8_t loaded;
         uint8_t finished;
         uint8_t waiting_input;
+        uint8_t waiting_sleep;
         uint8_t rng_seeded;
     } dihos_script_runner;
 

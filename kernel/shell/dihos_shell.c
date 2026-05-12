@@ -919,6 +919,12 @@ static int dihos_tokenize(char *line, dihos_token *tokens, uint32_t *out_count)
             ++read;
             if (!*read)
                 return -1;
+            if (in_quote && *read == 'n')
+            {
+                *write++ = '\n';
+                ++read;
+                continue;
+            }
         }
 
         *write++ = *read++;

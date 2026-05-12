@@ -95,6 +95,45 @@ static int script_parse_bool_literal(const char *text, int *out)
     return -1;
 }
 
+static int script_parse_binary_i32(const char *text, int *out)
+{
+    int sign = 1;
+    uint32_t i = 0u;
+    uint32_t value = 0u;
+
+    if (!text || !out)
+        return -1;
+
+    if (text[i] == '-')
+    {
+        sign = -1;
+        ++i;
+    }
+    else if (text[i] == '+')
+    {
+        ++i;
+    }
+
+    if (text[i] != '0' || (text[i + 1u] != 'b' && text[i + 1u] != 'B'))
+        return -1;
+    i += 2u;
+    if (!text[i])
+        return -1;
+
+    for (; text[i]; ++i)
+    {
+        if (text[i] != '0' && text[i] != '1')
+            return -1;
+        value = (value << 1u) | (uint32_t)(text[i] - '0');
+    }
+
+    if (sign < 0)
+        *out = -(int)value;
+    else
+        *out = (int)value;
+    return 0;
+}
+
 static void script_copy(char *dst, uint32_t cap, const char *src)
 {
     uint32_t i = 0u;
@@ -240,6 +279,8 @@ static int script_parse_i32(const char *text, int *out)
 
     if (script_parse_bool_literal(text, out) == 0)
         return 0;
+    if (script_parse_binary_i32(text, out) == 0)
+        return 0;
 
     if (text[0] == '-')
     {
@@ -282,6 +323,15 @@ static int script_parse_double(const char *text, double *out)
         if (script_parse_bool_literal(text, &bool_value) == 0)
         {
             *out = (double)bool_value;
+            return 0;
+        }
+    }
+
+    {
+        int binary_value = 0;
+        if (script_parse_binary_i32(text, &binary_value) == 0)
+        {
+            *out = (double)binary_value;
             return 0;
         }
     }
@@ -473,7 +523,7 @@ static int script_name_reserved(const char *name)
     static const char *reserved[] = {
         "if", "else", "while", "for", "from", "to", "step", "fn", "end",
         "continue", "break", "return", "let", "unset",
-        "goto", "call", "exit", "input",
+        "goto", "call", "exit", "input", "wait",
         "add", "sub", "mul", "div", "pow", "mod",
         "rand", "seed", "pick",
         "and", "nand", "or", "xor", "nor", "not",
@@ -677,6 +727,8 @@ static void script_error(dihos_script_runner *runner, const char *message)
 
     runner->finished = 1u;
     runner->waiting_input = 0u;
+    runner->waiting_sleep = 0u;
+    runner->sleep_until_tick = 0u;
     runner->input_var[0] = 0;
     runner->input_prompt[0] = 0;
     runner->exit_status = -1;
@@ -1059,7 +1111,15 @@ static char *script_parse_text_tail(char *text)
         }
 
         if (*read == '\\' && read[1])
+        {
             ++read;
+            if (*read == 'n')
+            {
+                *write++ = '\n';
+                ++read;
+                continue;
+            }
+        }
 
         *write++ = *read++;
     }
@@ -2244,6 +2304,8 @@ static int script_step_one(dihos_script_runner *runner)
     {
         runner->finished = 1u;
         runner->waiting_input = 0u;
+        runner->waiting_sleep = 0u;
+        runner->sleep_until_tick = 0u;
         runner->input_var[0] = 0;
         runner->input_prompt[0] = 0;
         runner->exit_status = runner->last_status;
@@ -3089,6 +3151,33 @@ static int script_step_one(dihos_script_runner *runner)
         return 0;
     }
 
+    if (script_keyword(line, "wait"))
+    {
+        char *seconds_text = script_trim(line + 4u);
+        double seconds = 0.0;
+        uint64_t delay_ticks = 0u;
+        double ticks_f = 0.0;
+
+        if (!seconds_text || !seconds_text[0])
+        {
+            script_error(runner, "wait needs a seconds value");
+            return -1;
+        }
+        if (script_parse_double(seconds_text, &seconds) != 0 || seconds < 0.0)
+        {
+            script_error(runner, "wait needs a non-negative numeric value");
+            return -1;
+        }
+
+        ticks_f = seconds * (double)DIHOS_TIME_TICKS_PER_SECOND;
+        delay_ticks = (uint64_t)(ticks_f + 0.5);
+        runner->waiting_sleep = 1u;
+        runner->sleep_until_tick = dihos_time_ticks() + delay_ticks;
+        script_set_status(runner, 0);
+        ++runner->pc;
+        return 0;
+    }
+
     if (script_keyword(line, "call"))
     {
         char *cursor = line + 4u;
@@ -3213,6 +3302,8 @@ static int script_step_one(dihos_script_runner *runner)
         script_copy(runner->exit_text, sizeof(runner->exit_text), message && message[0] ? message : "");
         runner->finished = 1u;
         runner->waiting_input = 0u;
+        runner->waiting_sleep = 0u;
+        runner->sleep_until_tick = 0u;
         runner->input_var[0] = 0;
         runner->input_prompt[0] = 0;
         script_set_status(runner, status);
@@ -3252,6 +3343,13 @@ int dihos_script_step(dihos_script_runner *runner, uint32_t budget)
         return 1;
     if (runner->waiting_input)
         return 0;
+    if (runner->waiting_sleep)
+    {
+        if (dihos_time_ticks() < runner->sleep_until_tick)
+            return 0;
+        runner->waiting_sleep = 0u;
+        runner->sleep_until_tick = 0u;
+    }
 
     if (budget == 0u)
         budget = DIHOS_SCRIPT_STEP_BUDGET;
@@ -3262,7 +3360,7 @@ int dihos_script_step(dihos_script_runner *runner, uint32_t budget)
         if (rc < 0)
             return -1;
         ++steps;
-        if (runner->waiting_input)
+        if (runner->waiting_input || runner->waiting_sleep)
             break;
     }
 
@@ -3270,6 +3368,8 @@ int dihos_script_step(dihos_script_runner *runner, uint32_t budget)
     {
         runner->finished = 1u;
         runner->waiting_input = 0u;
+        runner->waiting_sleep = 0u;
+        runner->sleep_until_tick = 0u;
         runner->input_var[0] = 0;
         runner->input_prompt[0] = 0;
         runner->exit_status = runner->last_status;
