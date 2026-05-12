@@ -28,6 +28,16 @@ void asm_compiler_barrier(void)
     __asm__ __volatile__("" ::: "memory");
 }
 
+void asm_enable_fp_simd(void)
+{
+    uint64_t cpacr;
+
+    __asm__ __volatile__("mrs %0, cpacr_el1" : "=r"(cpacr));
+    cpacr |= (3ull << 20); /* FPEN: allow FP/AdvSIMD at EL1/EL0. */
+    __asm__ __volatile__("msr cpacr_el1, %0" ::"r"(cpacr) : "memory");
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
 void asm_mmio_barrier(void)
 {
     __asm__ __volatile__("dsb sy" ::: "memory");

@@ -18,6 +18,10 @@ void asm_compiler_barrier(void)
     __asm__ __volatile__("" ::: "memory");
 }
 
+void asm_enable_fp_simd(void)
+{
+}
+
 void asm_mmio_barrier(void)
 {
     __asm__ __volatile__("mfence" ::: "memory");

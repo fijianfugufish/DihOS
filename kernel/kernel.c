@@ -100,6 +100,7 @@ static uint32_t xhci_build_hint_order(const boot_info *bi, uint64_t *hints, uint
 void kmain(boot_info *bi)
 {
     k_bootinfo_ptr = bi;
+    asm_enable_fp_simd();
 
     // init graphics & pmem
     if (kgfx_init(bi) != 0)

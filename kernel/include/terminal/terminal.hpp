@@ -33,6 +33,7 @@ public:
     void ToggleQuiet();
     void SetQuiet();
     void SetLoud();
+    void SetTitle(const char *title);
     void Activate();
     void SetWindowVisible(uint32_t visible);
     int Visible() const;

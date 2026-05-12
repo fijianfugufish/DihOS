@@ -4,6 +4,13 @@
 #include "memory/pmem.h" // for pmem_alloc_pages
 #include "asm/asm.h"
 
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#define KGFX_USE_AA64_NEON 1
+#else
+#define KGFX_USE_AA64_NEON 0
+#endif
+
 static kfb FB;
 
 static uint32_t sR = 16, sG = 8, sB = 0; // defaults
@@ -53,17 +60,78 @@ static uint32_t kstrlen(const char *s)
 }
 static void kmemcpy64(void *dst, const void *src, uint32_t n)
 {
-    uint64_t *d64 = (uint64_t *)dst;
-    const uint64_t *s64 = (const uint64_t *)src;
+    uint8_t *d8 = (uint8_t *)dst;
+    const uint8_t *s8 = (const uint8_t *)src;
 
-    uint32_t q = n >> 3;
-    for (uint32_t i = 0; i < q; ++i)
-        d64[i] = s64[i];
+#if KGFX_USE_AA64_NEON
+    while (n >= 64u)
+    {
+        uint8x16_t v0 = vld1q_u8(s8);
+        uint8x16_t v1 = vld1q_u8(s8 + 16u);
+        uint8x16_t v2 = vld1q_u8(s8 + 32u);
+        uint8x16_t v3 = vld1q_u8(s8 + 48u);
+        vst1q_u8(d8, v0);
+        vst1q_u8(d8 + 16u, v1);
+        vst1q_u8(d8 + 32u, v2);
+        vst1q_u8(d8 + 48u, v3);
+        s8 += 64u;
+        d8 += 64u;
+        n -= 64u;
+    }
 
-    uint8_t *d8 = (uint8_t *)(d64 + q);
-    const uint8_t *s8 = (const uint8_t *)(s64 + q);
-    for (uint32_t i = (q << 3); i < n; ++i)
-        d8[i - (q << 3)] = s8[i - (q << 3)];
+    while (n >= 16u)
+    {
+        uint8x16_t v = vld1q_u8(s8);
+        vst1q_u8(d8, v);
+        s8 += 16u;
+        d8 += 16u;
+        n -= 16u;
+    }
+#endif
+
+    while (n >= 8u)
+    {
+        *(uint64_t *)d8 = *(const uint64_t *)s8;
+        s8 += 8u;
+        d8 += 8u;
+        n -= 8u;
+    }
+
+    while (n)
+    {
+        *d8++ = *s8++;
+        --n;
+    }
+}
+
+static inline void kgfx_store_u32_repeat(uint32_t *dst, uint32_t value, uint32_t count)
+{
+#if KGFX_USE_AA64_NEON
+    uint32x4_t v = vdupq_n_u32(value);
+
+    while (count >= 16u)
+    {
+        vst1q_u32(dst, v);
+        vst1q_u32(dst + 4u, v);
+        vst1q_u32(dst + 8u, v);
+        vst1q_u32(dst + 12u, v);
+        dst += 16u;
+        count -= 16u;
+    }
+
+    while (count >= 4u)
+    {
+        vst1q_u32(dst, v);
+        dst += 4u;
+        count -= 4u;
+    }
+#endif
+
+    while (count)
+    {
+        *dst++ = value;
+        --count;
+    }
 }
 
 char *kgfx_pmem_strdup(const char *s)
@@ -1259,8 +1327,7 @@ static inline void bb_hspan_blend(int32_t y, int32_t x0, int32_t x1, uint8_t sr,
     if (sa == 255)
     {
         uint32_t px = pack_rgb(sr, sg, sb);
-        for (uint32_t i = 0; i < count; ++i)
-            row[i] = px;
+        kgfx_store_u32_repeat(row, px, count);
         return;
     }
     if (sa == 0)
@@ -1280,8 +1347,7 @@ static void bb_clear(kcolor c)
     for (uint32_t y = 0; y < FB.height; ++y)
     {
         uint32_t *row = (uint32_t *)(BB_ptr + y * BB_stride);
-        for (uint32_t x = 0; x < FB.width; ++x)
-            row[x] = px;
+        kgfx_store_u32_repeat(row, px, FB.width);
     }
 }
 
@@ -1353,9 +1419,73 @@ static inline void bb_hspan_clip(int32_t y, int32_t x0, int32_t x1, uint32_t px)
 
     uint32_t count = (uint32_t)(x1 - x0 + 1);
     uint32_t *row = (uint32_t *)(BB_ptr + (uint32_t)y * BB_stride + (uint32_t)x0 * 4u);
-    for (uint32_t i = 0; i < count; ++i)
-        row[i] = px;
+    kgfx_store_u32_repeat(row, px, count);
 }
+
+static inline void bb_blit_argb32_pixel(uint32_t *dst, uint32_t sp, uint8_t global_alpha)
+{
+    uint8_t sa = (uint8_t)(sp >> 24);
+
+    if (sa == 0)
+        return;
+
+    if (global_alpha == 255 && sa == 255)
+    {
+        *dst = (sp & 0x00FFFFFFu) | 0xFF000000u;
+        return;
+    }
+
+    {
+        uint16_t aa = (uint16_t)sa * (uint16_t)global_alpha + 127u;
+        uint8_t a = (uint8_t)(aa / 255u);
+        uint8_t sr = (uint8_t)(sp >> 16);
+        uint8_t sg = (uint8_t)(sp >> 8);
+        uint8_t sb = (uint8_t)sp;
+
+        if (a == 0)
+            return;
+
+        *dst = blend_over(*dst, sr, sg, sb, a);
+    }
+}
+
+#if KGFX_USE_AA64_NEON
+static inline uint8_t kgfx_neon_u32x4_all(uint32x4_t lanes)
+{
+    uint32x2_t both = vand_u32(vget_low_u32(lanes), vget_high_u32(lanes));
+    return (uint8_t)((vget_lane_u32(both, 0) & vget_lane_u32(both, 1)) == 0xFFFFFFFFu);
+}
+
+static uint32_t bb_blit_argb32_opaque_neon(uint32_t *drow, const uint32_t *srow, uint32_t copy_w)
+{
+    const uint32x4_t alpha_mask = vdupq_n_u32(0xFF000000u);
+    const uint32x4_t rgb_mask = vdupq_n_u32(0x00FFFFFFu);
+    const uint32x4_t zero = vdupq_n_u32(0u);
+    uint32_t ix = 0;
+
+    for (; ix + 4u <= copy_w; ix += 4u)
+    {
+        uint32x4_t src = vld1q_u32(srow + ix);
+        uint32x4_t alpha = vandq_u32(src, alpha_mask);
+
+        if (kgfx_neon_u32x4_all(vceqq_u32(alpha, alpha_mask)))
+        {
+            vst1q_u32(drow + ix, vorrq_u32(vandq_u32(src, rgb_mask), alpha_mask));
+            continue;
+        }
+
+        if (kgfx_neon_u32x4_all(vceqq_u32(alpha, zero)))
+            continue;
+
+        bb_blit_argb32_pixel(drow + ix, srow[ix], 255);
+        bb_blit_argb32_pixel(drow + ix + 1u, srow[ix + 1u], 255);
+        bb_blit_argb32_pixel(drow + ix + 2u, srow[ix + 2u], 255);
+        bb_blit_argb32_pixel(drow + ix + 3u, srow[ix + 3u], 255);
+    }
+
+    return ix;
+}
+#endif
 
 static void bb_blit_argb32_clip(int32_t x, int32_t y,
                                 uint32_t w, uint32_t h,
@@ -1410,33 +1540,16 @@ static void bb_blit_argb32_clip(int32_t x, int32_t y,
         const uint32_t *srow = src_argb + (uint64_t)(sy0 + iy) * src_stride_px + sx0;
         uint8_t *drow8 = BB_ptr + (uint32_t)(cy0 + (int32_t)iy) * BB_stride + (uint32_t)cx0 * 4u;
         uint32_t *drow = (uint32_t *)drow8;
+        uint32_t ix = 0;
 
-        for (uint32_t ix = 0; ix < copy_w; ++ix)
+#if KGFX_USE_AA64_NEON
+        if (global_alpha == 255)
+            ix = bb_blit_argb32_opaque_neon(drow, srow, copy_w);
+#endif
+
+        for (; ix < copy_w; ++ix)
         {
-            uint32_t sp = srow[ix]; // 0xAARRGGBB
-            uint8_t sa = (uint8_t)(sp >> 24);
-            if (sa == 0)
-                continue;
-
-            if (global_alpha == 255 && sa == 255)
-            {
-                drow[ix] = sp & 0x00FFFFFFu | 0xFF000000u;
-                continue;
-            }
-
-            // Multiply per-pixel alpha by object alpha
-            // out_a = (sa * global_alpha) / 255 with rounding
-            uint16_t aa = (uint16_t)sa * (uint16_t)global_alpha + 127;
-            uint8_t a = (uint8_t)(aa / 255);
-            if (a == 0)
-                continue;
-
-            uint8_t sr = (uint8_t)(sp >> 16);
-            uint8_t sg = (uint8_t)(sp >> 8);
-            uint8_t sb = (uint8_t)(sp);
-
-            uint32_t dst = drow[ix];
-            drow[ix] = blend_over(dst, sr, sg, sb, a);
+            bb_blit_argb32_pixel(drow + ix, srow[ix], global_alpha);
         }
     }
 }
@@ -1581,29 +1694,7 @@ static void bb_blit_argb32_scaled_clip(int32_t x, int32_t y,
             uint32_t sp = (sample_mode == KGFX_IMAGE_SAMPLE_BILINEAR)
                               ? sample_argb32_bilinear(src_argb, src_w, src_h, src_stride_px, fx16, fy16)
                               : sample_argb32_nearest(src_argb, src_w, src_h, src_stride_px, fx16, fy16);
-            uint8_t sa = (uint8_t)(sp >> 24);
-
-            if (sa == 0)
-                continue;
-
-            if (global_alpha == 255 && sa == 255)
-            {
-                drow[ix] = sp & 0x00FFFFFFu | 0xFF000000u;
-                continue;
-            }
-
-            {
-                uint16_t aa = (uint16_t)sa * (uint16_t)global_alpha + 127;
-                uint8_t a = (uint8_t)(aa / 255);
-                uint8_t sr = (uint8_t)(sp >> 16);
-                uint8_t sg = (uint8_t)(sp >> 8);
-                uint8_t sb = (uint8_t)(sp);
-
-                if (a == 0)
-                    continue;
-
-                drow[ix] = blend_over(drow[ix], sr, sg, sb, a);
-            }
+            bb_blit_argb32_pixel(drow + ix, sp, global_alpha);
         }
     }
 }

@@ -521,9 +521,9 @@ static int script_is_void_name(const char *name)
 static int script_name_reserved(const char *name)
 {
     static const char *reserved[] = {
-        "if", "else", "while", "for", "from", "to", "step", "fn", "end",
+        "if", "else", "while", "for", "from", "to", "step", "in", "fn", "end",
         "continue", "break", "return", "let", "unset",
-        "goto", "call", "exit", "input", "wait",
+        "goto", "call", "exit", "input", "wait", "list", "title", "help",
         "add", "sub", "mul", "div", "pow", "mod",
         "rand", "seed", "pick",
         "and", "nand", "or", "xor", "nor", "not",
@@ -553,6 +553,68 @@ static int script_var_target_valid(const char *name)
 static int script_var_declaration_valid(const char *name)
 {
     return (script_name_valid(name) && !script_name_reserved(name)) ? 1 : 0;
+}
+
+static int script_user_var_lookup(dihos_script_runner *runner, const char *name, const char **out_value);
+static int script_compare_values(const char *lhs, const char *rhs, int *out_cmp);
+
+static int script_build_list_suffix_name(const char *base, const char *suffix,
+                                         char *out, uint32_t out_cap)
+{
+    ksb b;
+
+    if (!base || !suffix || !out || out_cap == 0u)
+        return -1;
+
+    ksb_init(&b, out, out_cap);
+    ksb_puts(&b, base);
+    ksb_putc(&b, '_');
+    ksb_puts(&b, suffix);
+    if (b.overflow || !script_name_valid(out))
+        return -1;
+    return 0;
+}
+
+static int script_build_list_index_name(const char *base, uint32_t index,
+                                        char *out, uint32_t out_cap)
+{
+    char idx_text[16];
+    script_u32_to_dec(index, idx_text, sizeof(idx_text));
+    return script_build_list_suffix_name(base, idx_text, out, out_cap);
+}
+
+static int script_get_list_count(dihos_script_runner *runner, const char *list_name, uint32_t *out_count)
+{
+    char count_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+    const char *count_value = 0;
+    int parsed = 0;
+
+    if (!runner || !list_name || !out_count)
+        return -1;
+
+    if (script_build_list_suffix_name(list_name, "count", count_name, sizeof(count_name)) != 0)
+        return -1;
+    if (script_user_var_lookup(runner, count_name, &count_value) != 0)
+        return -1;
+    if (script_parse_i32(count_value, &parsed) != 0 || parsed < 0)
+        return -1;
+
+    *out_count = (uint32_t)parsed;
+    return 0;
+}
+
+static int script_get_list_item_value(dihos_script_runner *runner, const char *list_name,
+                                      uint32_t index, const char **out_value)
+{
+    char item_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+
+    if (!runner || !list_name || !out_value)
+        return -1;
+    if (script_build_list_index_name(list_name, index, item_name, sizeof(item_name)) != 0)
+        return -1;
+    if (script_user_var_lookup(runner, item_name, out_value) != 0)
+        return -1;
+    return 0;
 }
 
 static dihos_script_call_frame *script_current_frame(dihos_script_runner *runner)
@@ -945,10 +1007,73 @@ static int script_expand_vars(dihos_script_runner *runner, const char *input, ch
                 while (script_is_name_char(input[i]) && n + 1u < sizeof(name))
                     name[n++] = input[i++];
                 name[n] = 0;
+
+                if (n > 1u && name[n - 1u] == '_' &&
+                    input[i] == '$' && script_is_name_start(input[i + 1u]))
+                {
+                    char index_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+                    const char *index_text = 0;
+                    int index_value = 0;
+                    char item_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+                    const char *item_value = 0;
+                    uint32_t j = i + 1u;
+                    uint32_t m = 0u;
+
+                    while (script_is_name_char(input[j]) && m + 1u < sizeof(index_name))
+                        index_name[m++] = input[j++];
+                    index_name[m] = 0;
+
+                    if (script_user_var_lookup(runner, index_name, &index_text) != 0)
+                    {
+                        script_set_expand_error(err, err_cap, "undefined variable", index_name);
+                        return -1;
+                    }
+                    if (script_parse_i32(index_text, &index_value) != 0 || index_value <= 0)
+                    {
+                        script_set_expand_error(err, err_cap, "invalid list index variable", index_name);
+                        return -1;
+                    }
+
+                    name[n - 1u] = 0;
+                    if (script_build_list_index_name(name, (uint32_t)index_value,
+                                                     item_name, sizeof(item_name)) != 0)
+                    {
+                        script_set_expand_error(err, err_cap, "bad list expansion", name);
+                        return -1;
+                    }
+                    if (script_user_var_lookup(runner, item_name, &item_value) != 0)
+                    {
+                        script_set_expand_error(err, err_cap, "undefined variable", item_name);
+                        return -1;
+                    }
+
+                    ksb_puts(&b, item_value);
+                    i = j;
+                    continue;
+                }
+
                 {
                     const char *value = 0;
                     if (script_user_var_lookup(runner, name, &value) != 0)
                     {
+                        uint32_t list_count = 0u;
+                        if (script_get_list_count(runner, name, &list_count) == 0)
+                        {
+                            for (uint32_t idx = 1u; idx <= list_count; ++idx)
+                            {
+                                const char *item_value = 0;
+                                if (script_get_list_item_value(runner, name, idx, &item_value) != 0)
+                                {
+                                    script_set_expand_error(err, err_cap, "bad list expansion", name);
+                                    return -1;
+                                }
+                                if (idx > 1u)
+                                    ksb_putc(&b, ' ');
+                                ksb_puts(&b, item_value ? item_value : "");
+                            }
+                            continue;
+                        }
+
                         script_set_expand_error(err, err_cap, "undefined variable", name);
                         return -1;
                     }
@@ -1163,6 +1288,53 @@ static int script_eval_condition(dihos_script_runner *runner, char *condition, i
         else
             *out_true = kind == 2;
         return 0;
+    }
+
+    {
+        char in_expr[DIHOS_SCRIPT_LINE_CAP];
+        char *in_cursor = 0;
+        char *lhs_token = 0;
+        char *in_kw = 0;
+        char *list_name = 0;
+        char *extra = 0;
+
+        script_copy(in_expr, sizeof(in_expr), expr);
+        in_cursor = in_expr;
+        lhs_token = script_next_token(&in_cursor);
+        in_kw = script_next_token(&in_cursor);
+        list_name = script_next_token(&in_cursor);
+        extra = script_next_token(&in_cursor);
+
+        if (lhs_token && in_kw && list_name && !extra && strcmp(in_kw, "in") == 0)
+        {
+            uint32_t list_count = 0u;
+            int matched = 0;
+            char *lhs_value = script_strip_quotes(lhs_token);
+
+            if (!script_var_declaration_valid(list_name))
+                return -1;
+            if (script_get_list_count(runner, list_name, &list_count) != 0)
+                return -1;
+
+            for (uint32_t idx = 1u; idx <= list_count; ++idx)
+            {
+                const char *item_value = 0;
+                int cmp = 0;
+
+                if (script_get_list_item_value(runner, list_name, idx, &item_value) != 0)
+                    return -1;
+                if (script_compare_values(lhs_value, item_value ? item_value : "", &cmp) != 0)
+                    return -1;
+                if (cmp == 0)
+                {
+                    matched = 1;
+                    break;
+                }
+            }
+
+            *out_true = matched ? 1 : 0;
+            return 0;
+        }
     }
 
     for (i = 0u; i < (uint32_t)(sizeof(ops) / sizeof(ops[0])); ++i)
@@ -1715,6 +1887,124 @@ static int script_parse_for_header(char *line, char *name_out, uint32_t name_cap
 
     script_copy(name_out, name_cap, name);
     return 0;
+}
+
+static int script_parse_for_list_header(char *line,
+                                        char *item_name_out, uint32_t item_name_cap,
+                                        char *list_name_out, uint32_t list_name_cap)
+{
+    char *cursor = line + 3u;
+    char *item_name = 0;
+    char *in_kw = 0;
+    char *list_name = 0;
+
+    if (!line || !item_name_out || item_name_cap == 0u || !list_name_out || list_name_cap == 0u)
+        return -1;
+
+    item_name = script_next_token(&cursor);
+    in_kw = script_next_token(&cursor);
+    list_name = script_next_token(&cursor);
+
+    if (!item_name || !in_kw || !list_name || script_next_token(&cursor) != 0)
+        return -1;
+    if (!script_var_declaration_valid(item_name) || !script_var_declaration_valid(list_name))
+        return -1;
+    if (strcmp(in_kw, "in") != 0)
+        return -1;
+
+    script_copy(item_name_out, item_name_cap, item_name);
+    script_copy(list_name_out, list_name_cap, list_name);
+    return 0;
+}
+
+static void script_print_help(dihos_script_runner *runner)
+{
+    static const char *lines[] = {
+        "SAC language reference",
+        "----------------------",
+        "General:",
+        "  - One statement per line.",
+        "  - `#` starts a comment.",
+        "  - Names: letters/underscore start; letters/digits/underscore after.",
+        "  - Reserved words cannot be assigned (except `void` as sink target).",
+        "",
+        "Literals and values:",
+        "  - Numbers: `12`, `-4`, `3.5`.",
+        "  - Binary prefix: `0b1011` (also supports signs like `-0b10`).",
+        "  - Booleans: `true` -> 1, `false` -> 0.",
+        "  - Strings in quotes support `\\n` newline escape.",
+        "",
+        "Variable expansion:",
+        "  - `$name` or `${name}` -> variable value.",
+        "  - `%0`, `%1`, ... -> script path / args.",
+        "  - `%name%` runtime values. Built-ins:",
+        "      script, script_raw, script_dir, status, status_text, stdin, argc,",
+        "      cwd, ticks, seconds, fattime, console",
+        "  - Undefined `$name` is an error.",
+        "",
+        "Lists:",
+        "  - `list mylist a b c` creates a fixed list.",
+        "  - Internals: `mylist_count`, `mylist_1`, `mylist_2`, ...",
+        "  - `$mylist` expands to all items space-separated.",
+        "  - Dynamic index: `$mylist_$idx`.",
+        "  - Edit element with normal assignment: `let mylist_2 = hello`.",
+        "",
+        "Flow control:",
+        "  - `if <cond>` / `else if <cond>` / `else` / `end`.",
+        "  - `while <cond>` ... `end`.",
+        "  - Numeric for: `for i from 1 to 10 step 1` ... `end`.",
+        "  - List for: `for item in mylist` ... `end`.",
+        "  - `break`, `continue` inside loops.",
+        "",
+        "Conditions:",
+        "  - Comparisons: `== != < <= > >=`.",
+        "  - Path checks: `exists <path>`, `isfile <path>`, `isdir <path>`.",
+        "  - Membership: `<value> in <list>`.",
+        "  - Bare value truthiness: non-zero true, zero false.",
+        "",
+        "Assignments:",
+        "  - `let name = value`",
+        "  - `unset name`",
+        "  - `input name [prompt]`  (quoted prompt keeps spaces, supports `\\n`)",
+        "  - `input void [prompt]`  (discard input)",
+        "  - `pick name option1 option2 ...`",
+        "  - `rand name [max]` or `rand name min max`",
+        "",
+        "Math / compare (2 forms):",
+        "  - update form: `add x 5` (uses current `x` as lhs)",
+        "  - explicit form: `add x 5 7` (x = 5 + 7)",
+        "  - Same 2-form rule for:",
+        "      add sub mul div pow mod",
+        "      cmp eq neq lt lte gt gte abs",
+        "",
+        "Logical / bitwise:",
+        "  - Logical: and nand or xor nor not",
+        "  - Bitwise: band bnand bor bxor bnor bnot shl shr rol ror",
+        "",
+        "Functions and jumps:",
+        "  - Label: `:start`",
+        "  - `goto label`",
+        "  - `fn name arg1 arg2` ... `end`",
+        "  - `call name a b -> result`",
+        "  - `return [value]` (inside fn only)",
+        "",
+        "Runtime / process control:",
+        "  - `wait seconds` (async pause)",
+        "  - `title text...` (sets current console title)",
+        "  - `exit [status] [message...]`",
+        "  - `help` prints this reference",
+        "",
+        "Shell passthrough:",
+        "  - Unknown lines run as DIHOS shell commands (sys:/fs:/hw:/wifi:...).",
+        "  - Example: `sys:echo \"hello\\nworld\"`",
+    };
+    uint32_t i = 0u;
+
+    if (!runner || !runner->session)
+        return;
+
+    for (i = 0u; i < (uint32_t)(sizeof(lines) / sizeof(lines[0])); ++i)
+        dihos_shell_session_print(runner->session, lines[i]);
 }
 
 static int script_math_pow_int(double base, int exponent, double *out)
@@ -2491,81 +2781,159 @@ static int script_step_one(dihos_script_runner *runner)
 
         if (has_top && top->for_initialized)
         {
-            double next = top->for_current + top->for_step;
-            int keep_running = (top->for_step > 0.0) ? (next <= top->for_end) : (next >= top->for_end);
-            char value_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
-
-            if (!keep_running)
+            if (top->for_list_mode)
             {
-                uint32_t after = top->end_line + 1u;
-                script_pop_loop(runner);
-                runner->pc = after;
+                uint32_t next_index = top->for_list_index + 1u;
+                const char *item_value = 0;
+
+                if (next_index == 0u || next_index > top->for_list_count)
+                {
+                    uint32_t after = top->end_line + 1u;
+                    script_pop_loop(runner);
+                    runner->pc = after;
+                    return 0;
+                }
+
+                if (script_get_list_item_value(runner, top->for_list_name, next_index, &item_value) != 0 ||
+                    script_set_user_var(runner, top->for_var, item_value ? item_value : "") != 0)
+                {
+                    script_error(runner, "for list iteration failed");
+                    return -1;
+                }
+
+                top->for_list_index = next_index;
+                ++runner->pc;
                 return 0;
             }
 
-            top->for_current = next;
-            script_double_to_text(next, value_text, sizeof(value_text));
-            if (script_set_user_var(runner, top->for_var, value_text) != 0)
             {
-                script_error(runner, "for loop variable update failed");
-                return -1;
+                double next = top->for_current + top->for_step;
+                int keep_running = (top->for_step > 0.0) ? (next <= top->for_end) : (next >= top->for_end);
+                char value_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
+
+                if (!keep_running)
+                {
+                    uint32_t after = top->end_line + 1u;
+                    script_pop_loop(runner);
+                    runner->pc = after;
+                    return 0;
+                }
+
+                top->for_current = next;
+                script_double_to_text(next, value_text, sizeof(value_text));
+                if (script_set_user_var(runner, top->for_var, value_text) != 0)
+                {
+                    script_error(runner, "for loop variable update failed");
+                    return -1;
+                }
+                ++runner->pc;
+                return 0;
             }
-            ++runner->pc;
-            return 0;
         }
         else
         {
-            char var_name[DIHOS_SCRIPT_VAR_NAME_CAP];
-            double from_value = 0.0;
-            double to_value = 0.0;
-            double step_value = 1.0;
             uint32_t end_line = 0u;
-            int keep_running = 0;
-            char value_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
+            char var_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+            char list_name[DIHOS_SCRIPT_VAR_NAME_CAP];
 
-            if (script_parse_for_header(line, var_name, sizeof(var_name),
-                                        &from_value, &to_value, &step_value) != 0)
+            if (script_parse_for_list_header(line, var_name, sizeof(var_name),
+                                             list_name, sizeof(list_name)) == 0)
             {
-                script_error(runner, "invalid for syntax");
-                return -1;
-            }
-            if (step_value == 0.0)
-            {
-                script_error(runner, "for step cannot be zero");
-                return -1;
-            }
+                uint32_t list_count = 0u;
+                const char *item_value = 0;
 
-            keep_running = (step_value > 0.0) ? (from_value <= to_value) : (from_value >= to_value);
-            if (script_find_matching_end(runner, runner->pc + 1u, &end_line) != 0)
-            {
-                script_error(runner, "for is missing end");
-                return -1;
-            }
+                if (script_get_list_count(runner, list_name, &list_count) != 0)
+                {
+                    script_error(runner, "for list is undefined");
+                    return -1;
+                }
+                if (script_find_matching_end(runner, runner->pc + 1u, &end_line) != 0)
+                {
+                    script_error(runner, "for is missing end");
+                    return -1;
+                }
+                if (list_count == 0u)
+                {
+                    runner->pc = end_line + 1u;
+                    return 0;
+                }
+                if (script_push_loop(runner, SCRIPT_LOOP_FOR, runner->pc, end_line) != 0)
+                {
+                    script_error(runner, "too many nested loops");
+                    return -1;
+                }
 
-            if (!keep_running)
-            {
-                runner->pc = end_line + 1u;
+                top = script_top_loop(runner);
+                script_copy(top->for_var, sizeof(top->for_var), var_name);
+                script_copy(top->for_list_name, sizeof(top->for_list_name), list_name);
+                top->for_list_mode = 1u;
+                top->for_list_index = 1u;
+                top->for_list_count = list_count;
+                top->for_initialized = 1u;
+
+                if (script_get_list_item_value(runner, list_name, 1u, &item_value) != 0 ||
+                    script_set_user_var(runner, var_name, item_value ? item_value : "") != 0)
+                {
+                    script_error(runner, "for loop variable set failed");
+                    return -1;
+                }
+
+                ++runner->pc;
                 return 0;
             }
 
-            if (script_push_loop(runner, SCRIPT_LOOP_FOR, runner->pc, end_line) != 0)
             {
-                script_error(runner, "too many nested loops");
-                return -1;
-            }
+                double from_value = 0.0;
+                double to_value = 0.0;
+                double step_value = 1.0;
+                int keep_running = 0;
+                char value_text[DIHOS_SCRIPT_VAR_VALUE_CAP];
 
-            top = script_top_loop(runner);
-            script_copy(top->for_var, sizeof(top->for_var), var_name);
-            top->for_current = from_value;
-            top->for_end = to_value;
-            top->for_step = step_value;
-            top->for_initialized = 1u;
+                if (script_parse_for_header(line, var_name, sizeof(var_name),
+                                            &from_value, &to_value, &step_value) != 0)
+                {
+                    script_error(runner, "invalid for syntax");
+                    return -1;
+                }
+                if (step_value == 0.0)
+                {
+                    script_error(runner, "for step cannot be zero");
+                    return -1;
+                }
 
-            script_double_to_text(from_value, value_text, sizeof(value_text));
-            if (script_set_user_var(runner, var_name, value_text) != 0)
-            {
-                script_error(runner, "for loop variable set failed");
-                return -1;
+                keep_running = (step_value > 0.0) ? (from_value <= to_value) : (from_value >= to_value);
+                if (script_find_matching_end(runner, runner->pc + 1u, &end_line) != 0)
+                {
+                    script_error(runner, "for is missing end");
+                    return -1;
+                }
+
+                if (!keep_running)
+                {
+                    runner->pc = end_line + 1u;
+                    return 0;
+                }
+
+                if (script_push_loop(runner, SCRIPT_LOOP_FOR, runner->pc, end_line) != 0)
+                {
+                    script_error(runner, "too many nested loops");
+                    return -1;
+                }
+
+                top = script_top_loop(runner);
+                script_copy(top->for_var, sizeof(top->for_var), var_name);
+                top->for_list_mode = 0u;
+                top->for_current = from_value;
+                top->for_end = to_value;
+                top->for_step = step_value;
+                top->for_initialized = 1u;
+
+                script_double_to_text(from_value, value_text, sizeof(value_text));
+                if (script_set_user_var(runner, var_name, value_text) != 0)
+                {
+                    script_error(runner, "for loop variable set failed");
+                    return -1;
+                }
             }
 
             ++runner->pc;
@@ -2620,6 +2988,71 @@ static int script_step_one(dihos_script_runner *runner)
             script_error(runner, "invalid variable name or too many variables");
             return -1;
         }
+        script_set_status(runner, 0);
+        ++runner->pc;
+        return 0;
+    }
+
+    if (script_keyword(line, "list"))
+    {
+        char *cursor = line + 4u;
+        char *name = script_next_token(&cursor);
+        char *item = 0;
+        const char *items[DIHOS_SCRIPT_MAX_VARS];
+        uint32_t item_count = 0u;
+        uint32_t previous_count = 0u;
+        char count_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+        char count_text[16];
+
+        if (!name || !script_var_declaration_valid(name))
+        {
+            script_error(runner, "list needs a variable name");
+            return -1;
+        }
+
+        while ((item = script_next_token(&cursor)) != 0)
+        {
+            if (item_count >= (uint32_t)(sizeof(items) / sizeof(items[0])))
+            {
+                script_error(runner, "list has too many items");
+                return -1;
+            }
+            items[item_count++] = item;
+        }
+
+        if (script_get_list_count(runner, name, &previous_count) != 0)
+            previous_count = 0u;
+
+        if (script_build_list_suffix_name(name, "count", count_name, sizeof(count_name)) != 0)
+        {
+            script_error(runner, "list name is too long");
+            return -1;
+        }
+        script_u32_to_dec(item_count, count_text, sizeof(count_text));
+        if (script_set_user_var(runner, count_name, count_text) != 0)
+        {
+            script_error(runner, "unable to store list");
+            return -1;
+        }
+
+        for (uint32_t idx = 1u; idx <= item_count; ++idx)
+        {
+            char item_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+            if (script_build_list_index_name(name, idx, item_name, sizeof(item_name)) != 0 ||
+                script_set_user_var(runner, item_name, items[idx - 1u]) != 0)
+            {
+                script_error(runner, "unable to store list item");
+                return -1;
+            }
+        }
+
+        for (uint32_t idx = item_count + 1u; idx <= previous_count; ++idx)
+        {
+            char item_name[DIHOS_SCRIPT_VAR_NAME_CAP];
+            if (script_build_list_index_name(name, idx, item_name, sizeof(item_name)) == 0)
+                script_unset_user_var(runner, item_name);
+        }
+
         script_set_status(runner, 0);
         ++runner->pc;
         return 0;
@@ -3147,6 +3580,29 @@ static int script_step_one(dihos_script_runner *runner)
         script_copy(runner->input_prompt, sizeof(runner->input_prompt),
                     (prompt && prompt[0]) ? prompt : "input> ");
         runner->waiting_input = 1u;
+        ++runner->pc;
+        return 0;
+    }
+
+    if (script_keyword(line, "help"))
+    {
+        script_print_help(runner);
+        script_set_status(runner, 0);
+        ++runner->pc;
+        return 0;
+    }
+
+    if (script_keyword(line, "title"))
+    {
+        char *value = script_parse_text_tail(line + 5u);
+        if (!value || !value[0])
+        {
+            script_error(runner, "title needs text");
+            return -1;
+        }
+
+        dihos_shell_session_set_title(runner->session, value);
+        script_set_status(runner, 0);
         ++runner->pc;
         return 0;
     }

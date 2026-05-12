@@ -3130,3 +3130,12 @@ int dihos_shell_session_console_text(dihos_shell_session *session, char *out, ui
 
     return 0;
 }
+
+void dihos_shell_session_set_title(dihos_shell_session *session, const char *title)
+{
+    if (!session)
+        session = &G_default_shell;
+
+    if (session->io.set_title)
+        session->io.set_title(title ? title : "", session->io.user);
+}

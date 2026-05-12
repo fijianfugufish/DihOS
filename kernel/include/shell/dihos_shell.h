@@ -7,34 +7,37 @@ extern "C"
 {
 #endif
 
-#define DIHOS_SHELL_LINE_CAP 256u
-#define DIHOS_SHELL_PATH_CAP 256u
-#define DIHOS_SHELL_PROMPT_CAP 320u
-#define DIHOS_SHELL_HISTORY_MAX 32u
-#define DIHOS_SHELL_HISTORY_ENTRY_CAP DIHOS_SHELL_LINE_CAP
-#define DIHOS_SHELL_CAPTURE_CAP 65536u
+#define DIHOS_MULTIPLIER 8u
 
-#define DIHOS_SCRIPT_MAX_LINES 256u
+#define DIHOS_SHELL_LINE_CAP 256u * DIHOS_MULTIPLIER
+#define DIHOS_SHELL_PATH_CAP 256u * DIHOS_MULTIPLIER
+#define DIHOS_SHELL_PROMPT_CAP 320u * DIHOS_MULTIPLIER
+#define DIHOS_SHELL_HISTORY_MAX 32u * DIHOS_MULTIPLIER
+#define DIHOS_SHELL_HISTORY_ENTRY_CAP DIHOS_SHELL_LINE_CAP
+#define DIHOS_SHELL_CAPTURE_CAP 65536u * DIHOS_MULTIPLIER
+
+#define DIHOS_SCRIPT_MAX_LINES 256u * DIHOS_MULTIPLIER
 #define DIHOS_SCRIPT_LINE_CAP DIHOS_SHELL_LINE_CAP
-#define DIHOS_SCRIPT_MAX_VARS 32u
-#define DIHOS_SCRIPT_VAR_NAME_CAP 32u
-#define DIHOS_SCRIPT_VAR_VALUE_CAP 256u
-#define DIHOS_SCRIPT_MAX_LABELS 64u
-#define DIHOS_SCRIPT_LABEL_CAP 32u
-#define DIHOS_SCRIPT_MAX_ARGS 16u
-#define DIHOS_SCRIPT_MAX_FUNCS 32u
-#define DIHOS_SCRIPT_FUNC_NAME_CAP 32u
-#define DIHOS_SCRIPT_FUNC_MAX_ARGS 8u
-#define DIHOS_SCRIPT_MAX_CALL_DEPTH 8u
-#define DIHOS_SCRIPT_MAX_LOCAL_VARS 32u
-#define DIHOS_SCRIPT_MAX_LOOPS 16u
-#define DIHOS_SCRIPT_STEP_BUDGET 24u
-#define DIHOS_SCRIPT_INSTRUCTION_LIMIT 10000u
+#define DIHOS_SCRIPT_MAX_VARS 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_VAR_NAME_CAP 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_VAR_VALUE_CAP 256u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_LABELS 64u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_LABEL_CAP 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_ARGS 16u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_FUNCS 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_FUNC_NAME_CAP 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_FUNC_MAX_ARGS 8u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_CALL_DEPTH 8u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_LOCAL_VARS 32u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_MAX_LOOPS 16u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_STEP_BUDGET 24u * DIHOS_MULTIPLIER
+#define DIHOS_SCRIPT_INSTRUCTION_LIMIT 10000u * DIHOS_MULTIPLIER
 
     typedef void (*dihos_shell_text_fn)(const char *text, void *user);
     typedef void (*dihos_shell_clear_fn)(void *user);
     typedef void (*dihos_shell_capture_sink_fn)(const char *text, uint32_t len, void *user);
     typedef int (*dihos_shell_console_text_fn)(char *out, uint32_t out_cap, void *user);
+    typedef void (*dihos_shell_title_fn)(const char *title, void *user);
 
     typedef struct dihos_shell_io
     {
@@ -45,6 +48,7 @@ extern "C"
         dihos_shell_text_fn success;
         dihos_shell_clear_fn clear;
         dihos_shell_console_text_fn console_text;
+        dihos_shell_title_fn set_title;
         void *user;
     } dihos_shell_io;
 
@@ -101,10 +105,14 @@ extern "C"
         uint32_t start_line;
         uint32_t end_line;
         char for_var[DIHOS_SCRIPT_VAR_NAME_CAP];
+        char for_list_name[DIHOS_SCRIPT_VAR_NAME_CAP];
         double for_current;
         double for_end;
         double for_step;
         uint8_t for_initialized;
+        uint8_t for_list_mode;
+        uint32_t for_list_index;
+        uint32_t for_list_count;
     } dihos_script_loop_frame;
 
     typedef struct dihos_script_runner
@@ -162,6 +170,7 @@ extern "C"
     void dihos_shell_session_error(dihos_shell_session *session, const char *text);
     void dihos_shell_session_success(dihos_shell_session *session, const char *text);
     int dihos_shell_session_console_text(dihos_shell_session *session, char *out, uint32_t out_cap);
+    void dihos_shell_session_set_title(dihos_shell_session *session, const char *title);
 
     int dihos_script_load_file(dihos_script_runner *runner, dihos_shell_session *session,
                                const char *raw_path, const char *friendly_path);

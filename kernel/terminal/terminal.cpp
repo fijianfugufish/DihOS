@@ -219,6 +219,13 @@ static int terminal_session_console_text(char *out, uint32_t out_cap, void *user
     return terminal->CopyConsoleText(out, out_cap);
 }
 
+static void terminal_session_set_title(const char *title, void *user)
+{
+    Terminal *terminal = (Terminal *)user;
+    if (terminal)
+        terminal->SetTitle(title);
+}
+
 static void terminal_i32_to_dec(int value, char *out, uint32_t cap)
 {
     char tmp[16];
@@ -733,6 +740,7 @@ void Terminal::Initialize(kfont *font, const char *title, int new_slot_index)
     io.success = terminal_session_success;
     io.clear = terminal_session_clear;
     io.console_text = terminal_session_console_text;
+    io.set_title = terminal_session_set_title;
     io.user = this;
     dihos_shell_session_init(&shell, &io);
 
@@ -1009,6 +1017,13 @@ void Terminal::ToggleQuiet()
 void Terminal::SetQuiet() { terminal_quiet = 1; }
 
 void Terminal::SetLoud() { terminal_quiet = 0; }
+
+void Terminal::SetTitle(const char *title)
+{
+    if (window.idx < 0)
+        return;
+    kwindow_set_title(window, (title && title[0]) ? title : "Terminal");
+}
 
 void Terminal::Activate()
 {

@@ -290,7 +290,7 @@ namespace
         static const char *kKeywords[] = {
             "if", "else", "while", "for", "from", "to", "step", "fn", "end",
             "continue", "break", "return", "let", "unset",
-            "goto", "call", "exit", "input", "wait",
+            "goto", "call", "exit", "input", "wait", "list", "title", "help", "in",
             "add", "sub", "mul", "div", "pow", "mod",
             "rand", "seed", "pick",
             "and", "nand", "or", "xor", "nor", "not",
@@ -339,7 +339,7 @@ namespace
     static int sac_keyword_assigns_first_arg(const char *token, uint32_t token_len)
     {
         static const char *kAssigningKeywords[] = {
-            "let", "unset",
+            "let", "unset", "list",
             "add", "sub", "mul", "div", "pow", "mod",
             "rand",
             "and", "nand", "or", "xor", "nor", "not",
@@ -815,6 +815,28 @@ namespace
             if (ascii_is_digit(src[i]))
             {
                 j = i + 1u;
+                if (src[i] == '0' &&
+                    (src[j] == 'b' || src[j] == 'B') &&
+                    (src[j + 1u] == '0' || src[j + 1u] == '1'))
+                {
+                    j += 2u;
+                    while (src[j] == '0' || src[j] == '1')
+                        ++j;
+
+                    if (plain_tail_text)
+                    {
+                        line_append_span(dst, cap, &out_len, src + i, j - i);
+                        i = j;
+                        continue;
+                    }
+
+                    line_append_color_set(dst, cap, &out_len, kNumber);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    i = j;
+                    continue;
+                }
+
                 while (ascii_is_digit(src[j]))
                     ++j;
 
