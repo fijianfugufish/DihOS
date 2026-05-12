@@ -199,11 +199,8 @@ static int kwifi_send_eapol_start(void)
 {
     uint8_t frame[64];
     uint8_t src[6];
-    uint32_t tx_count_before = 0u, tx_last_desc = 0u, tx_last_status = 0u;
-    uint32_t tx_count_after = 0u, tx_last_desc_after = 0u, tx_last_status_after = 0u;
-    uint32_t tx_status_for_log = 0xFFFFFFFFu;
-    uint8_t sent = 0u;
-    uint8_t completion_seen = 0u;
+    uint8_t dst[6];
+    uint8_t have_bssid = 0u;
     static const uint8_t eapol_pae_group[6] = {0x01u, 0x80u, 0xC2u, 0x00u, 0x00u, 0x03u};
 
     if (g_kwifi_connect.eapol_start_sent)
@@ -211,12 +208,13 @@ static int kwifi_send_eapol_start(void)
 
     if (!pci_kernel_wifi_get_local_mac(src))
         return 0;
+    have_bssid = pci_kernel_wifi_get_bssid(dst) ? 1u : 0u;
 
     for (uint32_t i = 0u; i < sizeof(frame); ++i)
         frame[i] = 0u;
     for (uint32_t i = 0u; i < 6u; ++i)
     {
-        frame[i] = eapol_pae_group[i];
+        frame[i] = have_bssid ? dst[i] : eapol_pae_group[i];
         frame[6u + i] = src[i];
     }
     frame[12] = 0x88u;
@@ -226,35 +224,19 @@ static int kwifi_send_eapol_start(void)
     frame[16] = 0x00u; /* body len hi */
     frame[17] = 0x00u; /* body len lo */
 
-    (void)pci_kernel_wifi_mgmt_tx_status(&tx_count_before, &tx_last_desc, &tx_last_status);
-    if (pci_kernel_wifi_tx_l2_frame_mode(frame, 60u, 0u))
-        sent = 1u;
-    (void)pci_kernel_wifi_mgmt_tx_status(&tx_count_after, &tx_last_desc_after, &tx_last_status_after);
-    completion_seen = (tx_count_after != tx_count_before) ? 1u : 0u;
-
-    if (!completion_seen)
-    {
-        terminal_print("[K:WIFI] EAPOL-Start mgmt-tx completion not observed; retrying offchan path");
-        if (pci_kernel_wifi_tx_l2_frame_mode(frame, 60u, 1u))
-            sent = 1u;
-        (void)pci_kernel_wifi_mgmt_tx_status(&tx_count_after, &tx_last_desc_after, &tx_last_status_after);
-        completion_seen = (tx_count_after != tx_count_before) ? 1u : 0u;
-    }
-
-    if (!sent)
+    if (!pci_kernel_wifi_tx_l2_frame(frame, 60u))
         return 0;
 
-    if (completion_seen)
-        tx_status_for_log = tx_last_status_after;
-
     g_kwifi_connect.eapol_start_sent = 1u;
-    terminal_print("[K:WIFI] enterprise EAPOL-Start sent");
-    terminal_print(" tx_count=");
-    terminal_print_inline_hex64(tx_count_after);
-    terminal_print(" tx_done=");
-    terminal_print_inline(completion_seen ? "yes" : "no");
-    terminal_print(" tx_status=");
-    terminal_print_inline_hex64(tx_status_for_log);
+    terminal_print("[K:WIFI] enterprise EAPOL-Start queued via data path dst=");
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        terminal_print_inline_hex8(frame[i]);
+        if (i != 5u)
+            terminal_print(":");
+    }
+    terminal_print(" bssid_dst=");
+    terminal_print_inline(have_bssid ? "yes" : "no");
     return 1;
 }
 

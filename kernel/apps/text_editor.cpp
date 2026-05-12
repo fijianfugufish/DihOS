@@ -142,6 +142,24 @@ namespace
         }
     }
 
+    static char paired_right_char(char ch)
+    {
+        switch (ch)
+        {
+        case '(': return ')';
+        case '[': return ']';
+        case '{': return '}';
+        case '"': return '"';
+        case '\'': return '\'';
+        default: return 0;
+        }
+    }
+
+    static int closing_pair_char(char ch)
+    {
+        return ch == ')' || ch == ']' || ch == '}' || ch == '"' || ch == '\'' ? 1 : 0;
+    }
+
     static int ascii_is_space(char ch)
     {
         return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
@@ -309,6 +327,26 @@ namespace
         return 0;
     }
 
+    static int sac_keyword_assigns_first_arg(const char *token, uint32_t token_len)
+    {
+        static const char *kAssigningKeywords[] = {
+            "let", "unset",
+            "add", "sub", "mul", "div", "pow", "mod",
+            "rand",
+            "and", "nand", "or", "xor", "nor", "not",
+            "band", "bnand", "bor", "bxor", "bnor", "bnot",
+            "shl", "shr", "rol", "ror",
+            "cmp", "eq", "neq", "lt", "lte", "gt", "gte", "abs"};
+
+        for (uint32_t i = 0u; i < sizeof(kAssigningKeywords) / sizeof(kAssigningKeywords[0]); ++i)
+        {
+            if (token_equals_ci(token, token_len, kAssigningKeywords[i]))
+                return 1;
+        }
+
+        return 0;
+    }
+
     static void line_append_char(char *dst, uint32_t cap, uint32_t *len, char ch)
     {
         if (!dst || !len || cap == 0u)
@@ -401,6 +439,7 @@ namespace
         uint8_t for_var_context = 0u;
         uint8_t plain_tail_text = 0u;
         uint8_t plain_tail_arg_context = 0u;
+        uint8_t assign_target_context = 0u;
 
         if (!dst || cap == 0u)
             return;
@@ -630,6 +669,17 @@ namespace
                     continue;
                 }
 
+                if (assign_target_context)
+                {
+                    line_append_color_set(dst, cap, &out_len,
+                                          token_equals_ci(src + i, j - i, "void") ? kVoid : kFnArg);
+                    line_append_span(dst, cap, &out_len, src + i, j - i);
+                    line_append_color_reset(dst, cap, &out_len);
+                    assign_target_context = 0u;
+                    i = j;
+                    continue;
+                }
+
                 if (plain_tail_text)
                 {
                     line_append_span(dst, cap, &out_len, src + i, j - i);
@@ -652,6 +702,7 @@ namespace
                     uint8_t is_call = token_equals_ci(src + i, j - i, "call") ? 1u : 0u;
                     uint8_t is_input = token_equals_ci(src + i, j - i, "input") ? 1u : 0u;
                     uint8_t is_pick = token_equals_ci(src + i, j - i, "pick") ? 1u : 0u;
+                    uint8_t assigns_first_arg = sac_keyword_assigns_first_arg(src + i, j - i) ? 1u : 0u;
 
                     line_append_color_set(dst, cap, &out_len, kKeyword);
                     line_append_span(dst, cap, &out_len, src + i, j - i);
@@ -674,6 +725,13 @@ namespace
                         for_var_context = 1u;
                         fn_arg_context = 0u;
                         call_arg_context = 0u;
+                    }
+                    else if (assigns_first_arg)
+                    {
+                        assign_target_context = 1u;
+                        fn_arg_context = 0u;
+                        call_arg_context = 0u;
+                        for_var_context = 0u;
                     }
                     else if (is_input || is_pick)
                     {
@@ -903,6 +961,7 @@ namespace
         int SacEditingEnabled() const;
         void MarkTextChanged();
         void InsertChar(char ch);
+        void InsertPair(char left, char right);
         void InsertText(const char *text);
         void InsertNewlineSmart();
         void Backspace();
@@ -2502,6 +2561,26 @@ namespace
         ResetCaretBlink();
     }
 
+    void TextEditor::InsertPair(char left, char right)
+    {
+        if (HasSelection())
+            DeleteSelection();
+
+        if (len_ + 2u >= TEXT_CAP)
+        {
+            SetStatus("document is full", rgb(255, 170, 120));
+            return;
+        }
+
+        memmove(buffer_ + cursor_ + 2u, buffer_ + cursor_, len_ - cursor_ + 1u);
+        buffer_[cursor_] = left;
+        buffer_[cursor_ + 1u] = right;
+        len_ += 2u;
+        ++cursor_;
+        MarkTextChanged();
+        ResetCaretBlink();
+    }
+
     void TextEditor::InsertText(const char *text)
     {
         if (!text)
@@ -3073,17 +3152,29 @@ namespace
                     char ch = usage_to_char(usage, shift, caps_lock_);
                     if (ch)
                     {
+                        char pair_right = paired_right_char(ch);
+
+                        if (closing_pair_char(ch) && cursor_ < len_ && buffer_[cursor_] == ch && !HasSelection())
+                        {
+                            ++cursor_;
+                            UpdatePreferredFromCursor();
+                            ResetCaretBlink();
+                            EnsureCursorVisible();
+                            view_dirty_ = 1u;
+                            continue;
+                        }
+
                         SaveUndoSnapshot();
                         ClearRedoSnapshot();
 
-                        if (SacEditingEnabled() && HasSelection())
+                        if (HasSelection())
                         {
-                            if (ch == '$')
+                            if (SacEditingEnabled() && ch == '$')
                             {
                                 PrefixSelection("$");
                                 continue;
                             }
-                            if (ch == '%')
+                            if (SacEditingEnabled() && ch == '%')
                             {
                                 WrapSelection("%", "%");
                                 continue;
@@ -3113,6 +3204,12 @@ namespace
                                 WrapSelection("{", "}");
                                 continue;
                             }
+                        }
+
+                        if (pair_right)
+                        {
+                            InsertPair(ch, pair_right);
+                            continue;
                         }
 
                         InsertChar(ch);
