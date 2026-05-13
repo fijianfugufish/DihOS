@@ -27,6 +27,13 @@ void asm_mmio_barrier(void)
     __asm__ __volatile__("mfence" ::: "memory");
 }
 
+void asm_dma_clean_range_raw(const void *ptr, uint64_t len)
+{
+    (void)ptr;
+    (void)len;
+    asm_compiler_barrier();
+}
+
 void asm_dma_clean_range(const void *ptr, uint64_t len)
 {
     (void)ptr;

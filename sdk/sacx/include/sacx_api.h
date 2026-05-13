@@ -129,6 +129,92 @@ extern "C"
         uint32_t fullscreen_glyph_scale;
     } sacx_window_style;
 
+    typedef struct sacx3d_vec3
+    {
+        float x;
+        float y;
+        float z;
+    } sacx3d_vec3;
+
+    typedef struct sacx3d_viewport_desc
+    {
+        uint32_t parent_obj_handle;
+        int32_t x;
+        int32_t y;
+        int32_t z;
+        uint32_t w;
+        uint32_t h;
+        uint32_t internal_w;
+        uint32_t internal_h;
+    } sacx3d_viewport_desc;
+
+    typedef struct sacx3d_camera
+    {
+        sacx3d_vec3 pos;
+        float yaw_deg;
+        float pitch_deg;
+        float roll_deg;
+        float fov_deg;
+        float near_z;
+        float far_z;
+    } sacx3d_camera;
+
+    typedef struct sacx3d_fog
+    {
+        uint8_t enabled;
+        sacx_color color;
+        float start;
+        float end;
+    } sacx3d_fog;
+
+    typedef struct sacx3d_point_light
+    {
+        sacx3d_vec3 pos;
+        sacx_color color;
+        float radius;
+        float intensity;
+        uint8_t enabled;
+    } sacx3d_point_light;
+
+    typedef struct sacx3d_box
+    {
+        float min_x;
+        float min_y;
+        float min_z;
+        float max_x;
+        float max_y;
+        float max_z;
+    } sacx3d_box;
+
+    typedef struct sacx3d_player_desc
+    {
+        sacx3d_camera camera;
+        float walk_speed;
+        float free_speed;
+        float mouse_sensitivity;
+        float radius;
+        float eye_height;
+        uint8_t free_mode;
+        uint8_t drag_to_look;
+    } sacx3d_player_desc;
+
+    typedef struct sacx3d_room_desc
+    {
+        float center_x;
+        float floor_y;
+        float center_z;
+        float w;
+        float h;
+        float d;
+        float wall_thickness;
+        sacx_color floor_color;
+        sacx_color ceiling_color;
+        sacx_color left_wall_color;
+        sacx_color right_wall_color;
+        sacx_color front_wall_color;
+        sacx_color back_wall_color;
+    } sacx3d_room_desc;
+
     static inline sacx_button_style sacx_button_style_default(void)
     {
         sacx_button_style s;
@@ -362,6 +448,45 @@ extern "C"
                                 sacx_file_dialog_fn on_result, void *user);
         int (*dialog_active)(void);
         int (*window_focused)(uint32_t handle);
+
+        int (*k3d_scene_create)(const sacx3d_viewport_desc *desc, uint32_t *out_scene_handle, uint32_t *out_obj_handle);
+        int (*k3d_scene_destroy)(uint32_t scene_handle);
+        int (*k3d_scene_render)(uint32_t scene_handle);
+        int (*k3d_scene_resize)(uint32_t scene_handle, uint32_t viewport_w, uint32_t viewport_h,
+                                uint32_t internal_w, uint32_t internal_h);
+        int (*k3d_scene_root_obj)(uint32_t scene_handle, uint32_t *out_obj_handle);
+        int (*k3d_scene_set_camera)(uint32_t scene_handle, const sacx3d_camera *camera);
+        int (*k3d_scene_get_camera)(uint32_t scene_handle, sacx3d_camera *out_camera);
+        int (*k3d_scene_set_ambient)(uint32_t scene_handle, sacx_color color, float intensity);
+        int (*k3d_scene_set_directional_light)(uint32_t scene_handle, sacx3d_vec3 dir, sacx_color color, float intensity);
+        int (*k3d_scene_clear_point_lights)(uint32_t scene_handle);
+        int (*k3d_scene_add_point_light)(uint32_t scene_handle, const sacx3d_point_light *light, uint32_t *out_light);
+        int (*k3d_scene_set_point_light)(uint32_t scene_handle, uint32_t light_idx, const sacx3d_point_light *light);
+        int (*k3d_scene_set_fog)(uint32_t scene_handle, const sacx3d_fog *fog);
+        int (*k3d_scene_new_cube)(uint32_t scene_handle, float w, float h, float d,
+                                  float x, float y, float z, sacx_color color, uint32_t *out_instance);
+        int (*k3d_scene_load_obj)(uint32_t scene_handle, const char *path,
+                                  float x, float y, float z, uint32_t *out_instance);
+        int (*k3d_instance_set_pos)(uint32_t scene_handle, uint32_t instance_handle, float x, float y, float z);
+        int (*k3d_instance_set_rotation)(uint32_t scene_handle, uint32_t instance_handle,
+                                         float pitch_deg, float yaw_deg, float roll_deg);
+        int (*k3d_instance_set_scale)(uint32_t scene_handle, uint32_t instance_handle, float sx, float sy, float sz);
+        int (*k3d_instance_set_visible)(uint32_t scene_handle, uint32_t instance_handle, uint32_t visible);
+        int (*k3d_player_create)(uint32_t scene_handle, uint32_t window_handle,
+                                 const sacx3d_player_desc *desc, uint32_t *out_player_handle);
+        int (*k3d_player_destroy)(uint32_t player_handle);
+        int (*k3d_player_set_free_mode)(uint32_t player_handle, uint32_t free_mode);
+        int (*k3d_player_set_camera)(uint32_t player_handle, const sacx3d_camera *camera);
+        int (*k3d_player_get_camera)(uint32_t player_handle, sacx3d_camera *out_camera);
+        int (*k3d_player_clear_colliders)(uint32_t player_handle);
+        int (*k3d_player_add_collider)(uint32_t player_handle, const sacx3d_box *box);
+        int (*k3d_player_update)(uint32_t player_handle, float dt, uint32_t render_scene);
+        int (*k3d_scene_apply_default_world)(uint32_t scene_handle);
+        int (*k3d_scene_add_room)(uint32_t scene_handle, uint32_t player_handle, const sacx3d_room_desc *desc);
+        int (*k3d_scene_add_obstacle_cube)(uint32_t scene_handle, uint32_t player_handle,
+                                           float w, float h, float d,
+                                           float x, float y, float z,
+                                           sacx_color color, uint32_t *out_instance);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

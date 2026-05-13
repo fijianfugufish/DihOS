@@ -10,6 +10,7 @@ extern "C"
 {
 #include "kwrappers/colors.h"
 #include "kwrappers/kbutton.h"
+#include "kwrappers/k3d.h"
 #include "kwrappers/kfile.h"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/kimg.h"
@@ -32,6 +33,8 @@ extern "C"
 #define SACX_MAX_TASK_TEXTBOXES 32u
 #define SACX_MAX_TASK_GFX_OBJECTS 512u
 #define SACX_MAX_TASK_IMAGES 32u
+#define SACX_MAX_TASK_3D_SCENES 8u
+#define SACX_MAX_TASK_3D_PLAYERS 8u
 #define SACX_MAX_SEGMENTS 128u
 #define SACX_MAX_RELOCS 8192u
 #define SACX_MAX_IMPORTS 256u
@@ -91,6 +94,21 @@ typedef struct sacx_image_slot
     uint8_t used;
 } sacx_image_slot;
 
+typedef struct sacx_3d_scene_slot
+{
+    k3d_scene_handle handle;
+    uint32_t root_obj_handle;
+    uint8_t used;
+} sacx_3d_scene_slot;
+
+typedef struct sacx_3d_player_slot
+{
+    k3d_player_handle handle;
+    uint32_t scene_handle;
+    uint32_t window_handle;
+    uint8_t used;
+} sacx_3d_player_slot;
+
 typedef struct sacx_task
 {
     uint32_t task_id;
@@ -137,6 +155,8 @@ typedef struct sacx_task
     sacx_textbox_slot textboxes[SACX_MAX_TASK_TEXTBOXES];
     sacx_gfx_slot gfx_objects[SACX_MAX_TASK_GFX_OBJECTS];
     sacx_image_slot images[SACX_MAX_TASK_IMAGES];
+    sacx_3d_scene_slot scenes3d[SACX_MAX_TASK_3D_SCENES];
+    sacx_3d_player_slot players3d[SACX_MAX_TASK_3D_PLAYERS];
 } sacx_task;
 
 static sacx_task G_tasks[SACX_MAX_TASKS];
@@ -408,6 +428,36 @@ static const char *G_known_imports[] = {
     "dialog_open_file",
     "dialog_active",
     "window_focused",
+    "k3d_scene_create",
+    "k3d_scene_destroy",
+    "k3d_scene_render",
+    "k3d_scene_resize",
+    "k3d_scene_root_obj",
+    "k3d_scene_set_camera",
+    "k3d_scene_get_camera",
+    "k3d_scene_set_ambient",
+    "k3d_scene_set_directional_light",
+    "k3d_scene_clear_point_lights",
+    "k3d_scene_add_point_light",
+    "k3d_scene_set_point_light",
+    "k3d_scene_set_fog",
+    "k3d_scene_new_cube",
+    "k3d_scene_load_obj",
+    "k3d_instance_set_pos",
+    "k3d_instance_set_rotation",
+    "k3d_instance_set_scale",
+    "k3d_instance_set_visible",
+    "k3d_player_create",
+    "k3d_player_destroy",
+    "k3d_player_set_free_mode",
+    "k3d_player_set_camera",
+    "k3d_player_get_camera",
+    "k3d_player_clear_colliders",
+    "k3d_player_add_collider",
+    "k3d_player_update",
+    "k3d_scene_apply_default_world",
+    "k3d_scene_add_room",
+    "k3d_scene_add_obstacle_cube",
 };
 
 static int sacx_import_known(const char *name)
@@ -456,6 +506,103 @@ static kcolor sacx_to_kcolor(sacx_color c)
 {
     kcolor out = {c.r, c.g, c.b};
     return out;
+}
+
+static k3d_vec3 sacx_to_k3d_vec3(sacx3d_vec3 v)
+{
+    return (k3d_vec3){v.x, v.y, v.z};
+}
+
+static void sacx_to_k3d_camera(const sacx3d_camera *in, k3d_camera *out)
+{
+    if (!in || !out)
+        return;
+    out->pos = sacx_to_k3d_vec3(in->pos);
+    out->yaw_deg = in->yaw_deg;
+    out->pitch_deg = in->pitch_deg;
+    out->roll_deg = in->roll_deg;
+    out->fov_deg = in->fov_deg;
+    out->near_z = in->near_z;
+    out->far_z = in->far_z;
+}
+
+static void k3d_to_sacx_camera(const k3d_camera *in, sacx3d_camera *out)
+{
+    if (!in || !out)
+        return;
+    out->pos = (sacx3d_vec3){in->pos.x, in->pos.y, in->pos.z};
+    out->yaw_deg = in->yaw_deg;
+    out->pitch_deg = in->pitch_deg;
+    out->roll_deg = in->roll_deg;
+    out->fov_deg = in->fov_deg;
+    out->near_z = in->near_z;
+    out->far_z = in->far_z;
+}
+
+static void sacx_to_k3d_fog(const sacx3d_fog *in, k3d_fog *out)
+{
+    if (!in || !out)
+        return;
+    out->enabled = in->enabled ? 1u : 0u;
+    out->color = sacx_to_kcolor(in->color);
+    out->start = in->start;
+    out->end = in->end;
+}
+
+static void sacx_to_k3d_point_light(const sacx3d_point_light *in, k3d_point_light *out)
+{
+    if (!in || !out)
+        return;
+    out->pos = sacx_to_k3d_vec3(in->pos);
+    out->color = sacx_to_kcolor(in->color);
+    out->radius = in->radius;
+    out->intensity = in->intensity;
+    out->enabled = in->enabled ? 1u : 0u;
+}
+
+static void sacx_to_k3d_box(const sacx3d_box *in, k3d_box *out)
+{
+    if (!in || !out)
+        return;
+    out->min_x = in->min_x;
+    out->min_y = in->min_y;
+    out->min_z = in->min_z;
+    out->max_x = in->max_x;
+    out->max_y = in->max_y;
+    out->max_z = in->max_z;
+}
+
+static void sacx_to_k3d_player_desc(const sacx3d_player_desc *in, k3d_player_desc *out)
+{
+    if (!in || !out)
+        return;
+    sacx_to_k3d_camera(&in->camera, &out->camera);
+    out->walk_speed = in->walk_speed;
+    out->free_speed = in->free_speed;
+    out->mouse_sensitivity = in->mouse_sensitivity;
+    out->radius = in->radius;
+    out->eye_height = in->eye_height;
+    out->free_mode = in->free_mode ? 1u : 0u;
+    out->drag_to_look = in->drag_to_look ? 1u : 0u;
+}
+
+static void sacx_to_k3d_room_desc(const sacx3d_room_desc *in, k3d_room_desc *out)
+{
+    if (!in || !out)
+        return;
+    out->center_x = in->center_x;
+    out->floor_y = in->floor_y;
+    out->center_z = in->center_z;
+    out->w = in->w;
+    out->h = in->h;
+    out->d = in->d;
+    out->wall_thickness = in->wall_thickness;
+    out->floor_color = sacx_to_kcolor(in->floor_color);
+    out->ceiling_color = sacx_to_kcolor(in->ceiling_color);
+    out->left_wall_color = sacx_to_kcolor(in->left_wall_color);
+    out->right_wall_color = sacx_to_kcolor(in->right_wall_color);
+    out->front_wall_color = sacx_to_kcolor(in->front_wall_color);
+    out->back_wall_color = sacx_to_kcolor(in->back_wall_color);
 }
 
 static void sacx_copy_kdirent(const kdirent *in, sacx_dirent *out)
@@ -643,6 +790,24 @@ static sacx_image_slot *sacx_image_from_handle(sacx_task *task, uint32_t handle)
     return &task->images[handle - 1u];
 }
 
+static sacx_3d_scene_slot *sacx_3d_scene_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_3D_SCENES)
+        return 0;
+    if (!task->scenes3d[handle - 1u].used)
+        return 0;
+    return &task->scenes3d[handle - 1u];
+}
+
+static sacx_3d_player_slot *sacx_3d_player_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_3D_PLAYERS)
+        return 0;
+    if (!task->players3d[handle - 1u].used)
+        return 0;
+    return &task->players3d[handle - 1u];
+}
+
 static void sacx_button_click_trampoline(kbutton_handle button, void *user)
 {
     sacx_button_slot *slot = (sacx_button_slot *)user;
@@ -825,6 +990,45 @@ static void sacx_task_destroy_images(sacx_task *task)
     }
 }
 
+static void sacx_task_destroy_3d_scenes(sacx_task *task)
+{
+    if (!task)
+        return;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_3D_SCENES; ++i)
+    {
+        if (!task->scenes3d[i].used)
+            continue;
+        if (task->scenes3d[i].root_obj_handle > 0u &&
+            task->scenes3d[i].root_obj_handle <= SACX_MAX_TASK_GFX_OBJECTS)
+        {
+            task->gfx_objects[task->scenes3d[i].root_obj_handle - 1u].used = 0u;
+            task->gfx_objects[task->scenes3d[i].root_obj_handle - 1u].handle.idx = -1;
+        }
+        (void)k3d_scene_destroy(task->scenes3d[i].handle);
+        task->scenes3d[i].used = 0u;
+        task->scenes3d[i].handle.idx = -1;
+        task->scenes3d[i].root_obj_handle = 0u;
+    }
+}
+
+static void sacx_task_destroy_3d_players(sacx_task *task)
+{
+    if (!task)
+        return;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_3D_PLAYERS; ++i)
+    {
+        if (!task->players3d[i].used)
+            continue;
+        (void)k3d_player_destroy(task->players3d[i].handle);
+        task->players3d[i].used = 0u;
+        task->players3d[i].handle.idx = -1;
+        task->players3d[i].scene_handle = 0u;
+        task->players3d[i].window_handle = 0u;
+    }
+}
+
 static void sacx_task_finish(sacx_task *task, int32_t status, const char *message, uint32_t new_state)
 {
     char status_text[16];
@@ -834,6 +1038,8 @@ static void sacx_task_finish(sacx_task *task, int32_t status, const char *messag
 
     sacx_task_close_files(task);
     sacx_task_close_dirs(task);
+    sacx_task_destroy_3d_players(task);
+    sacx_task_destroy_3d_scenes(task);
     sacx_task_destroy_textboxes(task);
     sacx_task_destroy_buttons(task);
     sacx_task_destroy_windows(task);
@@ -2313,41 +2519,41 @@ static int sacx_api_textbox_text_copy(uint32_t textbox_handle, char *dst, uint32
 
 static int32_t sacx_api_input_mouse_dx(void)
 {
-    return kinput_mouse_dx();
+    return kmouse_dx();
 }
 
 static int32_t sacx_api_input_mouse_dy(void)
 {
-    return kinput_mouse_dy();
+    return kmouse_dy();
 }
 
 static int32_t sacx_api_input_mouse_wheel(void)
 {
-    return kinput_mouse_wheel();
+    return kmouse_wheel();
 }
 
 static uint8_t sacx_api_input_mouse_buttons(void)
 {
-    return kinput_mouse_buttons();
+    return kmouse_buttons();
 }
 
 static int sacx_api_input_mouse_consume(sacx_mouse_state *out_state)
 {
-    kinput_mouse_state raw;
+    kmouse_state mouse;
 
     if (!out_state)
         return -1;
 
-    memset(&raw, 0, sizeof(raw));
-    kinput_mouse_consume(&raw);
+    memset(&mouse, 0, sizeof(mouse));
+    kmouse_get_state(&mouse);
     memset(out_state, 0, sizeof(*out_state));
-    out_state->x = kmouse_x();
-    out_state->y = kmouse_y();
-    out_state->dx = raw.dx;
-    out_state->dy = raw.dy;
-    out_state->wheel = raw.wheel;
-    out_state->buttons = raw.buttons;
-    out_state->visible = kmouse_visible();
+    out_state->x = mouse.x;
+    out_state->y = mouse.y;
+    out_state->dx = mouse.dx;
+    out_state->dy = mouse.dy;
+    out_state->wheel = mouse.wheel;
+    out_state->buttons = mouse.buttons;
+    out_state->visible = mouse.visible;
     return 0;
 }
 
@@ -2650,6 +2856,454 @@ static int sacx_api_img_size(uint32_t image_handle, uint32_t *out_w, uint32_t *o
     return 0;
 }
 
+static int sacx_api_k3d_scene_create(const sacx3d_viewport_desc *desc, uint32_t *out_scene_handle, uint32_t *out_obj_handle)
+{
+    k3d_viewport_desc native;
+    k3d_scene_handle scene;
+    kgfx_obj_handle obj;
+    sacx_gfx_slot *parent = 0;
+    uint32_t app_obj_handle = 0u;
+
+    if (!G_current_task || !desc || !out_scene_handle || !out_obj_handle)
+        return -1;
+    parent = sacx_gfx_from_handle(G_current_task, desc->parent_obj_handle);
+    if (!parent)
+        return -1;
+
+    native.parent = parent->handle;
+    native.x = desc->x;
+    native.y = desc->y;
+    native.z = desc->z;
+    native.w = desc->w;
+    native.h = desc->h;
+    native.internal_w = desc->internal_w;
+    native.internal_h = desc->internal_h;
+
+    if (k3d_scene_create(&native, &scene, &obj) != 0)
+        return -1;
+    if (sacx_gfx_register_existing(G_current_task, obj, &app_obj_handle) != 0)
+    {
+        (void)k3d_scene_destroy(scene);
+        return -1;
+    }
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_3D_SCENES; ++i)
+    {
+        if (G_current_task->scenes3d[i].used)
+            continue;
+        G_current_task->scenes3d[i].used = 1u;
+        G_current_task->scenes3d[i].handle = scene;
+        G_current_task->scenes3d[i].root_obj_handle = app_obj_handle;
+        *out_scene_handle = i + 1u;
+        *out_obj_handle = app_obj_handle;
+        return 0;
+    }
+
+    G_current_task->gfx_objects[app_obj_handle - 1u].used = 0u;
+    G_current_task->gfx_objects[app_obj_handle - 1u].handle.idx = -1;
+    (void)k3d_scene_destroy(scene);
+    return -1;
+}
+
+static int sacx_api_k3d_scene_destroy(uint32_t scene_handle)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_3D_PLAYERS; ++i)
+    {
+        if (G_current_task->players3d[i].used && G_current_task->players3d[i].scene_handle == scene_handle)
+        {
+            (void)k3d_player_destroy(G_current_task->players3d[i].handle);
+            G_current_task->players3d[i].used = 0u;
+            G_current_task->players3d[i].handle.idx = -1;
+            G_current_task->players3d[i].scene_handle = 0u;
+            G_current_task->players3d[i].window_handle = 0u;
+        }
+    }
+    if (slot->root_obj_handle > 0u && slot->root_obj_handle <= SACX_MAX_TASK_GFX_OBJECTS)
+    {
+        G_current_task->gfx_objects[slot->root_obj_handle - 1u].used = 0u;
+        G_current_task->gfx_objects[slot->root_obj_handle - 1u].handle.idx = -1;
+    }
+    (void)k3d_scene_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    slot->root_obj_handle = 0u;
+    return 0;
+}
+
+static int sacx_api_k3d_scene_render(uint32_t scene_handle)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_render(slot->handle);
+}
+
+static int sacx_api_k3d_scene_resize(uint32_t scene_handle, uint32_t viewport_w, uint32_t viewport_h,
+                                     uint32_t internal_w, uint32_t internal_h)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_resize(slot->handle, viewport_w, viewport_h, internal_w, internal_h);
+}
+
+static int sacx_api_k3d_scene_root_obj(uint32_t scene_handle, uint32_t *out_obj_handle)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot || !out_obj_handle)
+        return -1;
+    *out_obj_handle = slot->root_obj_handle;
+    return 0;
+}
+
+static int sacx_api_k3d_scene_set_camera(uint32_t scene_handle, const sacx3d_camera *camera)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_camera native;
+    if (!slot || !camera)
+        return -1;
+    sacx_to_k3d_camera(camera, &native);
+    return k3d_scene_set_camera(slot->handle, &native);
+}
+
+static int sacx_api_k3d_scene_get_camera(uint32_t scene_handle, sacx3d_camera *out_camera)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_camera native;
+    if (!slot || !out_camera)
+        return -1;
+    if (k3d_scene_get_camera(slot->handle, &native) != 0)
+        return -1;
+    k3d_to_sacx_camera(&native, out_camera);
+    return 0;
+}
+
+static int sacx_api_k3d_scene_set_ambient(uint32_t scene_handle, sacx_color color, float intensity)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_set_ambient(slot->handle, sacx_to_kcolor(color), intensity);
+}
+
+static int sacx_api_k3d_scene_set_directional_light(uint32_t scene_handle, sacx3d_vec3 dir, sacx_color color, float intensity)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_set_directional_light(slot->handle, sacx_to_k3d_vec3(dir), sacx_to_kcolor(color), intensity);
+}
+
+static int sacx_api_k3d_scene_clear_point_lights(uint32_t scene_handle)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_clear_point_lights(slot->handle);
+}
+
+static int sacx_api_k3d_scene_add_point_light(uint32_t scene_handle, const sacx3d_point_light *light, uint32_t *out_light)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_point_light native;
+    if (!slot || !light || !out_light)
+        return -1;
+    sacx_to_k3d_point_light(light, &native);
+    return k3d_scene_add_point_light(slot->handle, &native, out_light);
+}
+
+static int sacx_api_k3d_scene_set_point_light(uint32_t scene_handle, uint32_t light_idx, const sacx3d_point_light *light)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_point_light native;
+    if (!slot || !light)
+        return -1;
+    sacx_to_k3d_point_light(light, &native);
+    return k3d_scene_set_point_light(slot->handle, light_idx, &native);
+}
+
+static int sacx_api_k3d_scene_set_fog(uint32_t scene_handle, const sacx3d_fog *fog)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_fog native;
+    if (!slot || !fog)
+        return -1;
+    sacx_to_k3d_fog(fog, &native);
+    return k3d_scene_set_fog(slot->handle, &native);
+}
+
+static int sacx_api_k3d_scene_new_cube(uint32_t scene_handle, float w, float h, float d,
+                                       float x, float y, float z, sacx_color color, uint32_t *out_instance)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || !out_instance)
+        return -1;
+    if (k3d_scene_new_cube(slot->handle, w, h, d, x, y, z, sacx_to_kcolor(color), &inst) != 0)
+        return -1;
+    *out_instance = (uint32_t)inst.idx + 1u;
+    return 0;
+}
+
+static int sacx_api_k3d_scene_load_obj(uint32_t scene_handle, const char *path,
+                                       float x, float y, float z, uint32_t *out_instance)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || !path || !out_instance)
+        return -1;
+    if (k3d_scene_load_obj(slot->handle, path, x, y, z, &inst) != 0)
+        return -1;
+    *out_instance = (uint32_t)inst.idx + 1u;
+    return 0;
+}
+
+static int sacx_api_k3d_instance_set_pos(uint32_t scene_handle, uint32_t instance_handle, float x, float y, float z)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || instance_handle == 0u)
+        return -1;
+    inst.idx = (int)(instance_handle - 1u);
+    return k3d_instance_set_pos(slot->handle, inst, x, y, z);
+}
+
+static int sacx_api_k3d_instance_set_rotation(uint32_t scene_handle, uint32_t instance_handle,
+                                              float pitch_deg, float yaw_deg, float roll_deg)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || instance_handle == 0u)
+        return -1;
+    inst.idx = (int)(instance_handle - 1u);
+    return k3d_instance_set_rotation(slot->handle, inst, pitch_deg, yaw_deg, roll_deg);
+}
+
+static int sacx_api_k3d_instance_set_scale(uint32_t scene_handle, uint32_t instance_handle, float sx, float sy, float sz)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || instance_handle == 0u)
+        return -1;
+    inst.idx = (int)(instance_handle - 1u);
+    return k3d_instance_set_scale(slot->handle, inst, sx, sy, sz);
+}
+
+static int sacx_api_k3d_instance_set_visible(uint32_t scene_handle, uint32_t instance_handle, uint32_t visible)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || instance_handle == 0u)
+        return -1;
+    inst.idx = (int)(instance_handle - 1u);
+    return k3d_instance_set_visible(slot->handle, inst, visible);
+}
+
+static int sacx_api_k3d_player_create(uint32_t scene_handle, uint32_t window_handle,
+                                      const sacx3d_player_desc *desc, uint32_t *out_player_handle)
+{
+    sacx_3d_scene_slot *scene = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_player_desc native;
+    k3d_player_handle player;
+    if (!G_current_task || !scene || !out_player_handle)
+        return -1;
+    if (window_handle && !sacx_window_from_handle(G_current_task, window_handle))
+        return -1;
+
+    memset(&native, 0, sizeof(native));
+    if (desc)
+        sacx_to_k3d_player_desc(desc, &native);
+    if (k3d_player_create(scene->handle, desc ? &native : 0, &player) != 0)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_3D_PLAYERS; ++i)
+    {
+        if (G_current_task->players3d[i].used)
+            continue;
+        G_current_task->players3d[i].used = 1u;
+        G_current_task->players3d[i].handle = player;
+        G_current_task->players3d[i].scene_handle = scene_handle;
+        G_current_task->players3d[i].window_handle = window_handle;
+        *out_player_handle = i + 1u;
+        return 0;
+    }
+
+    (void)k3d_player_destroy(player);
+    return -1;
+}
+
+static int sacx_api_k3d_player_destroy(uint32_t player_handle)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    if (!slot)
+        return -1;
+    (void)k3d_player_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    slot->scene_handle = 0u;
+    slot->window_handle = 0u;
+    return 0;
+}
+
+static int sacx_api_k3d_player_set_free_mode(uint32_t player_handle, uint32_t free_mode)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    if (!slot)
+        return -1;
+    return k3d_player_set_free_mode(slot->handle, free_mode);
+}
+
+static int sacx_api_k3d_player_set_camera(uint32_t player_handle, const sacx3d_camera *camera)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    k3d_camera native;
+    if (!slot || !camera)
+        return -1;
+    sacx_to_k3d_camera(camera, &native);
+    return k3d_player_set_camera(slot->handle, &native);
+}
+
+static int sacx_api_k3d_player_get_camera(uint32_t player_handle, sacx3d_camera *out_camera)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    k3d_camera native;
+    if (!slot || !out_camera)
+        return -1;
+    if (k3d_player_get_camera(slot->handle, &native) != 0)
+        return -1;
+    k3d_to_sacx_camera(&native, out_camera);
+    return 0;
+}
+
+static int sacx_api_k3d_player_clear_colliders(uint32_t player_handle)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    if (!slot)
+        return -1;
+    return k3d_player_clear_colliders(slot->handle);
+}
+
+static int sacx_api_k3d_player_add_collider(uint32_t player_handle, const sacx3d_box *box)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    k3d_box native;
+    if (!slot || !box)
+        return -1;
+    sacx_to_k3d_box(box, &native);
+    return k3d_player_add_collider(slot->handle, &native);
+}
+
+static int sacx_api_k3d_player_update(uint32_t player_handle, float dt, uint32_t render_scene)
+{
+    sacx_3d_player_slot *slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+    sacx_3d_scene_slot *scene = 0;
+    k3d_player_input input;
+
+    if (!slot)
+        return -1;
+    if (slot->window_handle)
+    {
+        sacx_window_slot *win = sacx_window_from_handle(G_current_task, slot->window_handle);
+        if (!win || !kwindow_focused(win->handle))
+            return 1;
+    }
+
+    memset(&input, 0, sizeof(input));
+    input.dt = dt;
+    input.mouse_dx = kmouse_dx();
+    input.mouse_dy = kmouse_dy();
+    input.mouse_buttons = kmouse_buttons();
+    input.key_w = kinput_key_down(SACX_KEY_W) ? 1u : 0u;
+    input.key_a = kinput_key_down(SACX_KEY_A) ? 1u : 0u;
+    input.key_s = kinput_key_down(SACX_KEY_S) ? 1u : 0u;
+    input.key_d = kinput_key_down(SACX_KEY_D) ? 1u : 0u;
+    input.key_up = kinput_key_down(SACX_KEY_UP) ? 1u : 0u;
+    input.key_down = kinput_key_down(SACX_KEY_DOWN) ? 1u : 0u;
+    input.key_left = kinput_key_down(SACX_KEY_LEFT) ? 1u : 0u;
+    input.key_right = kinput_key_down(SACX_KEY_RIGHT) ? 1u : 0u;
+    input.key_q = kinput_key_down(SACX_KEY_Q) ? 1u : 0u;
+    input.key_e = kinput_key_down(SACX_KEY_E) ? 1u : 0u;
+    if (k3d_player_update(slot->handle, &input) != 0)
+        return -1;
+
+    if (render_scene)
+    {
+        scene = sacx_3d_scene_from_handle(G_current_task, slot->scene_handle);
+        if (!scene)
+            return -1;
+        return k3d_scene_render(scene->handle);
+    }
+
+    return 0;
+}
+
+static int sacx_api_k3d_scene_apply_default_world(uint32_t scene_handle)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    if (!slot)
+        return -1;
+    return k3d_scene_apply_default_world(slot->handle);
+}
+
+static int sacx_api_k3d_scene_add_room(uint32_t scene_handle, uint32_t player_handle, const sacx3d_room_desc *desc)
+{
+    sacx_3d_scene_slot *scene = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    sacx_3d_player_slot *player_slot = 0;
+    k3d_player_handle player;
+    k3d_room_desc native_desc;
+    const k3d_room_desc *native_desc_ptr = 0;
+
+    if (!scene)
+        return -1;
+    player.idx = -1;
+    if (player_handle)
+    {
+        player_slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+        if (!player_slot)
+            return -1;
+        player = player_slot->handle;
+    }
+    if (desc)
+    {
+        sacx_to_k3d_room_desc(desc, &native_desc);
+        native_desc_ptr = &native_desc;
+    }
+    return k3d_scene_add_room(scene->handle, player, native_desc_ptr);
+}
+
+static int sacx_api_k3d_scene_add_obstacle_cube(uint32_t scene_handle, uint32_t player_handle,
+                                                float w, float h, float d,
+                                                float x, float y, float z,
+                                                sacx_color color, uint32_t *out_instance)
+{
+    sacx_3d_scene_slot *scene = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    sacx_3d_player_slot *player_slot = 0;
+    k3d_player_handle player;
+    k3d_instance_handle inst;
+    k3d_instance_handle *inst_ptr = out_instance ? &inst : 0;
+
+    if (!scene)
+        return -1;
+    player.idx = -1;
+    if (player_handle)
+    {
+        player_slot = sacx_3d_player_from_handle(G_current_task, player_handle);
+        if (!player_slot)
+            return -1;
+        player = player_slot->handle;
+    }
+    if (out_instance)
+        *out_instance = 0u;
+    if (k3d_scene_add_obstacle_cube(scene->handle, player, w, h, d, x, y, z, sacx_to_kcolor(color), inst_ptr) != 0)
+        return -1;
+    if (out_instance)
+        *out_instance = (uint32_t)inst.idx + 1u;
+    return 0;
+}
+
 static void sacx_task_init_api(sacx_task *task)
 {
     if (!task)
@@ -2802,6 +3456,37 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.dialog_open_file = sacx_api_dialog_open_file;
     task->api.dialog_active = sacx_api_dialog_active;
     task->api.window_focused = sacx_api_window_focused;
+
+    task->api.k3d_scene_create = sacx_api_k3d_scene_create;
+    task->api.k3d_scene_destroy = sacx_api_k3d_scene_destroy;
+    task->api.k3d_scene_render = sacx_api_k3d_scene_render;
+    task->api.k3d_scene_resize = sacx_api_k3d_scene_resize;
+    task->api.k3d_scene_root_obj = sacx_api_k3d_scene_root_obj;
+    task->api.k3d_scene_set_camera = sacx_api_k3d_scene_set_camera;
+    task->api.k3d_scene_get_camera = sacx_api_k3d_scene_get_camera;
+    task->api.k3d_scene_set_ambient = sacx_api_k3d_scene_set_ambient;
+    task->api.k3d_scene_set_directional_light = sacx_api_k3d_scene_set_directional_light;
+    task->api.k3d_scene_clear_point_lights = sacx_api_k3d_scene_clear_point_lights;
+    task->api.k3d_scene_add_point_light = sacx_api_k3d_scene_add_point_light;
+    task->api.k3d_scene_set_point_light = sacx_api_k3d_scene_set_point_light;
+    task->api.k3d_scene_set_fog = sacx_api_k3d_scene_set_fog;
+    task->api.k3d_scene_new_cube = sacx_api_k3d_scene_new_cube;
+    task->api.k3d_scene_load_obj = sacx_api_k3d_scene_load_obj;
+    task->api.k3d_instance_set_pos = sacx_api_k3d_instance_set_pos;
+    task->api.k3d_instance_set_rotation = sacx_api_k3d_instance_set_rotation;
+    task->api.k3d_instance_set_scale = sacx_api_k3d_instance_set_scale;
+    task->api.k3d_instance_set_visible = sacx_api_k3d_instance_set_visible;
+    task->api.k3d_player_create = sacx_api_k3d_player_create;
+    task->api.k3d_player_destroy = sacx_api_k3d_player_destroy;
+    task->api.k3d_player_set_free_mode = sacx_api_k3d_player_set_free_mode;
+    task->api.k3d_player_set_camera = sacx_api_k3d_player_set_camera;
+    task->api.k3d_player_get_camera = sacx_api_k3d_player_get_camera;
+    task->api.k3d_player_clear_colliders = sacx_api_k3d_player_clear_colliders;
+    task->api.k3d_player_add_collider = sacx_api_k3d_player_add_collider;
+    task->api.k3d_player_update = sacx_api_k3d_player_update;
+    task->api.k3d_scene_apply_default_world = sacx_api_k3d_scene_apply_default_world;
+    task->api.k3d_scene_add_room = sacx_api_k3d_scene_add_room;
+    task->api.k3d_scene_add_obstacle_cube = sacx_api_k3d_scene_add_obstacle_cube;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)

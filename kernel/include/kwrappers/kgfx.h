@@ -67,6 +67,7 @@ extern "C"
         uint32_t src_h;
         const uint32_t *argb;
         uint32_t stride_px;
+        uint32_t content_version;
         uint8_t sample_mode;
     } kgfx_image_data;
 
@@ -226,6 +227,13 @@ extern "C"
         kgfx_obj *o = kgfx_obj_ref(h);
         if (o && o->kind == KGFX_OBJ_IMAGE)
             o->u.image.sample_mode = (uint8_t)mode;
+    }
+
+    static inline void kgfx_image_touch(kgfx_obj_handle h)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o && o->kind == KGFX_OBJ_IMAGE)
+            ++o->u.image.content_version;
     }
 
     static inline void kgfx_obj_set_parent(kgfx_obj_handle child, kgfx_obj_handle parent)

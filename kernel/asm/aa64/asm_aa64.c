@@ -44,7 +44,7 @@ void asm_mmio_barrier(void)
     __asm__ __volatile__("isb" ::: "memory");
 }
 
-void asm_dma_clean_range(const void *ptr, uint64_t len)
+void asm_dma_clean_range_raw(const void *ptr, uint64_t len)
 {
     uintptr_t start;
     uintptr_t end;
@@ -58,6 +58,11 @@ void asm_dma_clean_range(const void *ptr, uint64_t len)
 
     for (uintptr_t p = start; p < end; p += ASM_DCACHE_LINE_SIZE)
         __asm__ __volatile__("dc cvac, %0" ::"r"(p) : "memory");
+}
+
+void asm_dma_clean_range(const void *ptr, uint64_t len)
+{
+    asm_dma_clean_range_raw(ptr, len);
 
     __asm__ __volatile__("dsb ish" ::: "memory");
     __asm__ __volatile__("isb" ::: "memory");

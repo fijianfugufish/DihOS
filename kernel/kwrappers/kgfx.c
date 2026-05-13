@@ -152,7 +152,7 @@ char *kgfx_pmem_strdup(const char *s)
 static inline void kgfx_flush_range_raw(uintptr_t start, uintptr_t end)
 {
     if (end > start)
-        asm_dma_clean_range((const void *)start, (uint64_t)(end - start));
+        asm_dma_clean_range_raw((const void *)start, (uint64_t)(end - start));
 }
 
 static inline void kgfx_flush_commit(void)
@@ -210,6 +210,14 @@ const kfb *kgfx_info(void) { return &FB; }
 #define KGFX_MAX_OBJS 512
 #endif
 
+#ifndef KGFX_DIRTY_TILE_SIZE
+#define KGFX_DIRTY_TILE_SIZE 64
+#endif
+
+#define KGFX_DIRTY_TILE_MAX_COLS 64u
+#define KGFX_DIRTY_TILE_MAX_ROWS 64u
+#define KGFX_DIRTY_TILE_MAX_COUNT (KGFX_DIRTY_TILE_MAX_COLS * KGFX_DIRTY_TILE_MAX_ROWS)
+
 /* object pool */
 static kgfx_obj g_objs[KGFX_MAX_OBJS];
 static uint16_t g_obj_count = 0;
@@ -220,6 +228,16 @@ typedef struct
     int32_t x0, y0, x1, y1;
     uint8_t enabled;
 } kgfx_clip_rect;
+
+typedef struct
+{
+    uint16_t cols;
+    uint16_t rows;
+    uint16_t count;
+    uint8_t valid;
+    uint8_t force_full;
+    uint8_t bits[KGFX_DIRTY_TILE_MAX_COUNT];
+} kgfx_dirty_tiles;
 
 typedef struct
 {
@@ -436,6 +454,7 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
     o->u.image.src_h = h;
     o->u.image.argb = argb;
     o->u.image.stride_px = stride_px;
+    o->u.image.content_version = 1u;
     o->u.image.sample_mode = KGFX_IMAGE_SAMPLE_NEAREST;
 
     handle.idx = (int)idx;
@@ -681,6 +700,128 @@ static kgfx_clip_rect fb_clip_rect(void)
     clip.x1 = (int32_t)FB.width;
     clip.y1 = (int32_t)FB.height;
     clip.enabled = 1;
+    return clip;
+}
+
+static void dirty_tiles_init(kgfx_dirty_tiles *tiles)
+{
+    uint32_t cols = 0;
+    uint32_t rows = 0;
+
+    if (!tiles)
+        return;
+
+    tiles->cols = 0;
+    tiles->rows = 0;
+    tiles->count = 0;
+    tiles->valid = 0;
+    tiles->force_full = 0;
+    for (uint32_t i = 0; i < KGFX_DIRTY_TILE_MAX_COUNT; ++i)
+        tiles->bits[i] = 0u;
+
+    if (!FB.width || !FB.height)
+        return;
+
+    cols = (FB.width + KGFX_DIRTY_TILE_SIZE - 1u) / KGFX_DIRTY_TILE_SIZE;
+    rows = (FB.height + KGFX_DIRTY_TILE_SIZE - 1u) / KGFX_DIRTY_TILE_SIZE;
+
+    if (cols > KGFX_DIRTY_TILE_MAX_COLS || rows > KGFX_DIRTY_TILE_MAX_ROWS)
+    {
+        return;
+    }
+
+    tiles->cols = (uint16_t)cols;
+    tiles->rows = (uint16_t)rows;
+    tiles->valid = 1u;
+}
+
+static void dirty_tiles_mark_rect(kgfx_dirty_tiles *tiles, const kgfx_clip_rect *rect)
+{
+    kgfx_clip_rect clipped;
+    uint32_t tx0 = 0;
+    uint32_t ty0 = 0;
+    uint32_t tx1 = 0;
+    uint32_t ty1 = 0;
+    uint32_t total = 0;
+
+    if (!tiles || !rect || !rect->enabled || tiles->force_full)
+        return;
+
+    if (!tiles->valid)
+    {
+        tiles->force_full = 1u;
+        return;
+    }
+
+    clipped = *rect;
+    if (!clip_intersect(&clipped, &(kgfx_clip_rect){0, 0, (int32_t)FB.width, (int32_t)FB.height, 1}))
+        return;
+
+    tx0 = (uint32_t)clipped.x0 / KGFX_DIRTY_TILE_SIZE;
+    ty0 = (uint32_t)clipped.y0 / KGFX_DIRTY_TILE_SIZE;
+    tx1 = (uint32_t)(clipped.x1 - 1) / KGFX_DIRTY_TILE_SIZE;
+    ty1 = (uint32_t)(clipped.y1 - 1) / KGFX_DIRTY_TILE_SIZE;
+
+    if (tx1 >= tiles->cols)
+        tx1 = (uint32_t)tiles->cols - 1u;
+    if (ty1 >= tiles->rows)
+        ty1 = (uint32_t)tiles->rows - 1u;
+
+    for (uint32_t ty = ty0; ty <= ty1; ++ty)
+    {
+        for (uint32_t tx = tx0; tx <= tx1; ++tx)
+        {
+            uint32_t idx = ty * (uint32_t)tiles->cols + tx;
+            if (idx >= KGFX_DIRTY_TILE_MAX_COUNT)
+            {
+                tiles->force_full = 1u;
+                return;
+            }
+            if (!tiles->bits[idx])
+            {
+                tiles->bits[idx] = 1u;
+                ++tiles->count;
+            }
+        }
+    }
+
+    total = (uint32_t)tiles->cols * (uint32_t)tiles->rows;
+    if (total && (uint32_t)tiles->count * 4u >= total * 3u)
+        tiles->force_full = 1u;
+}
+
+static int dirty_tiles_any(const kgfx_dirty_tiles *tiles)
+{
+    return tiles && (tiles->force_full || tiles->count != 0u);
+}
+
+static int dirty_tiles_bit(const kgfx_dirty_tiles *tiles, uint32_t tx, uint32_t ty)
+{
+    uint32_t idx = 0;
+
+    if (!tiles || !tiles->valid || tx >= tiles->cols || ty >= tiles->rows)
+        return 0;
+
+    idx = ty * (uint32_t)tiles->cols + tx;
+    return idx < KGFX_DIRTY_TILE_MAX_COUNT && tiles->bits[idx] != 0u;
+}
+
+static kgfx_clip_rect dirty_tile_run_clip(const kgfx_dirty_tiles *tiles, uint32_t ty, uint32_t tx0, uint32_t tx1_exclusive)
+{
+    kgfx_clip_rect clip = {0, 0, 0, 0, 0};
+
+    if (!tiles || !tiles->valid || tx0 >= tx1_exclusive)
+        return clip;
+
+    clip.x0 = (int32_t)(tx0 * KGFX_DIRTY_TILE_SIZE);
+    clip.y0 = (int32_t)(ty * KGFX_DIRTY_TILE_SIZE);
+    clip.x1 = (int32_t)(tx1_exclusive * KGFX_DIRTY_TILE_SIZE);
+    clip.y1 = (int32_t)((ty + 1u) * KGFX_DIRTY_TILE_SIZE);
+    if (clip.x1 > (int32_t)FB.width)
+        clip.x1 = (int32_t)FB.width;
+    if (clip.y1 > (int32_t)FB.height)
+        clip.y1 = (int32_t)FB.height;
+    clip.enabled = clip.x0 < clip.x1 && clip.y0 < clip.y1;
     return clip;
 }
 
@@ -1119,6 +1260,7 @@ static uint64_t obj_visual_hash(const kgfx_obj *o, const kgfx_resolved_obj *r)
         hash_mix_u32(&h, o->u.image.src_h);
         hash_mix_u64(&h, (uint64_t)(uintptr_t)o->u.image.argb);
         hash_mix_u32(&h, o->u.image.stride_px);
+        hash_mix_u32(&h, o->u.image.content_version);
         hash_mix_u8(&h, o->u.image.sample_mode);
         break;
     default:
@@ -1149,7 +1291,7 @@ static int snapshot_build(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_ob
     return 1;
 }
 
-static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgfx_obj_snapshot *curr, kgfx_clip_rect *dirty)
+static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgfx_obj_snapshot *curr, kgfx_dirty_tiles *dirty)
 {
     if (!dirty)
         return 0;
@@ -1160,23 +1302,23 @@ static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgf
     if (!prev || !prev->in_use)
     {
         if (curr->renderable)
-            clip_union(dirty, &curr->bounds);
+            dirty_tiles_mark_rect(dirty, &curr->bounds);
         return 1;
     }
 
     if (!curr || !curr->in_use)
     {
         if (prev->renderable)
-            clip_union(dirty, &prev->bounds);
+            dirty_tiles_mark_rect(dirty, &prev->bounds);
         return 1;
     }
 
     if (prev->renderable != curr->renderable)
     {
         if (prev->renderable)
-            clip_union(dirty, &prev->bounds);
+            dirty_tiles_mark_rect(dirty, &prev->bounds);
         if (curr->renderable)
-            clip_union(dirty, &curr->bounds);
+            dirty_tiles_mark_rect(dirty, &curr->bounds);
         return 1;
     }
 
@@ -1185,8 +1327,8 @@ static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgf
 
     if (prev->visual_hash != curr->visual_hash || !clip_equal(&prev->bounds, &curr->bounds))
     {
-        clip_union(dirty, &prev->bounds);
-        clip_union(dirty, &curr->bounds);
+        dirty_tiles_mark_rect(dirty, &prev->bounds);
+        dirty_tiles_mark_rect(dirty, &curr->bounds);
         return 1;
     }
 
@@ -1218,10 +1360,10 @@ static void present_full(void)
     kgfx_flush();
 }
 
-static void present_region(const kgfx_clip_rect *clip)
+static uint8_t present_region_raw(const kgfx_clip_rect *clip)
 {
     if (!clip || !clip->enabled)
-        return;
+        return 0u;
 
     uint32_t copy_bytes = (uint32_t)(clip->x1 - clip->x0) * 4u;
     uint8_t flushed = 0;
@@ -1237,6 +1379,12 @@ static void present_region(const kgfx_clip_rect *clip)
         flushed = 1;
     }
 
+    return flushed;
+}
+
+static void present_region(const kgfx_clip_rect *clip)
+{
+    uint8_t flushed = present_region_raw(clip);
     if (flushed)
         kgfx_flush_commit();
 }
@@ -2217,6 +2365,190 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
     return 0;
 }
 
+static void kgfx_draw_entry_obj(const kgfx_obj *o, const kgfx_resolved_obj *r, const kgfx_obj_snapshot *snap)
+{
+    if (!o || !r || !snap)
+        return;
+
+    switch (o->kind)
+    {
+    case KGFX_OBJ_RECT:
+        if (obj_rotation_active(o))
+        {
+            int32_t px = 0, py = 0;
+            obj_rotation_pivot(o, &px, &py);
+            bb_rotated_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
+                                 px, py, o->rotation_deg,
+                                 o->fill, o->alpha,
+                                 o->outline_width, o->outline, o->outline_alpha,
+                                 &snap->bounds);
+        }
+        else
+        {
+            bb_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h, o->fill, o->alpha);
+            if (o->outline_width)
+                bb_rect_outline_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
+                                     o->outline_width, o->outline, o->outline_alpha);
+        }
+        break;
+    case KGFX_OBJ_CIRCLE:
+        bb_circle_fill_clip(r->origin_x, r->origin_y, o->u.circle.r, o->fill, o->alpha);
+        if (o->outline_width)
+            bb_circle_outline_outside_clip(r->origin_x, r->origin_y,
+                                           o->u.circle.r, o->outline_width,
+                                           o->outline, o->outline_alpha);
+        break;
+    case KGFX_OBJ_TEXT: {
+        const kgfx_text_data *t = &o->u.text;
+        if (obj_rotation_active(o))
+        {
+            bb_rotated_text_clip(o, r);
+        }
+        else if (t->font && t->text && t->scale)
+        {
+            ktext_draw_str_align_outline(
+                t->font,
+                r->origin_x, r->origin_y,
+                t->text,
+                o->fill, o->alpha,
+                t->scale,
+                t->char_spacing, t->line_spacing,
+                t->align,
+                o->outline_width, o->outline, o->outline_alpha);
+        }
+        break;
+    }
+    case KGFX_OBJ_IMAGE: {
+        const kgfx_image_data *im = &o->u.image;
+
+        if (obj_rotation_active(o))
+        {
+            int32_t px = 0, py = 0;
+            obj_rotation_pivot(o, &px, &py);
+            bb_rotated_image_clip(r->origin_x, r->origin_y,
+                                  im->w, im->h,
+                                  im->argb,
+                                  im->src_w, im->src_h,
+                                  im->stride_px,
+                                  o->alpha,
+                                  im->sample_mode,
+                                  px, py, o->rotation_deg,
+                                  o->outline_width, o->outline, o->outline_alpha,
+                                  &snap->bounds);
+        }
+        else
+        {
+            if (im->src_w == im->w && im->src_h == im->h)
+            {
+                bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
+                                    im->argb, im->stride_px,
+                                    o->alpha);
+            }
+            else
+            {
+                bb_blit_argb32_scaled_clip(r->origin_x, r->origin_y,
+                                           im->w, im->h,
+                                           im->argb,
+                                           im->src_w, im->src_h,
+                                           im->stride_px,
+                                           o->alpha,
+                                           im->sample_mode);
+            }
+
+            if (o->outline_width)
+                bb_rect_outline_clip(r->origin_x, r->origin_y, (int32_t)im->w, (int32_t)im->h,
+                                     o->outline_width, o->outline, o->outline_alpha);
+        }
+
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void render_entries_in_region(const kgfx_render_entry *entries,
+                                     uint16_t n,
+                                     const kgfx_resolved_obj *resolved,
+                                     const kgfx_obj_snapshot *current,
+                                     const kgfx_clip_rect *region,
+                                     kcolor clear_color)
+{
+    kgfx_clip_rect saved_clip = g_bb_clip;
+
+    if (!entries || !resolved || !current || !region || !region->enabled)
+        return;
+
+    g_bb_clip = *region;
+    bb_clear_region(region, clear_color);
+
+    for (uint16_t i = 0; i < n; ++i)
+    {
+        uint16_t idx = entries[i].idx;
+        kgfx_clip_rect prev_clip = g_bb_clip;
+        const kgfx_obj *o = &g_objs[idx];
+        const kgfx_resolved_obj *r = &resolved[idx];
+
+        if (!clip_intersects(&current[idx].bounds, region))
+            continue;
+
+        g_bb_clip = r->clip;
+        if (prev_clip.enabled && !clip_intersect(&g_bb_clip, &prev_clip))
+        {
+            g_bb_clip = prev_clip;
+            continue;
+        }
+
+        kgfx_draw_entry_obj(o, r, &current[idx]);
+        g_bb_clip = prev_clip;
+    }
+
+    g_bb_clip = saved_clip;
+}
+
+static void render_dirty_tile_runs(const kgfx_dirty_tiles *tiles,
+                                   const kgfx_render_entry *entries,
+                                   uint16_t n,
+                                   const kgfx_resolved_obj *resolved,
+                                   const kgfx_obj_snapshot *current,
+                                   kcolor clear_color)
+{
+    uint8_t flushed = 0u;
+
+    if (!tiles || !tiles->valid)
+        return;
+
+    for (uint32_t ty = 0; ty < tiles->rows; ++ty)
+    {
+        uint32_t tx = 0;
+        while (tx < tiles->cols)
+        {
+            uint32_t run_start = 0;
+            kgfx_clip_rect region;
+
+            while (tx < tiles->cols && !dirty_tiles_bit(tiles, tx, ty))
+                ++tx;
+            if (tx >= tiles->cols)
+                break;
+
+            run_start = tx;
+            while (tx < tiles->cols && dirty_tiles_bit(tiles, tx, ty))
+                ++tx;
+
+            region = dirty_tile_run_clip(tiles, ty, run_start, tx);
+            if (!region.enabled)
+                continue;
+
+            render_entries_in_region(entries, n, resolved, current, &region, clear_color);
+            if (present_region_raw(&region))
+                flushed = 1u;
+        }
+    }
+
+    if (flushed)
+        kgfx_flush_commit();
+}
+
 /* ---------- scene init & render ---------- */
 
 int kgfx_scene_init(void)
@@ -2262,12 +2594,14 @@ void kgfx_render_all(kcolor clear_color)
     kgfx_resolved_obj resolved[KGFX_MAX_OBJS] = {0};
     kgfx_render_entry entries[KGFX_MAX_OBJS];
     kgfx_obj_snapshot current[KGFX_MAX_OBJS] = {0};
-    kgfx_clip_rect dirty = {0, 0, 0, 0, 0};
+    kgfx_dirty_tiles dirty_tiles;
     kgfx_clip_rect full = fb_clip_rect();
     uint8_t full_redraw = 0;
 
     if (!BB_ptr)
         return;
+
+    dirty_tiles_init(&dirty_tiles);
 
     // 1) collect visible objects and build visual snapshots
     uint16_t n = 0;
@@ -2297,7 +2631,6 @@ void kgfx_render_all(kcolor clear_color)
     // 3) decide which pixels need to be refreshed
     if (!g_have_prev_frame || !color_equal(g_prev_clear_color, clear_color))
     {
-        dirty = full;
         full_redraw = 1;
     }
     else
@@ -2307,156 +2640,29 @@ void kgfx_render_all(kcolor clear_color)
         {
             kgfx_obj_snapshot *prev = (i < g_prev_snapshot_count) ? &g_prev_snapshot[i] : 0;
             kgfx_obj_snapshot *curr = (i < g_obj_count) ? &current[i] : 0;
-            dirty_compare_and_accumulate(prev, curr, &dirty);
+            dirty_compare_and_accumulate(prev, curr, &dirty_tiles);
         }
+
+        if (dirty_tiles.force_full)
+            full_redraw = 1;
     }
 
-    if (!dirty.enabled)
+    if (!full_redraw && !dirty_tiles_any(&dirty_tiles))
     {
         store_prev_snapshots(current, g_obj_count, clear_color);
         return;
     }
 
-    if (clip_equal(&dirty, &full))
-        full_redraw = 1;
-
-    // 4) refresh the dirty part of the backbuffer
+    // 4) refresh dirty backbuffer regions and present them
     if (full_redraw)
     {
-        g_bb_clip = (kgfx_clip_rect){0, 0, 0, 0, 0};
-        bb_clear(clear_color);
-    }
-    else
-    {
-        g_bb_clip = dirty;
-        bb_clear_region(&dirty, clear_color);
-    }
-
-    // 5) draw by kind, clipped to the dirty region when partial
-    for (uint16_t i = 0; i < n; ++i)
-    {
-        kgfx_clip_rect prev_clip = g_bb_clip;
-        const kgfx_obj *o = &g_objs[entries[i].idx];
-        const kgfx_resolved_obj *r = &resolved[entries[i].idx];
-
-        if (!full_redraw && !clip_intersects(&current[entries[i].idx].bounds, &dirty))
-            continue;
-
-        g_bb_clip = r->clip;
-        if (prev_clip.enabled && !clip_intersect(&g_bb_clip, &prev_clip))
-        {
-            g_bb_clip = prev_clip;
-            continue;
-        }
-
-        switch (o->kind)
-        {
-        case KGFX_OBJ_RECT:
-            if (obj_rotation_active(o))
-            {
-                int32_t px = 0, py = 0;
-                obj_rotation_pivot(o, &px, &py);
-                bb_rotated_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
-                                     px, py, o->rotation_deg,
-                                     o->fill, o->alpha,
-                                     o->outline_width, o->outline, o->outline_alpha,
-                                     &current[entries[i].idx].bounds);
-            }
-            else
-            {
-                bb_rect_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h, o->fill, o->alpha);
-                if (o->outline_width)
-                    bb_rect_outline_clip(r->origin_x, r->origin_y, o->u.rect.w, o->u.rect.h,
-                                         o->outline_width, o->outline, o->outline_alpha);
-            }
-            break;
-        case KGFX_OBJ_CIRCLE:
-            // fill first
-            bb_circle_fill_clip(r->origin_x, r->origin_y, o->u.circle.r, o->fill, o->alpha);
-            // outside outline second
-            if (o->outline_width)
-                bb_circle_outline_outside_clip(r->origin_x, r->origin_y,
-                                               o->u.circle.r, o->outline_width,
-                                               o->outline, o->outline_alpha);
-            break;
-        case KGFX_OBJ_TEXT: {
-            const kgfx_text_data *t = &o->u.text;
-            if (obj_rotation_active(o))
-            {
-                bb_rotated_text_clip(o, r);
-            }
-            else if (t->font && t->text && t->scale)
-            {
-                // text uses fill/alpha as the glyph color, and outline_* for border
-                ktext_draw_str_align_outline(
-                    t->font,
-                    r->origin_x, r->origin_y,
-                    t->text,
-                    o->fill, o->alpha,
-                    t->scale,
-                    t->char_spacing, t->line_spacing,
-                    t->align,
-                    o->outline_width, o->outline, o->outline_alpha);
-            }
-            break;
-        }
-        case KGFX_OBJ_IMAGE: {
-            const kgfx_image_data *im = &o->u.image;
-
-            if (obj_rotation_active(o))
-            {
-                int32_t px = 0, py = 0;
-                obj_rotation_pivot(o, &px, &py);
-                bb_rotated_image_clip(r->origin_x, r->origin_y,
-                                      im->w, im->h,
-                                      im->argb,
-                                      im->src_w, im->src_h,
-                                      im->stride_px,
-                                      o->alpha,
-                                      im->sample_mode,
-                                      px, py, o->rotation_deg,
-                                      o->outline_width, o->outline, o->outline_alpha,
-                                      &current[entries[i].idx].bounds);
-            }
-            else
-            {
-                // draw image first
-                if (im->src_w == im->w && im->src_h == im->h)
-                {
-                    bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
-                                        im->argb, im->stride_px,
-                                        o->alpha);
-                }
-                else
-                {
-                    bb_blit_argb32_scaled_clip(r->origin_x, r->origin_y,
-                                               im->w, im->h,
-                                               im->argb,
-                                               im->src_w, im->src_h,
-                                               im->stride_px,
-                                               o->alpha,
-                                               im->sample_mode);
-                }
-
-                // optional border/outline on top (same behaviour as others)
-                if (o->outline_width)
-                    bb_rect_outline_clip(r->origin_x, r->origin_y, (int32_t)im->w, (int32_t)im->h,
-                                         o->outline_width, o->outline, o->outline_alpha);
-            }
-
-            break;
-        }
-        default:
-            break;
-        }
-        g_bb_clip = prev_clip;
-    }
-
-    // 5) present backbuffer → framebuffer
-    if (full_redraw)
+        render_entries_in_region(entries, n, resolved, current, &full, clear_color);
         present_full();
+    }
     else
-        present_region(&dirty);
+    {
+        render_dirty_tile_runs(&dirty_tiles, entries, n, resolved, current, clear_color);
+    }
 
     store_prev_snapshots(current, g_obj_count, clear_color);
 }
