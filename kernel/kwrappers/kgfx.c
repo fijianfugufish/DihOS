@@ -214,9 +214,42 @@ const kfb *kgfx_info(void) { return &FB; }
 #define KGFX_DIRTY_TILE_SIZE 64
 #endif
 
+#ifndef KGFX_IMAGE_CACHE_MAX_BYTES
+#define KGFX_IMAGE_CACHE_MAX_BYTES (64ull * 1024ull * 1024ull)
+#endif
+
+#ifndef KGFX_OCCLUSION_MAX_RECTS
+#define KGFX_OCCLUSION_MAX_RECTS 48u
+#endif
+
+#ifndef KGFX_ENABLE_PERF_COUNTERS
+#define KGFX_ENABLE_PERF_COUNTERS 0
+#endif
+
 #define KGFX_DIRTY_TILE_MAX_COLS 64u
 #define KGFX_DIRTY_TILE_MAX_ROWS 64u
 #define KGFX_DIRTY_TILE_MAX_COUNT (KGFX_DIRTY_TILE_MAX_COLS * KGFX_DIRTY_TILE_MAX_ROWS)
+
+typedef struct
+{
+    uint64_t objects_visited;
+    uint64_t objects_drawn;
+    uint64_t objects_occluded;
+    uint64_t dirty_tiles;
+    uint64_t full_redraws;
+    uint64_t scaled_cache_hits;
+    uint64_t scaled_cache_misses;
+    uint64_t scaled_cache_pixels;
+    uint64_t present_bytes;
+    uint64_t flush_bytes;
+} kgfx_perf_counters;
+
+#if KGFX_ENABLE_PERF_COUNTERS
+static volatile kgfx_perf_counters g_perf;
+#define KGFX_PERF_INC(field, value) (g_perf.field += (uint64_t)(value))
+#else
+#define KGFX_PERF_INC(field, value) ((void)0)
+#endif
 
 /* object pool */
 static kgfx_obj g_objs[KGFX_MAX_OBJS];
@@ -275,6 +308,89 @@ static kgfx_obj_snapshot g_prev_snapshot[KGFX_MAX_OBJS];
 static uint16_t g_prev_snapshot_count = 0;
 static kcolor g_prev_clear_color = {0, 0, 0};
 static uint8_t g_have_prev_frame = 0;
+
+typedef struct
+{
+    uint8_t valid;
+    uint8_t opaque;
+    uint8_t alloc_failed;
+    const uint32_t *argb;
+    uint32_t src_w;
+    uint32_t src_h;
+    uint32_t stride_px;
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t content_version;
+    uint8_t sample_mode;
+    uint8_t alpha;
+    uint32_t *pixels;
+    uint64_t pages;
+} kgfx_image_cache;
+
+static kgfx_image_cache g_image_cache[KGFX_MAX_OBJS];
+
+static int kgfx_image_cache_key_matches(const kgfx_image_cache *cache,
+                                        const uint32_t *argb,
+                                        uint32_t src_w, uint32_t src_h,
+                                        uint32_t stride_px,
+                                        uint32_t dst_w, uint32_t dst_h,
+                                        uint32_t content_version,
+                                        uint8_t sample_mode,
+                                        uint8_t alpha)
+{
+    return cache &&
+           cache->argb == argb &&
+           cache->src_w == src_w &&
+           cache->src_h == src_h &&
+           cache->stride_px == stride_px &&
+           cache->dst_w == dst_w &&
+           cache->dst_h == dst_h &&
+           cache->content_version == content_version &&
+           cache->sample_mode == sample_mode &&
+           cache->alpha == alpha;
+}
+
+static void kgfx_image_cache_store_key(kgfx_image_cache *cache,
+                                       const uint32_t *argb,
+                                       uint32_t src_w, uint32_t src_h,
+                                       uint32_t stride_px,
+                                       uint32_t dst_w, uint32_t dst_h,
+                                       uint32_t content_version,
+                                       uint8_t sample_mode,
+                                       uint8_t alpha)
+{
+    if (!cache)
+        return;
+    cache->argb = argb;
+    cache->src_w = src_w;
+    cache->src_h = src_h;
+    cache->stride_px = stride_px;
+    cache->dst_w = dst_w;
+    cache->dst_h = dst_h;
+    cache->content_version = content_version;
+    cache->sample_mode = sample_mode;
+    cache->alpha = alpha;
+}
+
+static void kgfx_image_cache_invalidate(uint16_t idx)
+{
+    kgfx_image_cache *cache = 0;
+
+    if (idx >= KGFX_MAX_OBJS)
+        return;
+
+    cache = &g_image_cache[idx];
+    if (cache->pixels && cache->pages)
+        pmem_free_pages(cache->pixels, cache->pages);
+
+    g_image_cache[idx] = (kgfx_image_cache){0};
+}
+
+static void kgfx_image_cache_invalidate_all(void)
+{
+    for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
+        kgfx_image_cache_invalidate(i);
+}
 
 static int kgfx_alloc_slot(uint16_t *out_idx)
 {
@@ -1357,6 +1473,8 @@ static void present_full(void)
         const void *src_row = (const void *)(BB_ptr + y * BB_stride);
         kmemcpy64(dst_row, src_row, row_bytes);
     }
+    KGFX_PERF_INC(present_bytes, (uint64_t)row_bytes * FB.height);
+    KGFX_PERF_INC(flush_bytes, (uint64_t)FB.pitch * FB.height);
     kgfx_flush();
 }
 
@@ -1376,6 +1494,8 @@ static uint8_t present_region_raw(const kgfx_clip_rect *clip)
 
         kmemcpy64(dst, src, copy_bytes);
         kgfx_flush_range_raw(start, start + (uintptr_t)copy_bytes);
+        KGFX_PERF_INC(present_bytes, copy_bytes);
+        KGFX_PERF_INC(flush_bytes, copy_bytes);
         flushed = 1;
     }
 
@@ -1702,6 +1822,62 @@ static void bb_blit_argb32_clip(int32_t x, int32_t y,
     }
 }
 
+static void bb_blit_argb32_opaque_source_clip(int32_t x, int32_t y,
+                                              uint32_t w, uint32_t h,
+                                              const uint32_t *src_argb,
+                                              uint32_t src_stride_px)
+{
+    if (!BB_ptr || !src_argb || w == 0 || h == 0)
+        return;
+
+    if (src_stride_px < w)
+        return;
+
+    int32_t x0 = x;
+    int32_t y0 = y;
+    int32_t x1 = x + (int32_t)w;
+    int32_t y1 = y + (int32_t)h;
+
+    if (x1 <= 0 || y1 <= 0 || x0 >= (int32_t)FB.width || y0 >= (int32_t)FB.height)
+        return;
+    if (g_bb_clip.enabled &&
+        (x1 <= g_bb_clip.x0 || y1 <= g_bb_clip.y0 || x0 >= g_bb_clip.x1 || y0 >= g_bb_clip.y1))
+        return;
+
+    int32_t cx0 = (x0 < 0) ? 0 : x0;
+    int32_t cy0 = (y0 < 0) ? 0 : y0;
+    int32_t cx1 = (x1 > (int32_t)FB.width) ? (int32_t)FB.width : x1;
+    int32_t cy1 = (y1 > (int32_t)FB.height) ? (int32_t)FB.height : y1;
+
+    if (g_bb_clip.enabled)
+    {
+        if (cx0 < g_bb_clip.x0)
+            cx0 = g_bb_clip.x0;
+        if (cy0 < g_bb_clip.y0)
+            cy0 = g_bb_clip.y0;
+        if (cx1 > g_bb_clip.x1)
+            cx1 = g_bb_clip.x1;
+        if (cy1 > g_bb_clip.y1)
+            cy1 = g_bb_clip.y1;
+    }
+
+    if (cx1 <= cx0 || cy1 <= cy0)
+        return;
+
+    uint32_t copy_w = (uint32_t)(cx1 - cx0);
+    uint32_t copy_h = (uint32_t)(cy1 - cy0);
+    uint32_t sx0 = (uint32_t)(cx0 - x0);
+    uint32_t sy0 = (uint32_t)(cy0 - y0);
+    uint32_t copy_bytes = copy_w * 4u;
+
+    for (uint32_t iy = 0; iy < copy_h; ++iy)
+    {
+        const void *src = (const void *)(src_argb + (uint64_t)(sy0 + iy) * src_stride_px + sx0);
+        void *dst = (void *)(BB_ptr + (uint32_t)(cy0 + (int32_t)iy) * BB_stride + (uint32_t)cx0 * 4u);
+        kmemcpy64(dst, src, copy_bytes);
+    }
+}
+
 static inline uint8_t lerp_u8(uint8_t a, uint8_t b, uint32_t t256)
 {
     return (uint8_t)(((uint32_t)a * (256u - t256) + (uint32_t)b * t256 + 128u) >> 8);
@@ -1769,6 +1945,104 @@ static inline uint32_t sample_argb32_bilinear(const uint32_t *src_argb,
            ((uint32_t)lerp_u8(r0, r1, ty) << 16) |
            ((uint32_t)lerp_u8(g0, g1, ty) << 8) |
            (uint32_t)lerp_u8(b0, b1, ty);
+}
+
+static kgfx_image_cache *kgfx_image_cache_ensure_scaled(uint16_t obj_idx,
+                                                        const uint32_t *src_argb,
+                                                        uint32_t src_w, uint32_t src_h,
+                                                        uint32_t src_stride_px,
+                                                        uint32_t dst_w, uint32_t dst_h,
+                                                        uint32_t content_version,
+                                                        uint8_t sample_mode,
+                                                        uint8_t global_alpha)
+{
+    kgfx_image_cache *cache = 0;
+    uint64_t px_count = 0;
+    uint64_t bytes = 0;
+    uint64_t pages = 0;
+    uint32_t step_x = 0;
+    uint32_t step_y = 0;
+    uint8_t opaque = 1u;
+
+    if (obj_idx >= KGFX_MAX_OBJS || !src_argb || !src_w || !src_h || !dst_w || !dst_h)
+        return 0;
+    if (src_stride_px < src_w || global_alpha == 0u)
+        return 0;
+
+    cache = &g_image_cache[obj_idx];
+    if (cache->valid &&
+        kgfx_image_cache_key_matches(cache, src_argb, src_w, src_h, src_stride_px,
+                                     dst_w, dst_h, content_version, sample_mode, global_alpha))
+    {
+        KGFX_PERF_INC(scaled_cache_hits, 1);
+        return cache;
+    }
+    if (cache->alloc_failed &&
+        kgfx_image_cache_key_matches(cache, src_argb, src_w, src_h, src_stride_px,
+                                     dst_w, dst_h, content_version, sample_mode, global_alpha))
+    {
+        return 0;
+    }
+
+    kgfx_image_cache_invalidate(obj_idx);
+    cache = &g_image_cache[obj_idx];
+    kgfx_image_cache_store_key(cache, src_argb, src_w, src_h, src_stride_px,
+                               dst_w, dst_h, content_version, sample_mode, global_alpha);
+
+    px_count = (uint64_t)dst_w * (uint64_t)dst_h;
+    bytes = px_count * 4ull;
+    if (px_count == 0ull || bytes / 4ull != px_count || bytes > KGFX_IMAGE_CACHE_MAX_BYTES)
+    {
+        cache->alloc_failed = 1u;
+        KGFX_PERF_INC(scaled_cache_misses, 1);
+        return 0;
+    }
+
+    pages = (bytes + 4095ull) >> 12;
+    cache->pixels = (uint32_t *)pmem_alloc_pages(pages);
+    if (!cache->pixels)
+    {
+        cache->pages = 0;
+        cache->alloc_failed = 1u;
+        KGFX_PERF_INC(scaled_cache_misses, 1);
+        return 0;
+    }
+
+    cache->pages = pages;
+    step_x = ((uint64_t)src_w << 16) / dst_w;
+    step_y = ((uint64_t)src_h << 16) / dst_h;
+
+    for (uint32_t iy = 0; iy < dst_h; ++iy)
+    {
+        uint32_t fy16 = iy * step_y;
+        uint32_t *drow = cache->pixels + (uint64_t)iy * dst_w;
+
+        for (uint32_t ix = 0; ix < dst_w; ++ix)
+        {
+            uint32_t fx16 = ix * step_x;
+            uint32_t sp = (sample_mode == KGFX_IMAGE_SAMPLE_BILINEAR)
+                              ? sample_argb32_bilinear(src_argb, src_w, src_h, src_stride_px, fx16, fy16)
+                              : sample_argb32_nearest(src_argb, src_w, src_h, src_stride_px, fx16, fy16);
+
+            if (global_alpha != 255u)
+            {
+                uint8_t sa = (uint8_t)(sp >> 24);
+                uint8_t a = (uint8_t)(((uint16_t)sa * (uint16_t)global_alpha + 127u) / 255u);
+                sp = (sp & 0x00FFFFFFu) | ((uint32_t)a << 24);
+            }
+
+            if ((uint8_t)(sp >> 24) != 255u)
+                opaque = 0u;
+            drow[ix] = sp;
+        }
+    }
+
+    cache->valid = 1u;
+    cache->opaque = opaque;
+    cache->alloc_failed = 0u;
+    KGFX_PERF_INC(scaled_cache_misses, 1);
+    KGFX_PERF_INC(scaled_cache_pixels, px_count);
+    return cache;
 }
 
 static void bb_blit_argb32_scaled_clip(int32_t x, int32_t y,
@@ -1845,6 +2119,41 @@ static void bb_blit_argb32_scaled_clip(int32_t x, int32_t y,
             bb_blit_argb32_pixel(drow + ix, sp, global_alpha);
         }
     }
+}
+
+static void bb_blit_argb32_scaled_cached_clip(uint16_t obj_idx,
+                                              int32_t x, int32_t y,
+                                              uint32_t dst_w, uint32_t dst_h,
+                                              const uint32_t *src_argb,
+                                              uint32_t src_w, uint32_t src_h,
+                                              uint32_t src_stride_px,
+                                              uint32_t content_version,
+                                              uint8_t global_alpha,
+                                              uint8_t sample_mode)
+{
+    kgfx_image_cache *cache = kgfx_image_cache_ensure_scaled(obj_idx,
+                                                             src_argb,
+                                                             src_w, src_h,
+                                                             src_stride_px,
+                                                             dst_w, dst_h,
+                                                             content_version,
+                                                             sample_mode,
+                                                             global_alpha);
+    if (!cache || !cache->valid || !cache->pixels)
+    {
+        bb_blit_argb32_scaled_clip(x, y, dst_w, dst_h,
+                                   src_argb, src_w, src_h,
+                                   src_stride_px, global_alpha, sample_mode);
+        return;
+    }
+
+    if (cache->opaque)
+    {
+        bb_blit_argb32_opaque_source_clip(x, y, dst_w, dst_h, cache->pixels, dst_w);
+        return;
+    }
+
+    bb_blit_argb32_clip(x, y, dst_w, dst_h, cache->pixels, dst_w, 255);
 }
 
 static inline void bb_blend_argb_at(int32_t x, int32_t y, uint32_t sp, uint8_t global_alpha)
@@ -2346,6 +2655,7 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
         return -1;
 
     uint16_t idx = (uint16_t)h.idx;
+    kgfx_image_cache_invalidate(idx);
     g_obj_used[idx] = 0u;
 
     for (uint16_t i = 0; i < g_obj_count; ++i)
@@ -2365,10 +2675,12 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
     return 0;
 }
 
-static void kgfx_draw_entry_obj(const kgfx_obj *o, const kgfx_resolved_obj *r, const kgfx_obj_snapshot *snap)
+static void kgfx_draw_entry_obj(uint16_t obj_idx, const kgfx_obj *o, const kgfx_resolved_obj *r, const kgfx_obj_snapshot *snap)
 {
     if (!o || !r || !snap)
         return;
+
+    KGFX_PERF_INC(objects_drawn, 1);
 
     switch (o->kind)
     {
@@ -2446,13 +2758,15 @@ static void kgfx_draw_entry_obj(const kgfx_obj *o, const kgfx_resolved_obj *r, c
             }
             else
             {
-                bb_blit_argb32_scaled_clip(r->origin_x, r->origin_y,
-                                           im->w, im->h,
-                                           im->argb,
-                                           im->src_w, im->src_h,
-                                           im->stride_px,
-                                           o->alpha,
-                                           im->sample_mode);
+                bb_blit_argb32_scaled_cached_clip(obj_idx,
+                                                  r->origin_x, r->origin_y,
+                                                  im->w, im->h,
+                                                  im->argb,
+                                                  im->src_w, im->src_h,
+                                                  im->stride_px,
+                                                  im->content_version,
+                                                  o->alpha,
+                                                  im->sample_mode);
             }
 
             if (o->outline_width)
@@ -2465,6 +2779,173 @@ static void kgfx_draw_entry_obj(const kgfx_obj *o, const kgfx_resolved_obj *r, c
     default:
         break;
     }
+}
+
+static int clip_valid(const kgfx_clip_rect *clip)
+{
+    return clip && clip->enabled && clip->x0 < clip->x1 && clip->y0 < clip->y1;
+}
+
+static int occlusion_emit_rect(kgfx_clip_rect *rects, uint16_t *count, const kgfx_clip_rect *rect)
+{
+    if (!clip_valid(rect))
+        return 1;
+    if (!rects || !count || *count >= KGFX_OCCLUSION_MAX_RECTS)
+        return 0;
+    rects[*count] = *rect;
+    ++(*count);
+    return 1;
+}
+
+static int occlusion_subtract_rect(const kgfx_clip_rect *src,
+                                   const kgfx_clip_rect *cover,
+                                   kgfx_clip_rect *out,
+                                   uint16_t *out_count)
+{
+    kgfx_clip_rect inter = {0, 0, 0, 0, 0};
+    kgfx_clip_rect piece = {0, 0, 0, 0, 1};
+
+    if (!clip_valid(src))
+        return 1;
+    if (!clip_valid(cover))
+        return occlusion_emit_rect(out, out_count, src);
+
+    inter = *src;
+    if (!clip_intersect(&inter, cover))
+        return occlusion_emit_rect(out, out_count, src);
+
+    piece.x0 = src->x0;
+    piece.y0 = src->y0;
+    piece.x1 = src->x1;
+    piece.y1 = inter.y0;
+    if (!occlusion_emit_rect(out, out_count, &piece))
+        return 0;
+
+    piece.x0 = src->x0;
+    piece.y0 = inter.y1;
+    piece.x1 = src->x1;
+    piece.y1 = src->y1;
+    if (!occlusion_emit_rect(out, out_count, &piece))
+        return 0;
+
+    piece.x0 = src->x0;
+    piece.y0 = inter.y0;
+    piece.x1 = inter.x0;
+    piece.y1 = inter.y1;
+    if (!occlusion_emit_rect(out, out_count, &piece))
+        return 0;
+
+    piece.x0 = inter.x1;
+    piece.y0 = inter.y0;
+    piece.x1 = src->x1;
+    piece.y1 = inter.y1;
+    return occlusion_emit_rect(out, out_count, &piece);
+}
+
+static int kgfx_image_cache_is_opaque_for_obj(uint16_t idx, const kgfx_obj *o)
+{
+    const kgfx_image_data *im = 0;
+    const kgfx_image_cache *cache = 0;
+
+    if (idx >= KGFX_MAX_OBJS || !o || o->kind != KGFX_OBJ_IMAGE)
+        return 0;
+
+    im = &o->u.image;
+    cache = &g_image_cache[idx];
+    return cache->valid && cache->opaque && cache->pixels &&
+           kgfx_image_cache_key_matches(cache,
+                                        im->argb,
+                                        im->src_w, im->src_h,
+                                        im->stride_px,
+                                        im->w, im->h,
+                                        im->content_version,
+                                        im->sample_mode,
+                                        o->alpha);
+}
+
+static int kgfx_opaque_occluder_bounds(uint16_t idx,
+                                       const kgfx_resolved_obj *resolved,
+                                       kgfx_clip_rect *out)
+{
+    const kgfx_obj *o = 0;
+    const kgfx_resolved_obj *r = 0;
+    kgfx_clip_rect screen = fb_clip_rect();
+
+    if (!resolved || !out || idx >= g_obj_count || !g_obj_used[idx])
+        return 0;
+
+    o = &g_objs[idx];
+    r = &resolved[idx];
+
+    if (!o->visible || obj_rotation_active(o))
+        return 0;
+
+    if (o->kind == KGFX_OBJ_RECT)
+    {
+        if (o->alpha != 255u || !o->u.rect.w || !o->u.rect.h)
+            return 0;
+    }
+    else if (o->kind == KGFX_OBJ_IMAGE)
+    {
+        if (!o->u.image.w || !o->u.image.h || !kgfx_image_cache_is_opaque_for_obj(idx, o))
+            return 0;
+    }
+    else
+    {
+        return 0;
+    }
+
+    if (!obj_world_bounds_clip(o, r->origin_x, r->origin_y, out))
+        return 0;
+    if (!clip_intersect(out, &r->clip))
+        return 0;
+    if (!clip_intersect(out, &screen))
+        return 0;
+    return clip_valid(out);
+}
+
+static int render_entry_region_fully_occluded(const kgfx_render_entry *entries,
+                                              uint16_t n,
+                                              uint16_t entry_pos,
+                                              const kgfx_resolved_obj *resolved,
+                                              const kgfx_obj_snapshot *current,
+                                              const kgfx_clip_rect *target)
+{
+    kgfx_clip_rect uncovered[KGFX_OCCLUSION_MAX_RECTS];
+    kgfx_clip_rect next[KGFX_OCCLUSION_MAX_RECTS];
+    uint16_t uncovered_count = 1u;
+
+    if (!entries || !resolved || !current || !clip_valid(target) || entry_pos >= n)
+        return 0;
+
+    uncovered[0] = *target;
+
+    for (uint16_t upper_pos = n; upper_pos > (uint16_t)(entry_pos + 1u); --upper_pos)
+    {
+        uint16_t upper_idx = entries[upper_pos - 1u].idx;
+        kgfx_clip_rect cover = {0, 0, 0, 0, 0};
+        uint16_t next_count = 0u;
+
+        if (upper_idx >= KGFX_MAX_OBJS || !current[upper_idx].renderable)
+            continue;
+        if (!kgfx_opaque_occluder_bounds(upper_idx, resolved, &cover))
+            continue;
+
+        for (uint16_t i = 0; i < uncovered_count; ++i)
+        {
+            if (!occlusion_subtract_rect(&uncovered[i], &cover, next, &next_count))
+                return 0;
+        }
+
+        uncovered_count = next_count;
+        if (uncovered_count == 0u)
+            return 1;
+
+        for (uint16_t i = 0; i < uncovered_count; ++i)
+            uncovered[i] = next[i];
+    }
+
+    return 0;
 }
 
 static void render_entries_in_region(const kgfx_render_entry *entries,
@@ -2486,11 +2967,18 @@ static void render_entries_in_region(const kgfx_render_entry *entries,
     {
         uint16_t idx = entries[i].idx;
         kgfx_clip_rect prev_clip = g_bb_clip;
+        kgfx_clip_rect draw_region = {0, 0, 0, 0, 0};
         const kgfx_obj *o = &g_objs[idx];
         const kgfx_resolved_obj *r = &resolved[idx];
 
-        if (!clip_intersects(&current[idx].bounds, region))
+        draw_region = current[idx].bounds;
+        if (!clip_intersect(&draw_region, region))
             continue;
+        if (render_entry_region_fully_occluded(entries, n, i, resolved, current, &draw_region))
+        {
+            KGFX_PERF_INC(objects_occluded, 1);
+            continue;
+        }
 
         g_bb_clip = r->clip;
         if (prev_clip.enabled && !clip_intersect(&g_bb_clip, &prev_clip))
@@ -2499,7 +2987,7 @@ static void render_entries_in_region(const kgfx_render_entry *entries,
             continue;
         }
 
-        kgfx_draw_entry_obj(o, r, &current[idx]);
+        kgfx_draw_entry_obj(idx, o, r, &current[idx]);
         g_bb_clip = prev_clip;
     }
 
@@ -2563,6 +3051,7 @@ int kgfx_scene_init(void)
     BB_ptr = (uint8_t *)p;
     BB_stride = FB.pitch;
     BB_bytes = pages * 4096ull;
+    kgfx_image_cache_invalidate_all();
     g_obj_count = 0;
     for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
     {
@@ -2610,6 +3099,7 @@ void kgfx_render_all(kcolor clear_color)
         if (!g_obj_used[i])
             continue;
 
+        KGFX_PERF_INC(objects_visited, 1);
         current[i].in_use = 1;
 
         if (!g_objs[i].visible)
@@ -2656,11 +3146,13 @@ void kgfx_render_all(kcolor clear_color)
     // 4) refresh dirty backbuffer regions and present them
     if (full_redraw)
     {
+        KGFX_PERF_INC(full_redraws, 1);
         render_entries_in_region(entries, n, resolved, current, &full, clear_color);
         present_full();
     }
     else
     {
+        KGFX_PERF_INC(dirty_tiles, dirty_tiles.count);
         render_dirty_tile_runs(&dirty_tiles, entries, n, resolved, current, clear_color);
     }
 
