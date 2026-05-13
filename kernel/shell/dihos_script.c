@@ -813,6 +813,8 @@ static void script_error(dihos_script_runner *runner, const char *message)
 static char *script_next_token(char **cursor)
 {
     char *start = 0;
+    char *read = 0;
+    char *write = 0;
 
     if (!cursor || !*cursor)
         return 0;
@@ -821,6 +823,44 @@ static char *script_next_token(char **cursor)
         ++(*cursor);
     if (!**cursor)
         return 0;
+
+    if (**cursor == '"')
+    {
+        ++(*cursor);
+        start = *cursor;
+        read = *cursor;
+        write = *cursor;
+
+        while (*read)
+        {
+            if (*read == '"')
+            {
+                *write = 0;
+                ++read;
+                while (script_is_space(*read))
+                    ++read;
+                *cursor = read;
+                return start;
+            }
+
+            if (*read == '\\' && read[1])
+            {
+                ++read;
+                if (*read == 'n')
+                {
+                    *write++ = '\n';
+                    ++read;
+                    continue;
+                }
+            }
+
+            *write++ = *read++;
+        }
+
+        *write = 0;
+        *cursor = read;
+        return start;
+    }
 
     start = *cursor;
     while (**cursor && !script_is_space(**cursor))

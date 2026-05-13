@@ -13,6 +13,7 @@
 #define KWINDOW_RESIZE_RIGHT 0x02u
 #define KWINDOW_RESIZE_TOP 0x04u
 #define KWINDOW_RESIZE_BOTTOM 0x08u
+#define KWINDOW_TITLE_CAP 128u
 
 typedef struct
 {
@@ -48,6 +49,7 @@ typedef struct
     int32_t restore_y;
     uint32_t restore_w;
     uint32_t restore_h;
+    char title[KWINDOW_TITLE_CAP];
     kwindow_style style;
 } kwindow_slot;
 
@@ -66,6 +68,24 @@ static inline int32_t kwindow_max_i32(int32_t a, int32_t b)
 static inline int32_t kwindow_min_i32(int32_t a, int32_t b)
 {
     return (a < b) ? a : b;
+}
+
+static void kwindow_copy_title(char *dst, uint32_t cap, const char *src)
+{
+    uint32_t i = 0u;
+
+    if (!dst || cap == 0u)
+        return;
+
+    if (!src)
+        src = "";
+
+    while (src[i] && i + 1u < cap)
+    {
+        dst[i] = src[i];
+        ++i;
+    }
+    dst[i] = 0;
 }
 
 static uint32_t kwindow_min_width_for_style(const kwindow_style *style)
@@ -675,7 +695,6 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
     kwindow_handle handle = {-1};
     kwindow_style resolved_style = kwindow_style_default();
     const char *resolved_title = title ? title : "Window";
-    const char *owned_title = 0;
 
     if (style)
         resolved_style = *style;
@@ -684,10 +703,6 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
         w = kwindow_min_width_for_style(&resolved_style);
     if (h < kwindow_min_height_for_style(&resolved_style))
         h = kwindow_min_height_for_style(&resolved_style);
-    owned_title = kgfx_pmem_strdup(resolved_title);
-    if (!owned_title)
-        owned_title = resolved_title;
-
     for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
     {
         kgfx_obj *root_obj = 0;
@@ -713,6 +728,7 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
         G_windows[i].fullscreen_text.idx = -1;
         G_windows[i].close_button.idx = -1;
         G_windows[i].fullscreen_button.idx = -1;
+        kwindow_copy_title(G_windows[i].title, sizeof(G_windows[i].title), resolved_title);
 
         G_windows[i].root = kgfx_obj_add_rect(x, y, w, h, z, resolved_style.body_fill, 1);
         if (G_windows[i].root.idx < 0)
@@ -750,7 +766,7 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
             title_y = (int32_t)((resolved_style.titlebar_height > title_h)
                                     ? (resolved_style.titlebar_height - title_h) / 2u
                                     : 0u);
-            G_windows[i].title_text = kgfx_obj_add_text(font, owned_title,
+            G_windows[i].title_text = kgfx_obj_add_text(font, G_windows[i].title,
                                                         10, title_y, 1,
                                                         resolved_style.title_color, 255,
                                                         resolved_style.title_scale,
@@ -1225,7 +1241,8 @@ void kwindow_set_title(kwindow_handle h, const char *title)
     if (!title_text || title_text->kind != KGFX_OBJ_TEXT)
         return;
 
-    title_text->u.text.text = title ? title : "";
+    kwindow_copy_title(G_windows[h.idx].title, sizeof(G_windows[h.idx].title), title);
+    title_text->u.text.text = G_windows[h.idx].title;
 }
 
 kgfx_obj_handle kwindow_root(kwindow_handle h)

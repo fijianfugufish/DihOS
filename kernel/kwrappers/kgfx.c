@@ -2131,7 +2131,17 @@ static void bb_blit_argb32_scaled_cached_clip(uint16_t obj_idx,
                                               uint8_t global_alpha,
                                               uint8_t sample_mode)
 {
-    kgfx_image_cache *cache = kgfx_image_cache_ensure_scaled(obj_idx,
+    kgfx_image_cache *cache = 0;
+
+    if (sample_mode != KGFX_IMAGE_SAMPLE_BILINEAR)
+    {
+        bb_blit_argb32_scaled_clip(x, y, dst_w, dst_h,
+                                   src_argb, src_w, src_h,
+                                   src_stride_px, global_alpha, sample_mode);
+        return;
+    }
+
+    cache = kgfx_image_cache_ensure_scaled(obj_idx,
                                                              src_argb,
                                                              src_w, src_h,
                                                              src_stride_px,

@@ -364,7 +364,7 @@ int Terminal::VisibleLineCapacity() const
     int capacity = 1;
 
     if (line_height_px > 0)
-        capacity = (content_height + line_height_px - 1) / line_height_px;
+        capacity = content_height / line_height_px;
 
     if (capacity < 1)
         capacity = 1;

@@ -144,10 +144,13 @@ k3d_scene_set_point_light
 k3d_scene_set_fog
 k3d_scene_new_cube
 k3d_scene_load_obj
+k3d_scene_add_image_surface
+k3d_scene_add_text_surface
 k3d_instance_set_pos
 k3d_instance_set_rotation
 k3d_instance_set_scale
 k3d_instance_set_visible
+k3d_instance_set_casts_shadow
 k3d_player_create
 k3d_player_destroy
 k3d_player_set_free_mode

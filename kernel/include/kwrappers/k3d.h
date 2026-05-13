@@ -3,10 +3,23 @@
 #include "kwrappers/kgfx.h"
 #include "kwrappers/kui_types.h"
 
+typedef struct kimg kimg;
+typedef struct kfont kfont;
+
 #ifdef __cplusplus
 extern "C"
 {
 #endif
+
+typedef enum
+{
+    K3D_SURFACE_FRONT = 0u,
+    K3D_SURFACE_BACK = 1u,
+    K3D_SURFACE_RIGHT = 2u,
+    K3D_SURFACE_LEFT = 3u,
+    K3D_SURFACE_TOP = 4u,
+    K3D_SURFACE_BOTTOM = 5u,
+} k3d_surface_face;
 
 typedef struct
 {
@@ -69,6 +82,14 @@ typedef struct
     float intensity;
     uint8_t enabled;
 } k3d_point_light;
+
+typedef struct
+{
+    uint8_t point_light_shadows_enabled;
+    uint8_t directional_ray_shadows_enabled;
+    uint8_t projected_shadows_enabled;
+    uint8_t tiled_lights_enabled;
+} k3d_render_settings;
 
 typedef struct
 {
@@ -141,6 +162,8 @@ int k3d_scene_set_directional_light(k3d_scene_handle scene, k3d_vec3 dir, kcolor
 int k3d_scene_clear_point_lights(k3d_scene_handle scene);
 int k3d_scene_add_point_light(k3d_scene_handle scene, const k3d_point_light *light, uint32_t *out_light);
 int k3d_scene_set_point_light(k3d_scene_handle scene, uint32_t light_idx, const k3d_point_light *light);
+int k3d_scene_set_render_settings(k3d_scene_handle scene, const k3d_render_settings *settings);
+int k3d_scene_get_render_settings(k3d_scene_handle scene, k3d_render_settings *out_settings);
 int k3d_scene_set_fog(k3d_scene_handle scene, const k3d_fog *fog);
 
 int k3d_scene_new_cube(k3d_scene_handle scene,
@@ -151,10 +174,22 @@ int k3d_scene_new_cube(k3d_scene_handle scene,
 int k3d_scene_load_obj(k3d_scene_handle scene, const char *path,
                        float x, float y, float z,
                        k3d_instance_handle *out_instance);
+int k3d_scene_add_surface_image(k3d_scene_handle scene, const kimg *image,
+                                uint32_t face, float x, float y, float z,
+                                float w, float h,
+                                k3d_instance_handle *out_instance);
+int k3d_scene_add_surface_text(k3d_scene_handle scene, const kfont *font, const char *text,
+                               uint32_t face, float x, float y, float z,
+                               float w, float h,
+                               kcolor text_color, uint8_t text_alpha,
+                               kcolor bg_color, uint8_t bg_alpha,
+                               uint32_t scale,
+                               k3d_instance_handle *out_instance);
 int k3d_instance_set_pos(k3d_scene_handle scene, k3d_instance_handle inst, float x, float y, float z);
 int k3d_instance_set_rotation(k3d_scene_handle scene, k3d_instance_handle inst, float pitch_deg, float yaw_deg, float roll_deg);
 int k3d_instance_set_scale(k3d_scene_handle scene, k3d_instance_handle inst, float sx, float sy, float sz);
 int k3d_instance_set_visible(k3d_scene_handle scene, k3d_instance_handle inst, uint32_t visible);
+int k3d_instance_set_casts_shadow(k3d_scene_handle scene, k3d_instance_handle inst, uint32_t casts_shadow);
 
 int k3d_player_create(k3d_scene_handle scene, const k3d_player_desc *desc, k3d_player_handle *out_player);
 int k3d_player_destroy(k3d_player_handle player);

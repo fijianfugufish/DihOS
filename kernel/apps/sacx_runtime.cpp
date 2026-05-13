@@ -443,10 +443,13 @@ static const char *G_known_imports[] = {
     "k3d_scene_set_fog",
     "k3d_scene_new_cube",
     "k3d_scene_load_obj",
+    "k3d_scene_add_image_surface",
+    "k3d_scene_add_text_surface",
     "k3d_instance_set_pos",
     "k3d_instance_set_rotation",
     "k3d_instance_set_scale",
     "k3d_instance_set_visible",
+    "k3d_instance_set_casts_shadow",
     "k3d_player_create",
     "k3d_player_destroy",
     "k3d_player_set_free_mode",
@@ -3061,6 +3064,42 @@ static int sacx_api_k3d_scene_load_obj(uint32_t scene_handle, const char *path,
     return 0;
 }
 
+static int sacx_api_k3d_scene_add_image_surface(uint32_t scene_handle, uint32_t image_handle, uint32_t face,
+                                                float x, float y, float z, float w, float h,
+                                                uint32_t *out_instance)
+{
+    sacx_3d_scene_slot *scene_slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    sacx_image_slot *image_slot = sacx_image_from_handle(G_current_task, image_handle);
+    k3d_instance_handle inst;
+
+    if (!scene_slot || !image_slot || !out_instance)
+        return -1;
+    if (k3d_scene_add_surface_image(scene_slot->handle, &image_slot->image, face, x, y, z, w, h, &inst) != 0)
+        return -1;
+    *out_instance = (uint32_t)inst.idx + 1u;
+    return 0;
+}
+
+static int sacx_api_k3d_scene_add_text_surface(uint32_t scene_handle, const char *text, uint32_t face,
+                                               float x, float y, float z, float w, float h,
+                                               sacx_color text_color, uint8_t text_alpha,
+                                               sacx_color bg_color, uint8_t bg_alpha,
+                                               uint32_t scale, uint32_t *out_instance)
+{
+    sacx_3d_scene_slot *scene_slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+
+    if (!scene_slot || !G_runtime_font || !text || !out_instance)
+        return -1;
+    if (k3d_scene_add_surface_text(scene_slot->handle, G_runtime_font, text, face, x, y, z, w, h,
+                                   sacx_to_kcolor(text_color), text_alpha,
+                                   sacx_to_kcolor(bg_color), bg_alpha,
+                                   scale ? scale : 1u, &inst) != 0)
+        return -1;
+    *out_instance = (uint32_t)inst.idx + 1u;
+    return 0;
+}
+
 static int sacx_api_k3d_instance_set_pos(uint32_t scene_handle, uint32_t instance_handle, float x, float y, float z)
 {
     sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
@@ -3100,6 +3139,16 @@ static int sacx_api_k3d_instance_set_visible(uint32_t scene_handle, uint32_t ins
         return -1;
     inst.idx = (int)(instance_handle - 1u);
     return k3d_instance_set_visible(slot->handle, inst, visible);
+}
+
+static int sacx_api_k3d_instance_set_casts_shadow(uint32_t scene_handle, uint32_t instance_handle, uint32_t casts_shadow)
+{
+    sacx_3d_scene_slot *slot = sacx_3d_scene_from_handle(G_current_task, scene_handle);
+    k3d_instance_handle inst;
+    if (!slot || instance_handle == 0u)
+        return -1;
+    inst.idx = (int)(instance_handle - 1u);
+    return k3d_instance_set_casts_shadow(slot->handle, inst, casts_shadow);
 }
 
 static int sacx_api_k3d_player_create(uint32_t scene_handle, uint32_t window_handle,
@@ -3472,10 +3521,13 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.k3d_scene_set_fog = sacx_api_k3d_scene_set_fog;
     task->api.k3d_scene_new_cube = sacx_api_k3d_scene_new_cube;
     task->api.k3d_scene_load_obj = sacx_api_k3d_scene_load_obj;
+    task->api.k3d_scene_add_image_surface = sacx_api_k3d_scene_add_image_surface;
+    task->api.k3d_scene_add_text_surface = sacx_api_k3d_scene_add_text_surface;
     task->api.k3d_instance_set_pos = sacx_api_k3d_instance_set_pos;
     task->api.k3d_instance_set_rotation = sacx_api_k3d_instance_set_rotation;
     task->api.k3d_instance_set_scale = sacx_api_k3d_instance_set_scale;
     task->api.k3d_instance_set_visible = sacx_api_k3d_instance_set_visible;
+    task->api.k3d_instance_set_casts_shadow = sacx_api_k3d_instance_set_casts_shadow;
     task->api.k3d_player_create = sacx_api_k3d_player_create;
     task->api.k3d_player_destroy = sacx_api_k3d_player_destroy;
     task->api.k3d_player_set_free_mode = sacx_api_k3d_player_set_free_mode;

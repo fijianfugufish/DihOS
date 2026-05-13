@@ -72,6 +72,11 @@ namespace sacx3d
             return valid() && api_->k3d_instance_set_visible ? api_->k3d_instance_set_visible(scene_, handle_, visible ? 1u : 0u) : -1;
         }
 
+        int set_casts_shadow(bool casts_shadow) const
+        {
+            return valid() && api_->k3d_instance_set_casts_shadow ? api_->k3d_instance_set_casts_shadow(scene_, handle_, casts_shadow ? 1u : 0u) : -1;
+        }
+
     private:
         const sacx_api *api_;
         uint32_t scene_;
@@ -228,6 +233,31 @@ namespace sacx3d
             uint32_t inst = 0;
             if (valid() && path && api_->k3d_scene_load_obj)
                 (void)api_->k3d_scene_load_obj(handle_, path, x, y, z, &inst);
+            return Instance(api_, handle_, inst);
+        }
+
+        Instance add_image_surface(uint32_t image_handle, uint32_t face,
+                                   float x, float y, float z, float w, float h) const
+        {
+            uint32_t inst = 0;
+            if (valid() && image_handle && api_->k3d_scene_add_image_surface)
+                (void)api_->k3d_scene_add_image_surface(handle_, image_handle, face, x, y, z, w, h, &inst);
+            return Instance(api_, handle_, inst);
+        }
+
+        Instance add_text_surface(const char *text, uint32_t face,
+                                  float x, float y, float z, float w, float h,
+                                  sacx_color text_color = rgb(245, 248, 255), uint8_t text_alpha = 255u,
+                                  sacx_color bg_color = rgb(0, 0, 0), uint8_t bg_alpha = 0u,
+                                  uint32_t scale = 2u) const
+        {
+            uint32_t inst = 0;
+            if (valid() && text && api_->k3d_scene_add_text_surface)
+            {
+                (void)api_->k3d_scene_add_text_surface(handle_, text, face, x, y, z, w, h,
+                                                       text_color, text_alpha, bg_color, bg_alpha,
+                                                       scale, &inst);
+            }
             return Instance(api_, handle_, inst);
         }
 

@@ -215,6 +215,16 @@ extern "C"
         sacx_color back_wall_color;
     } sacx3d_room_desc;
 
+    enum
+    {
+        SACX3D_SURFACE_FRONT = 0u,
+        SACX3D_SURFACE_BACK = 1u,
+        SACX3D_SURFACE_RIGHT = 2u,
+        SACX3D_SURFACE_LEFT = 3u,
+        SACX3D_SURFACE_TOP = 4u,
+        SACX3D_SURFACE_BOTTOM = 5u,
+    };
+
     static inline sacx_button_style sacx_button_style_default(void)
     {
         sacx_button_style s;
@@ -487,6 +497,15 @@ extern "C"
                                            float w, float h, float d,
                                            float x, float y, float z,
                                            sacx_color color, uint32_t *out_instance);
+        int (*k3d_scene_add_image_surface)(uint32_t scene_handle, uint32_t image_handle, uint32_t face,
+                                           float x, float y, float z, float w, float h,
+                                           uint32_t *out_instance);
+        int (*k3d_scene_add_text_surface)(uint32_t scene_handle, const char *text, uint32_t face,
+                                          float x, float y, float z, float w, float h,
+                                          sacx_color text_color, uint8_t text_alpha,
+                                          sacx_color bg_color, uint8_t bg_alpha,
+                                          uint32_t scale, uint32_t *out_instance);
+        int (*k3d_instance_set_casts_shadow)(uint32_t scene_handle, uint32_t instance_handle, uint32_t casts_shadow);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)
