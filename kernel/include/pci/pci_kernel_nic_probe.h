@@ -15,6 +15,17 @@ int pci_kernel_wifi_set_connect_override(const uint8_t *bssid, uint32_t bssid_va
 int pci_kernel_wifi_set_peer_authorize(uint32_t authorize);
 int pci_kernel_wifi_tx_l2_frame(const uint8_t *frame, uint32_t len);
 int pci_kernel_wifi_tx_l2_frame_mode(const uint8_t *frame, uint32_t len, uint32_t mode);
+
+#define PCI_KERNEL_WIFI_TX_MODE_MGMT 0u
+#define PCI_KERNEL_WIFI_TX_MODE_OFFCHAN 1u
+#define PCI_KERNEL_WIFI_TX_MODE_MGMT_ONLY 2u
+
+int pci_kernel_wifi_install_key(uint32_t key_idx,
+                                uint32_t key_flags,
+                                uint32_t cipher,
+                                const uint8_t *key,
+                                uint32_t key_len,
+                                uint64_t key_rsc_counter);
 int pci_kernel_wifi_get_local_mac(uint8_t out[6]);
 int pci_kernel_wifi_get_bssid(uint8_t out[6]);
 int pci_kernel_wifi_mgmt_tx_status(uint32_t *count, uint32_t *last_desc, uint32_t *last_status);
@@ -25,3 +36,7 @@ int32_t pci_kernel_wifi_roam_rssi(void);
 uint32_t pci_kernel_wifi_rx_queue_count(void);
 uint32_t pci_kernel_wifi_rx_queue_dropped(void);
 int pci_kernel_wifi_rx_frame_pop(uint8_t *out_frame, uint32_t out_cap, uint32_t *out_len, uint32_t *out_kind);
+
+#define PCI_KERNEL_WIFI_KEY_PAIRWISE 0u
+#define PCI_KERNEL_WIFI_KEY_GROUP 1u
+#define PCI_KERNEL_WIFI_CIPHER_CCMP 4u

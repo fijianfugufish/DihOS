@@ -50,7 +50,7 @@ public:
 
 private:
     static const int LINE_TEXT_CAP = 512;
-    static const int LINE_HISTORY_MAX = 1024;
+    static const int LINE_HISTORY_MAX = 262144;
     static const int MAX_VISIBLE_LINES = 160;
     static const int SCROLL_LINES_PER_WHEEL = 3;
 

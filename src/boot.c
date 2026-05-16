@@ -57,12 +57,16 @@ typedef EFI_STATUS (*EFI_OPEN_PROTOCOL)(EFI_HANDLE, const EFI_GUID *, void **, E
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void **);                                                // +0x40
 typedef EFI_STATUS (*EFI_LOAD_IMAGE)(int, EFI_HANDLE, void *, void *, UINTN, EFI_HANDLE *);                       // +0xC8
 typedef EFI_STATUS (*EFI_START_IMAGE)(EFI_HANDLE, UINTN *, wchar_t *);                                            // +0xD0
+typedef EFI_STATUS (*EFI_GET_VARIABLE)(const wchar_t *, const EFI_GUID *, uint32_t *, UINTN *, void *);           // RT +0x48
+typedef EFI_STATUS (*EFI_SET_VARIABLE)(const wchar_t *, const EFI_GUID *, uint32_t, UINTN, void *);               // RT +0x58
 
 static inline EFI_SET_WATCHDOG_TIMER BsWatchdog(void *BS) { return *(EFI_SET_WATCHDOG_TIMER *)((char *)BS + 0x100); }
 static inline EFI_OPEN_PROTOCOL BsOpenProtocol(void *BS) { return *(EFI_OPEN_PROTOCOL *)((char *)BS + 0x118); }
 static inline EFI_ALLOCATE_POOL BsAllocatePool(void *BS) { return *(EFI_ALLOCATE_POOL *)((char *)BS + 0x40); }
 static inline EFI_LOAD_IMAGE BsLoadImage(void *BS) { return *(EFI_LOAD_IMAGE *)((char *)BS + 0xC8); }
 static inline EFI_START_IMAGE BsStartImage(void *BS) { return *(EFI_START_IMAGE *)((char *)BS + 0xD0); }
+static inline EFI_GET_VARIABLE RtGetVariable(void *RT) { return *(EFI_GET_VARIABLE *)((char *)RT + 0x48); }
+static inline EFI_SET_VARIABLE RtSetVariable(void *RT) { return *(EFI_SET_VARIABLE *)((char *)RT + 0x58); }
 
 /* ---------- File protocols (trimmed) ---------- */
 typedef struct EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
@@ -88,6 +92,13 @@ typedef struct EFI_FILE_PROTOCOL
 static const EFI_GUID LOADED_IMAGE_GUID = {0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID SIMPLE_FS_GUID = {0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID EFI_FILE_INFO_GUID = {0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+static const EFI_GUID EFI_GLOBAL_VARIABLE_GUID = {0x8be4df61, 0x93ca, 0x11d2, {0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c}};
+static const EFI_GUID DEVICE_PATH_GUID = {0x09576e91, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+
+#define EFI_VARIABLE_NON_VOLATILE 0x00000001U
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002U
+#define EFI_VARIABLE_RUNTIME_ACCESS 0x00000004U
+#define LOAD_OPTION_ACTIVE 0x00000001U
 
 #if defined(__x86_64__) || defined(_M_X64)
 #define DIHOS_BOOT_BANNER L"[CHAIN] BOOTX64 -> \\OS\\x64\\STAGE2.EFI"
@@ -100,10 +111,41 @@ static const EFI_GUID EFI_FILE_INFO_GUID = {0x09576e92, 0x6d3f, 0x11d2, {0x8e, 0
 /* ---------- Loaded Image (trimmed view) ---------- */
 typedef struct
 {
-    uint32_t _padA[2]; // ignore signature/revision (we won't read)
-    uint64_t _padB[2];
-    EFI_HANDLE DeviceHandle; // at offset +0x18 on 64-bit
+    uint32_t Revision;
+    EFI_HANDLE ParentHandle;
+    void *SystemTable;
+    EFI_HANDLE DeviceHandle;
+    void *FilePath;
 } EFI_LOADED_IMAGE_PROTOCOL;
+
+typedef struct
+{
+    uint8_t Type;
+    uint8_t SubType;
+    uint8_t Length[2];
+} EFI_DEVICE_PATH_PROTOCOL;
+
+static uint16_t dp_len(const EFI_DEVICE_PATH_PROTOCOL *dp)
+{
+    return (uint16_t)(dp->Length[0] | ((uint16_t)dp->Length[1] << 8));
+}
+
+static int dp_is_end(const EFI_DEVICE_PATH_PROTOCOL *dp)
+{
+    return dp->Type == 0x7f && dp->SubType == 0xff;
+}
+
+static UINTN device_path_size_no_end(const EFI_DEVICE_PATH_PROTOCOL *dp)
+{
+    UINTN total = 0;
+    while (!dp_is_end(dp))
+    {
+        UINTN len = dp_len(dp);
+        total += len;
+        dp = (const EFI_DEVICE_PATH_PROTOCOL *)((const char *)dp + len);
+    }
+    return total;
+}
 
 static void println(EFI_SYSTEM_TABLE *st, const wchar_t *s)
 {
@@ -112,6 +154,221 @@ static void println(EFI_SYSTEM_TABLE *st, const wchar_t *s)
         st->ConOut->OutputString(st->ConOut, s);
         st->ConOut->OutputString(st->ConOut, L"\r\n");
     }
+}
+
+static UINTN wlen(const wchar_t *s)
+{
+    UINTN n = 0;
+    while (s[n])
+        n++;
+    return n;
+}
+
+static void wcopy(wchar_t *dst, const wchar_t *src)
+{
+    while ((*dst++ = *src++))
+    {
+    }
+}
+
+static void boot_var_name(wchar_t out[9], uint16_t n)
+{
+    static const wchar_t hex[] = L"0123456789ABCDEF";
+    out[0] = L'B';
+    out[1] = L'o';
+    out[2] = L'o';
+    out[3] = L't';
+    out[4] = hex[(n >> 12) & 0xF];
+    out[5] = hex[(n >> 8) & 0xF];
+    out[6] = hex[(n >> 4) & 0xF];
+    out[7] = hex[n & 0xF];
+    out[8] = 0;
+}
+
+static int boot_entry_is_dihos(void *buf, UINTN size)
+{
+    if (size < 8)
+        return 0;
+    wchar_t *desc = (wchar_t *)((char *)buf + 6);
+    return desc[0] == L'D' &&
+           desc[1] == L'i' &&
+           desc[2] == L'h' &&
+           desc[3] == L'O' &&
+           desc[4] == L'S' &&
+           desc[5] == 0;
+}
+
+static int dihos_entry_exists(EFI_GET_VARIABLE GetVariable)
+{
+    wchar_t name[9];
+    uint8_t tmp[512];
+    for (uint32_t i = 0; i <= 0x0FFF; i++)
+    {
+        UINTN sz = sizeof(tmp);
+        uint32_t attrs = 0;
+        boot_var_name(name, (uint16_t)i);
+        EFI_STATUS s = GetVariable(name, &EFI_GLOBAL_VARIABLE_GUID, &attrs, &sz, tmp);
+        if (!s && boot_entry_is_dihos(tmp, sz))
+            return 1;
+    }
+    return 0;
+}
+
+static uint16_t find_free_bootnum(EFI_GET_VARIABLE GetVariable)
+{
+    wchar_t name[9];
+    uint8_t tmp[8];
+    for (uint32_t i = 0; i <= 0x0FFF; i++)
+    {
+        UINTN sz = sizeof(tmp);
+        uint32_t attrs = 0;
+        boot_var_name(name, (uint16_t)i);
+        EFI_STATUS s = GetVariable(name, &EFI_GLOBAL_VARIABLE_GUID, &attrs, &sz, tmp);
+        if (s)
+            return (uint16_t)i;
+    }
+    return 0xFFFF;
+}
+
+static void prepend_boot_order(EFI_SYSTEM_TABLE *st, EFI_GET_VARIABLE GetVariable, EFI_SET_VARIABLE SetVariable, uint16_t bootnum)
+{
+    void *BS = st->BootServices;
+    UINTN old_sz = 0;
+    uint32_t attrs = 0;
+    GetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &old_sz, 0);
+
+    if (old_sz >= sizeof(uint16_t))
+    {
+        uint16_t *existing = 0;
+        if (!BsAllocatePool(BS)(4, old_sz, (void **)&existing) && existing)
+        {
+            UINTN tmp_sz = old_sz;
+            if (!GetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &tmp_sz, existing))
+            {
+                UINTN count = tmp_sz / sizeof(uint16_t);
+                for (UINTN i = 0; i < count; i++)
+                {
+                    if (existing[i] == bootnum)
+                        return;
+                }
+            }
+        }
+    }
+
+    UINTN new_sz = old_sz + sizeof(uint16_t);
+    uint16_t *order = 0;
+    if (BsAllocatePool(BS)(4, new_sz, (void **)&order) || !order)
+        return;
+    order[0] = bootnum;
+    if (old_sz)
+        GetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &old_sz, &order[1]);
+    SetVariable(
+        L"BootOrder",
+        &EFI_GLOBAL_VARIABLE_GUID,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+        new_sz,
+        order);
+}
+
+static void register_dihos_boot_entry(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EFI_LOADED_IMAGE_PROTOCOL *li)
+{
+    if (!st || !st->RuntimeServices || !st->BootServices || !li)
+        return;
+    void *RT = st->RuntimeServices;
+    void *BS = st->BootServices;
+    EFI_GET_VARIABLE GetVariable = RtGetVariable(RT);
+    EFI_SET_VARIABLE SetVariable = RtSetVariable(RT);
+    if (!GetVariable || !SetVariable)
+    {
+        println(st, L"[NVRAM] RuntimeServices variable funcs missing");
+        return;
+    }
+    println(st, L"[NVRAM] Checking DihOS boot entry...");
+    if (dihos_entry_exists(GetVariable))
+    {
+        println(st, L"[NVRAM] DihOS boot entry already exists");
+        return;
+    }
+
+    EFI_OPEN_PROTOCOL OpenProtocol = BsOpenProtocol(BS);
+    EFI_DEVICE_PATH_PROTOCOL *devpath = 0;
+    EFI_STATUS s = OpenProtocol(li->DeviceHandle, &DEVICE_PATH_GUID, (void **)&devpath, image, 0, 0x2);
+    if (s || !devpath)
+    {
+        println(st, L"[NVRAM] DevicePath open failed");
+        return;
+    }
+
+#if defined(__x86_64__) || defined(_M_X64)
+    static const wchar_t boot_path[] = L"\\EFI\\BOOT\\BOOTX64.EFI";
+#else
+    static const wchar_t boot_path[] = L"\\EFI\\BOOT\\BOOTAA64.EFI";
+#endif
+
+    UINTN base_dp_sz = device_path_size_no_end(devpath);
+    UINTN path_chars = wlen(boot_path) + 1;
+    UINTN file_node_sz = sizeof(EFI_DEVICE_PATH_PROTOCOL) + path_chars * sizeof(wchar_t);
+    UINTN end_node_sz = sizeof(EFI_DEVICE_PATH_PROTOCOL);
+    UINTN full_dp_sz = base_dp_sz + file_node_sz + end_node_sz;
+    UINTN desc_sz = (wlen(L"DihOS") + 1) * sizeof(wchar_t);
+    UINTN load_option_sz = sizeof(uint32_t) + sizeof(uint16_t) + desc_sz + full_dp_sz;
+
+    uint8_t *opt = 0;
+    if (BsAllocatePool(BS)(4, load_option_sz, (void **)&opt) || !opt)
+    {
+        println(st, L"[NVRAM] alloc load option failed");
+        return;
+    }
+
+    uint8_t *p = opt;
+    *(uint32_t *)p = LOAD_OPTION_ACTIVE;
+    p += sizeof(uint32_t);
+    *(uint16_t *)p = (uint16_t)full_dp_sz;
+    p += sizeof(uint16_t);
+    wcopy((wchar_t *)p, L"DihOS");
+    p += desc_sz;
+
+    for (UINTN i = 0; i < base_dp_sz; i++)
+        p[i] = ((uint8_t *)devpath)[i];
+    p += base_dp_sz;
+
+    EFI_DEVICE_PATH_PROTOCOL *fp = (EFI_DEVICE_PATH_PROTOCOL *)p;
+    fp->Type = 0x04;
+    fp->SubType = 0x04;
+    fp->Length[0] = (uint8_t)(file_node_sz & 0xFF);
+    fp->Length[1] = (uint8_t)((file_node_sz >> 8) & 0xFF);
+    wcopy((wchar_t *)(p + sizeof(EFI_DEVICE_PATH_PROTOCOL)), boot_path);
+    p += file_node_sz;
+
+    EFI_DEVICE_PATH_PROTOCOL *end = (EFI_DEVICE_PATH_PROTOCOL *)p;
+    end->Type = 0x7f;
+    end->SubType = 0xff;
+    end->Length[0] = 4;
+    end->Length[1] = 0;
+
+    uint16_t bootnum = find_free_bootnum(GetVariable);
+    if (bootnum == 0xFFFF)
+    {
+        println(st, L"[NVRAM] no free Boot####");
+        return;
+    }
+
+    wchar_t varname[9];
+    boot_var_name(varname, bootnum);
+    s = SetVariable(
+        varname,
+        &EFI_GLOBAL_VARIABLE_GUID,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+        load_option_sz,
+        opt);
+    if (s)
+    {
+        println(st, L"[NVRAM] Boot#### create failed");
+        return;
+    }
+
+    prepend_boot_order(st, GetVariable, SetVariable, bootnum);
+    println(st, L"[NVRAM] Registered DihOS boot entry");
 }
 
 EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
@@ -153,6 +410,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         {
         }
     }
+    register_dihos_boot_entry(st, image, li);
 
     /* 2) OpenProtocol(DeviceHandle, SIMPLE_FS) */
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = 0;

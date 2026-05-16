@@ -1590,23 +1590,13 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
 
     if (username && username[0] && automate)
     {
-        for (uint32_t i = 0u; i < 4u; ++i)
+        for (uint32_t i = 0u; i < 8u; ++i)
             (void)kwifi_poll_connection(32u);
 
-        if (kwifi_set_supplicant_ready(1u))
-        {
-            for (uint32_t i = 0u; i < 4u; ++i)
-                (void)kwifi_poll_connection(32u);
-
-            if (kwifi_current_connected())
-                terminal_success("enterprise supplicant readiness auto-enabled; link reports connected");
-            else
-                terminal_warn("enterprise supplicant readiness auto-enabled; waiting for firmware key install/auth completion");
-        }
+        if (kwifi_current_connected())
+            terminal_success("enterprise auth completed; link reports connected");
         else
-        {
-            terminal_warn("enterprise auth staged: waiting for PEAP/EAPOL controlled-port authorization");
-        }
+            terminal_warn("enterprise EAPOL engine started; PEAP/TLS/MSCHAPv2 still required");
     }
 
     terminal_success("wifi connect request queued");
