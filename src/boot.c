@@ -198,6 +198,69 @@ static int boot_entry_is_dihos(void *buf, UINTN size)
            desc[5] == 0;
 }
 
+static wchar_t ascii_wupper(wchar_t c)
+{
+    if (c >= L'a' && c <= L'z')
+        return (wchar_t)(c - (L'a' - L'A'));
+    return c;
+}
+
+static int wcmp_ci(const wchar_t *a, const wchar_t *b)
+{
+    UINTN i = 0;
+    for (;; i++)
+    {
+        wchar_t ca = ascii_wupper(a[i]);
+        wchar_t cb = ascii_wupper(b[i]);
+        if (ca != cb)
+            return 0;
+        if (ca == 0)
+            return 1;
+    }
+}
+
+static int boot_entry_targets_path(void *buf, UINTN size, const wchar_t *boot_path)
+{
+    if (size < 8)
+        return 0;
+
+    uint16_t fp_len = *(uint16_t *)((char *)buf + 4);
+    UINTN off = 6;
+
+    while (off + sizeof(wchar_t) <= size)
+    {
+        wchar_t ch = *(wchar_t *)((char *)buf + off);
+        off += sizeof(wchar_t);
+        if (ch == 0)
+            break;
+    }
+
+    if (off > size || off + fp_len > size)
+        return 0;
+
+    UINTN remain = fp_len;
+    uint8_t *p = (uint8_t *)buf + off;
+    while (remain >= sizeof(EFI_DEVICE_PATH_PROTOCOL))
+    {
+        EFI_DEVICE_PATH_PROTOCOL *node = (EFI_DEVICE_PATH_PROTOCOL *)p;
+        UINTN nlen = dp_len(node);
+        if (nlen < sizeof(EFI_DEVICE_PATH_PROTOCOL) || nlen > remain)
+            break;
+
+        if (node->Type == 0x04 && node->SubType == 0x04 && nlen > sizeof(EFI_DEVICE_PATH_PROTOCOL))
+        {
+            wchar_t *node_path = (wchar_t *)(p + sizeof(EFI_DEVICE_PATH_PROTOCOL));
+            if (wcmp_ci(node_path, boot_path))
+                return 1;
+        }
+
+        p += nlen;
+        remain -= nlen;
+    }
+
+    return 0;
+}
+
 static int dihos_entry_exists(EFI_GET_VARIABLE GetVariable)
 {
     wchar_t name[9];
@@ -270,6 +333,108 @@ static void prepend_boot_order(EFI_SYSTEM_TABLE *st, EFI_GET_VARIABLE GetVariabl
         order);
 }
 
+static int bootnum_in_list(const uint16_t *list, UINTN count, uint16_t n)
+{
+    for (UINTN i = 0; i < count; i++)
+    {
+        if (list[i] == n)
+            return 1;
+    }
+    return 0;
+}
+
+static void remove_bootnums_from_boot_order(EFI_SYSTEM_TABLE *st, EFI_GET_VARIABLE GetVariable, EFI_SET_VARIABLE SetVariable, const uint16_t *removed, UINTN removed_count)
+{
+    if (!removed_count)
+        return;
+
+    void *BS = st->BootServices;
+    UINTN old_sz = 0;
+    uint32_t attrs = 0;
+    if (GetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &old_sz, 0) || old_sz < sizeof(uint16_t))
+        return;
+
+    uint16_t *old_order = 0;
+    if (BsAllocatePool(BS)(4, old_sz, (void **)&old_order) || !old_order)
+        return;
+
+    if (GetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, &attrs, &old_sz, old_order))
+        return;
+
+    UINTN old_count = old_sz / sizeof(uint16_t);
+    UINTN new_count = 0;
+    for (UINTN i = 0; i < old_count; i++)
+    {
+        if (!bootnum_in_list(removed, removed_count, old_order[i]))
+            new_count++;
+    }
+
+    UINTN new_sz = new_count * sizeof(uint16_t);
+    if (new_count == old_count)
+        return;
+
+    if (new_count == 0)
+    {
+        SetVariable(L"BootOrder", &EFI_GLOBAL_VARIABLE_GUID, 0, 0, 0);
+        return;
+    }
+
+    uint16_t *new_order = 0;
+    if (BsAllocatePool(BS)(4, new_sz, (void **)&new_order) || !new_order)
+        return;
+
+    UINTN j = 0;
+    for (UINTN i = 0; i < old_count; i++)
+    {
+        if (!bootnum_in_list(removed, removed_count, old_order[i]))
+            new_order[j++] = old_order[i];
+    }
+
+    SetVariable(
+        L"BootOrder",
+        &EFI_GLOBAL_VARIABLE_GUID,
+        EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
+        new_sz,
+        new_order);
+}
+
+static void cleanup_fallback_aliases(EFI_SYSTEM_TABLE *st, EFI_GET_VARIABLE GetVariable, EFI_SET_VARIABLE SetVariable)
+{
+    uint16_t removed[32];
+    UINTN removed_count = 0;
+    wchar_t name[9];
+    uint8_t tmp[2048];
+
+#if defined(__x86_64__) || defined(_M_X64)
+    static const wchar_t boot_path[] = L"\\EFI\\BOOT\\BOOTX64.EFI";
+#else
+    static const wchar_t boot_path[] = L"\\EFI\\BOOT\\BOOTAA64.EFI";
+#endif
+
+    for (uint32_t i = 0; i <= 0x0FFF; i++)
+    {
+        UINTN sz = sizeof(tmp);
+        uint32_t attrs = 0;
+        boot_var_name(name, (uint16_t)i);
+        EFI_STATUS s = GetVariable(name, &EFI_GLOBAL_VARIABLE_GUID, &attrs, &sz, tmp);
+        if (s)
+            continue;
+
+        if (!boot_entry_is_dihos(tmp, sz) && boot_entry_targets_path(tmp, sz, boot_path))
+        {
+            if (!SetVariable(name, &EFI_GLOBAL_VARIABLE_GUID, 0, 0, 0))
+            {
+                if (removed_count < (sizeof(removed) / sizeof(removed[0])))
+                    removed[removed_count++] = (uint16_t)i;
+            }
+        }
+    }
+
+    remove_bootnums_from_boot_order(st, GetVariable, SetVariable, removed, removed_count);
+    if (removed_count)
+        println(st, L"[NVRAM] Removed fallback alias entries");
+}
+
 static void register_dihos_boot_entry(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EFI_LOADED_IMAGE_PROTOCOL *li)
 {
     if (!st || !st->RuntimeServices || !st->BootServices || !li)
@@ -287,6 +452,7 @@ static void register_dihos_boot_entry(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EF
     if (dihos_entry_exists(GetVariable))
     {
         println(st, L"[NVRAM] DihOS boot entry already exists");
+        cleanup_fallback_aliases(st, GetVariable, SetVariable);
         return;
     }
 
@@ -368,6 +534,7 @@ static void register_dihos_boot_entry(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EF
     }
 
     prepend_boot_order(st, GetVariable, SetVariable, bootnum);
+    cleanup_fallback_aliases(st, GetVariable, SetVariable);
     println(st, L"[NVRAM] Registered DihOS boot entry");
 }
 
