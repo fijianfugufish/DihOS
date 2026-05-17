@@ -32,7 +32,10 @@ static uint8_t g_usb_ok = 0;
 #define KINPUT_TPD_REL_SCROLL_START_DY 5
 #define KINPUT_TPD_REL_SCROLL_MAX_DX 1
 #define KINPUT_TPD_REL_SCROLL_STEP 6
+#define KINPUT_TPD_LEFT_BUTTON 0x01u
 #define KINPUT_TPD_DRAG_LOCK_POLLS 10u
+#define KINPUT_TPD_TAP_MAX_POLLS 18u
+#define KINPUT_TPD_TAP_MOVE_MAX 48
 #define KINPUT_TPD_DEBUG_RING 8u
 #define KINPUT_TPD_DEBUG_LIVE_DUMPS 4u
 #define KINPUT_KEY_A 0x04u
@@ -67,6 +70,14 @@ typedef struct
     uint8_t y_size;
     uint8_t valid;
 } kinput_tpd_finger_layout;
+
+typedef struct
+{
+    uint8_t active;
+    uint32_t id;
+    int32_t x;
+    int32_t y;
+} kinput_tpd_contact;
 
 typedef struct
 {
@@ -108,6 +119,14 @@ static int32_t g_tpd_rel_pending_dx = 0;
 static int32_t g_tpd_rel_pending_dy = 0;
 static uint8_t g_tpd_drag_lock_polls = 0;
 static uint8_t g_tpd_latched_buttons = 0;
+static uint8_t g_tpd_synth_buttons = 0;
+static uint8_t g_tpd_tap_touch_active = 0;
+static uint8_t g_tpd_tap_candidate = 0;
+static uint8_t g_tpd_tap_suppressed = 0;
+static uint8_t g_tpd_tap_polls = 0;
+static int32_t g_tpd_tap_start_x = 0;
+static int32_t g_tpd_tap_start_y = 0;
+static kinput_tpd_contact g_tpd_last_contacts[KINPUT_TPD_MAX_FINGERS];
 static kinput_tpd_debug_packet g_tpd_debug_ring[KINPUT_TPD_DEBUG_RING];
 static uint8_t g_tpd_debug_ring_head = 0;
 static uint8_t g_tpd_debug_ring_count = 0;
@@ -193,6 +212,107 @@ static int32_t kinput_abs_i32(int32_t v)
     return (v < 0) ? -v : v;
 }
 
+static void tpd_clear_last_contacts(void)
+{
+    for (uint32_t i = 0; i < KINPUT_TPD_MAX_FINGERS; ++i)
+        g_tpd_last_contacts[i] = (kinput_tpd_contact){0};
+}
+
+static void tpd_store_last_contacts(const kinput_tpd_contact *contacts, uint32_t count)
+{
+    uint32_t i = 0;
+
+    tpd_clear_last_contacts();
+
+    if (!contacts)
+        return;
+
+    if (count > KINPUT_TPD_MAX_FINGERS)
+        count = KINPUT_TPD_MAX_FINGERS;
+
+    for (i = 0; i < count; ++i)
+        g_tpd_last_contacts[i] = contacts[i];
+}
+
+static uint8_t tpd_find_last_contact(uint32_t id, int32_t *out_x, int32_t *out_y)
+{
+    for (uint32_t i = 0; i < KINPUT_TPD_MAX_FINGERS; ++i)
+    {
+        if (g_tpd_last_contacts[i].active && g_tpd_last_contacts[i].id == id)
+        {
+            if (out_x)
+                *out_x = g_tpd_last_contacts[i].x;
+            if (out_y)
+                *out_y = g_tpd_last_contacts[i].y;
+            return 1u;
+        }
+    }
+
+    return 0u;
+}
+
+static void tpd_cancel_tap_candidate(void)
+{
+    g_tpd_tap_candidate = 0u;
+    g_tpd_tap_polls = 0u;
+    g_tpd_tap_start_x = 0;
+    g_tpd_tap_start_y = 0;
+}
+
+static void tpd_note_tap_touch(uint32_t active_count, uint8_t buttons, int32_t x, int32_t y)
+{
+    uint8_t was_active = g_tpd_tap_touch_active;
+
+    if (active_count == 0u)
+    {
+        if (buttons == 0u && g_tpd_tap_touch_active && g_tpd_tap_candidate &&
+            g_tpd_tap_polls > 0u && g_tpd_tap_polls <= KINPUT_TPD_TAP_MAX_POLLS)
+            g_tpd_synth_buttons |= KINPUT_TPD_LEFT_BUTTON;
+
+        g_tpd_tap_touch_active = 0u;
+        g_tpd_tap_suppressed = 0u;
+        tpd_cancel_tap_candidate();
+        return;
+    }
+
+    if (!was_active)
+    {
+        g_tpd_tap_suppressed = 0u;
+        tpd_cancel_tap_candidate();
+    }
+
+    g_tpd_tap_touch_active = 1u;
+
+    if (buttons != 0u || active_count != 1u)
+    {
+        g_tpd_tap_suppressed = 1u;
+        tpd_cancel_tap_candidate();
+        return;
+    }
+
+    if (g_tpd_tap_suppressed)
+        return;
+
+    if (!g_tpd_tap_candidate)
+    {
+        g_tpd_tap_candidate = 1u;
+        g_tpd_tap_polls = 0u;
+        g_tpd_tap_start_x = x;
+        g_tpd_tap_start_y = y;
+    }
+
+    if (g_tpd_tap_polls < 255u)
+        g_tpd_tap_polls++;
+
+    if (g_tpd_tap_polls > KINPUT_TPD_TAP_MAX_POLLS ||
+        kinput_abs_i32(x - g_tpd_tap_start_x) > KINPUT_TPD_TAP_MOVE_MAX ||
+        kinput_abs_i32(y - g_tpd_tap_start_y) > KINPUT_TPD_TAP_MOVE_MAX)
+    {
+        g_tpd_tap_suppressed = 1u;
+        tpd_cancel_tap_candidate();
+    }
+}
+
 static int32_t tpd_scale_axis_with_accum(int32_t raw, int32_t *accum, uint32_t pct)
 {
     int32_t emit = 0;
@@ -270,6 +390,10 @@ static void tpd_reset_tracking(void)
     g_tpd_rel_pending_dy = 0;
     g_tpd_drag_lock_polls = 0u;
     g_tpd_latched_buttons = 0u;
+    g_tpd_tap_touch_active = 0u;
+    g_tpd_tap_suppressed = 0u;
+    tpd_cancel_tap_candidate();
+    tpd_clear_last_contacts();
 }
 
 static void tpd_clear_layouts(void)
@@ -1297,13 +1421,18 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
     const uint8_t *payload = 0;
     uint32_t payload_len = 0;
     uint8_t buttons = 0u;
+    uint8_t effective_buttons = 0u;
     uint32_t contact_count = 0u;
     uint32_t active_count = 0u;
     int32_t sum_x = 0;
     int32_t sum_y = 0;
+    kinput_tpd_contact contacts[KINPUT_TPD_MAX_FINGERS];
 
     if (!r || !r->available || !g_tpd_mt.valid)
         return 0;
+
+    for (uint32_t i = 0; i < KINPUT_TPD_MAX_FINGERS; ++i)
+        contacts[i] = (kinput_tpd_contact){0};
 
     payload = r->data;
     payload_len = r->len;
@@ -1327,7 +1456,8 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
     if (g_tpd_mt.contact_count_size)
         contact_count = usb_hid_extract_bits(payload, payload_len, g_tpd_mt.contact_count_bits, g_tpd_mt.contact_count_size);
 
-    g_tpd_buttons = buttons;
+    effective_buttons = g_tpd_mt.button_count ? buttons : g_tpd_buttons;
+    g_tpd_buttons = effective_buttons;
 
     for (uint32_t finger_idx = 0; finger_idx < g_tpd_mt.finger_count && finger_idx < KINPUT_TPD_MAX_FINGERS; ++finger_idx)
     {
@@ -1335,6 +1465,7 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
         uint8_t active = 1u;
         int32_t x = 0;
         int32_t y = 0;
+        uint32_t contact_id = 0u;
 
         if (!finger->valid)
             continue;
@@ -1349,14 +1480,25 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
 
         x = (int32_t)usb_hid_extract_bits(payload, payload_len, finger->x_bits, finger->x_size);
         y = (int32_t)usb_hid_extract_bits(payload, payload_len, finger->y_bits, finger->y_size);
+        contact_id = finger->id_size ?
+                     usb_hid_extract_bits(payload, payload_len, finger->id_bits, finger->id_size) :
+                     (0x80000000u | finger_idx);
 
         sum_x += x;
         sum_y += y;
+        if (active_count < KINPUT_TPD_MAX_FINGERS)
+        {
+            contacts[active_count].active = 1u;
+            contacts[active_count].id = contact_id;
+            contacts[active_count].x = x;
+            contacts[active_count].y = y;
+        }
         active_count++;
     }
 
     if (active_count == 0u)
     {
+        tpd_note_tap_touch(0u, effective_buttons, 0, 0);
         tpd_reset_tracking();
         return 1;
     }
@@ -1365,7 +1507,42 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
         int32_t cx = sum_x / (int32_t)active_count;
         int32_t cy = sum_y / (int32_t)active_count;
 
-        if (active_count >= 2u)
+        tpd_note_tap_touch(active_count, effective_buttons, cx, cy);
+
+        if (effective_buttons != 0u)
+        {
+            int32_t best_dx = 0;
+            int32_t best_dy = 0;
+            uint32_t best_mag = 0u;
+
+            tpd_clear_rel_scroll_pending();
+            g_tpd_scroll_accum_y = 0;
+            g_tpd_mode = KINPUT_TPD_MODE_CURSOR;
+
+            for (uint32_t i = 0; i < active_count && i < KINPUT_TPD_MAX_FINGERS; ++i)
+            {
+                int32_t prev_x = 0;
+                int32_t prev_y = 0;
+
+                if (tpd_find_last_contact(contacts[i].id, &prev_x, &prev_y))
+                {
+                    int32_t dx = contacts[i].x - prev_x;
+                    int32_t dy = contacts[i].y - prev_y;
+                    uint32_t mag = (uint32_t)(kinput_abs_i32(dx) + kinput_abs_i32(dy));
+
+                    if (mag > best_mag)
+                    {
+                        best_mag = mag;
+                        best_dx = dx;
+                        best_dy = dy;
+                    }
+                }
+            }
+
+            if (best_mag != 0u)
+                tpd_add_cursor_motion(best_dx, best_dy);
+        }
+        else if (active_count >= 2u)
         {
             if (g_tpd_have_last && g_tpd_mode == KINPUT_TPD_MODE_SCROLL)
             {
@@ -1393,6 +1570,7 @@ static uint8_t parse_touchpad_mt_report(const hidi2c_raw_report *r)
         g_tpd_last_x = cx;
         g_tpd_last_y = cy;
         g_tpd_have_last = 1u;
+        tpd_store_last_contacts(contacts, active_count);
     }
 
     return 1;
@@ -1533,6 +1711,7 @@ void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count
     g_mouse.buttons = 0;
     g_tpd_buttons = 0;
     g_usb_mouse_buttons = 0;
+    g_tpd_synth_buttons = 0u;
     g_tpd_motion_accum_x = 0;
     g_tpd_motion_accum_y = 0;
 
@@ -1615,7 +1794,8 @@ void kinput_poll(void)
             parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
     }
 
-    g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_usb_mouse_buttons);
+    g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_tpd_synth_buttons | g_usb_mouse_buttons);
+    g_tpd_synth_buttons = 0u;
 
     /* debug stuff
     if (g_keys_now[KINPUT_KEY_A] != 0u && g_keys_prev[KINPUT_KEY_A] == 0u)
