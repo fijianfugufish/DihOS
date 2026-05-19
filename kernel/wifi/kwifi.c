@@ -1070,6 +1070,7 @@ static int kwifi_send_eapol_start(void)
     uint8_t dst[6];
     uint8_t have_bssid = 0u;
     uint8_t use_pae_group = 1u;
+    int sent_data;
     static const uint8_t eapol_pae_group[6] = {0x01u, 0x80u, 0xC2u, 0x00u, 0x00u, 0x03u};
 
     if (g_kwifi_connect.eapol_start_attempts >= 4u)
@@ -1078,7 +1079,7 @@ static int kwifi_send_eapol_start(void)
     if (!pci_kernel_wifi_get_local_mac(src))
         return 0;
     have_bssid = pci_kernel_wifi_get_bssid(dst) ? 1u : 0u;
-    if (have_bssid && (g_kwifi_connect.eapol_start_attempts & 1u))
+    if (have_bssid)
         use_pae_group = 0u;
 
     for (uint32_t i = 0u; i < sizeof(frame); ++i)
@@ -1095,7 +1096,8 @@ static int kwifi_send_eapol_start(void)
     frame[16] = 0x00u; /* body len hi */
     frame[17] = 0x00u; /* body len lo */
 
-    if (!pci_kernel_wifi_tx_l2_frame(frame, 60u))
+    sent_data = pci_kernel_wifi_tx_l2_frame(frame, 60u);
+    if (!sent_data)
         return 0;
 
     g_kwifi_connect.eapol_start_sent = 1u;
@@ -1112,6 +1114,7 @@ static int kwifi_send_eapol_start(void)
     }
     terminal_print(" dst_mode=");
     terminal_print_inline(use_pae_group ? "pae-group" : "bssid");
+    terminal_print(" tx_paths=data");
     return 1;
 }
 

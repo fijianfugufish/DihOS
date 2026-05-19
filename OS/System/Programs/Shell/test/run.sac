@@ -1,0 +1,61 @@
+# DIHOS shell smoke tests. Run with: test:run
+title DIHOS Shell Smoke Tests
+echo DIHOS shell smoke tests
+
+if exists /ShellTests
+  rm /ShellTests -r -f
+end
+
+mkdir /ShellTests -f
+mkdir /ShellTests/dest -f
+mkdir /ShellTests/nested -f
+write /ShellTests/source.txt "alpha\nbeta\ngamma\n" -f
+
+assert isfile /ShellTests/source.txt
+if %status% != 0
+  exit 1 source file was not created
+end
+
+cd /ShellTests/nested
+assert isdir ./..
+if %status% != 0
+  exit 1 ./.. did not resolve to parent
+end
+
+assert isdir ./../dest
+if %status% != 0
+  exit 1 ./../dest did not resolve from local cwd
+end
+
+cd ./..
+assert isdir ./nested
+if %status% != 0
+  exit 1 ./ did not resolve to current directory
+end
+
+mv /ShellTests/source.txt /ShellTests/dest -f
+assert isfile /ShellTests/dest/source.txt
+if %status% != 0
+  exit 1 mv into folder failed
+end
+
+cat /ShellTests/dest/source.txt | grep beta | wc -l
+if %status% != 0
+  exit 1 pipeline grep wc failed
+end
+
+echo "c\nb\na\na\n" | sort | uniq | tee /ShellTests/sorted.txt -f
+assert isfile /ShellTests/sorted.txt
+if %status% != 0
+  exit 1 sort uniq tee failed
+end
+
+which test:run
+if %status% != 0
+  exit 1 fallback which failed
+end
+
+cd /
+rm /ShellTests -r -f
+echo DIHOS shell smoke tests passed
+exit 0 ok
