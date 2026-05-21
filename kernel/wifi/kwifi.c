@@ -28,6 +28,10 @@
 #define KWIFI_PEAP_FLAG_START 0x20u
 #define KWIFI_PEAP_VERSION 0u
 #define KWIFI_TLS_CLIENT_HELLO_MAX 256u
+#define KWIFI_WCN7850_NET_HINTS (DIHOS_NET_HINT_QCOM | \
+                                 DIHOS_NET_HINT_WLAN | \
+                                 DIHOS_NET_HINT_WIFI | \
+                                 DIHOS_NET_HINT_WCN)
 
 typedef struct
 {
@@ -53,6 +57,7 @@ typedef struct
     uint8_t beacon_miss_count;
     uint8_t reconnect_attempts;
     uint8_t assoc_kick_attempts;
+    uint8_t terminal_failure;
     uint16_t peap_clienthello_len;
     uint32_t peap_tls_rx_bytes;
     uint32_t peap_tls_rx_total_len;
@@ -69,6 +74,12 @@ typedef struct
 } kwifi_connect_state;
 
 static kwifi_connect_state g_kwifi_connect;
+static boot_info *g_kwifi_boot_info;
+static int g_kwifi_storage_mounted;
+static uint32_t g_kwifi_net_hints;
+static uint32_t g_kwifi_hw_selected;
+static uint32_t g_kwifi_driver_started;
+static uint32_t g_kwifi_driver_starting;
 static const uint32_t g_kwifi_enterprise_fallback_channels_mhz[] = {
     5200u, 5180u, 5220u, 5240u, 5745u, 5680u};
 
@@ -1383,44 +1394,66 @@ static void kwifi_print_stage2_nic_hints(const boot_info *bi)
     }
 }
 
-static void kwifi_print_acpi_net_hints(uint32_t net_hints)
+static void kwifi_select_hardware_from_bootinfo(const boot_info *bi)
 {
-    if ((net_hints & (DIHOS_NET_HINT_WLAN | DIHOS_NET_HINT_WIFI | DIHOS_NET_HINT_WCN)) != 0u)
-        terminal_print("[NET] ACPI suggests WLAN/WCN platform path");
-    else
-        terminal_print("[NET] ACPI has no explicit WLAN/WIFI/WCN device marker");
-    if ((net_hints & DIHOS_NET_HINT_SDIO) != 0u)
-        terminal_print("[NET] ACPI suggests SDIO/SDHost network path");
-    if ((net_hints & (DIHOS_NET_HINT_WWAN | DIHOS_NET_HINT_MHI)) != 0u)
-        terminal_print("[NET] ACPI suggests WWAN/MHI path (non-PCI NIC likely)");
-    else if ((net_hints & DIHOS_NET_HINT_USB) != 0u)
-        terminal_print("[NET] ACPI suggests USB network path");
+    if (!bi)
+        return;
+
+    g_kwifi_net_hints = KWIFI_WCN7850_NET_HINTS;
+    g_kwifi_hw_selected = 1u;
+
+    if (bi->pci_nic_count)
+    {
+        kwifi_print_stage2_nic_hints(bi);
+        terminal_print("[K:WIFI] init selected stage2 PCI NIC hint list");
+        return;
+    }
+
+    pci_kernel_set_net_hints(g_kwifi_net_hints);
+    terminal_print("[K:WIFI] init selected known FastConnect 7800/WCN7850 PCI hint");
 }
 
-static void kwifi_print_acpi_resource_windows(void)
+static int kwifi_start_driver_if_needed(const char *reason)
 {
-    uint32_t nres = acpi_probe_net_resource_count();
-    const acpi_net_resource_window *res = acpi_probe_net_resources();
+    boot_info *bi = g_kwifi_boot_info;
 
-    terminal_print("[NET] ACPI resource window count:");
-    terminal_print_inline_hex32(nres);
-    for (uint32_t i = 0; i < nres; ++i)
+    if (g_kwifi_driver_started)
+        return 1;
+    if (g_kwifi_driver_starting)
+        return 0;
+    if (!bi)
     {
-        terminal_print("[NET] res dev=");
-        terminal_print(res[i].dev_name);
-        terminal_print(" hid=");
-        terminal_print(res[i].hid_name);
-        terminal_print(" kind=");
-        terminal_print_inline_hex32(res[i].kind);
-        terminal_print(" rtype=");
-        terminal_print_inline_hex32(res[i].rtype);
-        terminal_print(" min=");
-        terminal_print_inline_hex64(res[i].min_addr);
-        terminal_print(" max=");
-        terminal_print_inline_hex64(res[i].max_addr);
-        terminal_print(" len=");
-        terminal_print_inline_hex64(res[i].span_len);
+        terminal_print("[K:WIFI] driver start rejected: no boot info");
+        return 0;
     }
+
+    g_kwifi_driver_starting = 1u;
+    terminal_print("[K:WIFI] lazy driver start reason=");
+    terminal_print(reason ? reason : "?");
+
+    if (!g_kwifi_hw_selected)
+        kwifi_select_hardware_from_bootinfo(bi);
+
+    kwifi_print_stage2_firmware(bi);
+    kwifi_fw_load_from_fs_if_needed(bi, g_kwifi_storage_mounted);
+
+    if (bi->pci_nic_count)
+    {
+        terminal_print("[K:WIFI] using stage2 NIC hints; kernel MCFG fallback skipped");
+        g_kwifi_driver_started = 1u;
+        g_kwifi_driver_starting = 0u;
+        terminal_print("[K:WIFI] lazy driver start end");
+        return 1;
+    }
+
+    terminal_print("[K:WIFI] lazy driver start: probing selected FastConnect 7800/WCN7850 PCI hint");
+    pci_kernel_set_net_hints(g_kwifi_net_hints ? g_kwifi_net_hints : KWIFI_WCN7850_NET_HINTS);
+    pci_kernel_probe_nics_from_mcfg(bi);
+
+    g_kwifi_driver_started = 1u;
+    g_kwifi_driver_starting = 0u;
+    terminal_print("[K:WIFI] lazy driver start end");
+    return 1;
 }
 
 uint32_t kwifi_network_count(void)
@@ -1440,11 +1473,15 @@ uint32_t kwifi_network_hidden(uint32_t index)
 
 int kwifi_network_refresh(void)
 {
+    if (!kwifi_start_driver_if_needed("networks"))
+        return 0;
     return pci_kernel_wifi_trigger_scan();
 }
 
 int kwifi_network_poll(uint32_t rounds)
 {
+    if (!kwifi_start_driver_if_needed("poll"))
+        return 0;
     return pci_kernel_wifi_poll_events(rounds);
 }
 
@@ -1455,16 +1492,22 @@ uint32_t kwifi_network_scan_running(void)
 
 uint32_t kwifi_rx_queue_count(void)
 {
+    if (!g_kwifi_driver_started)
+        return 0u;
     return pci_kernel_wifi_rx_queue_count();
 }
 
 uint32_t kwifi_rx_queue_dropped(void)
 {
+    if (!g_kwifi_driver_started)
+        return 0u;
     return pci_kernel_wifi_rx_queue_dropped();
 }
 
 int kwifi_rx_frame_pop(uint8_t *out_frame, uint32_t out_cap, uint32_t *out_len, uint32_t *out_kind)
 {
+    if (!kwifi_start_driver_if_needed("rx-pop"))
+        return 0;
     return pci_kernel_wifi_rx_frame_pop(out_frame, out_cap, out_len, out_kind);
 }
 
@@ -1546,11 +1589,18 @@ int kwifi_connect_request(const char *ssid,
         }
     }
 
+    if (!kwifi_start_driver_if_needed("connect"))
+    {
+        kwifi_set_status("wifi driver start failed");
+        terminal_print("[K:WIFI] connect rejected: lazy driver start failed");
+        return 0;
+    }
+
     found = kwifi_have_visible_network(ssid);
     if (!found && !kwifi_network_scan_running())
     {
         (void)kwifi_network_refresh();
-        (void)kwifi_network_poll(256u);
+        (void)kwifi_network_poll(KWIFI_NETWORK_SCAN_POLL_ROUNDS);
         found = kwifi_have_visible_network(ssid);
     }
 
@@ -1582,6 +1632,7 @@ int kwifi_connect_request(const char *ssid,
     g_kwifi_connect.beacon_miss_count = 0u;
     g_kwifi_connect.reconnect_attempts = 0u;
     g_kwifi_connect.assoc_kick_attempts = 0u;
+    g_kwifi_connect.terminal_failure = 0u;
     kwifi_copy_trunc(g_kwifi_connect.ssid, sizeof(g_kwifi_connect.ssid), ssid);
     kwifi_copy_trunc(g_kwifi_connect.username, sizeof(g_kwifi_connect.username), username ? username : "");
     kwifi_copy_trunc(g_kwifi_connect.password, sizeof(g_kwifi_connect.password), password);
@@ -1614,6 +1665,7 @@ int kwifi_connect_request(const char *ssid,
         if (!pci_kernel_wifi_connect_ssid(ssid))
         {
             kwifi_set_status("enterprise connect failed before association");
+            g_kwifi_connect.terminal_failure = 1u;
             terminal_print("[K:WIFI] enterprise connect attempt failed before association");
             return 0;
         }
@@ -1687,6 +1739,8 @@ int kwifi_set_supplicant_ready(uint32_t ready)
 
     if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
         return 0;
+    if (!kwifi_start_driver_if_needed("supplicant"))
+        return 0;
 
     g_kwifi_connect.supplicant_ready = ready ? 1u : 0u;
     if (!ready)
@@ -1746,6 +1800,10 @@ int kwifi_poll_connection(uint32_t rounds)
     uint32_t roam_reason;
 
     if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
+        return 0;
+    if (g_kwifi_connect.terminal_failure)
+        return 0;
+    if (!kwifi_start_driver_if_needed("connection-poll"))
         return 0;
 
     if (rounds == 0u)
@@ -1905,28 +1963,16 @@ int kwifi_poll_connection(uint32_t rounds)
 
 void kwifi_init(boot_info *bi, int storage_mounted)
 {
-    uint32_t net_hints = 0;
-
     if (!bi)
         return;
 
-    terminal_print("[K:WIFI] init begin");
-    kwifi_print_stage2_firmware(bi);
-    kwifi_fw_load_from_fs_if_needed(bi, storage_mounted);
-    kwifi_print_stage2_nic_hints(bi);
+    g_kwifi_boot_info = bi;
+    g_kwifi_storage_mounted = storage_mounted;
+    g_kwifi_net_hints = 0u;
+    g_kwifi_hw_selected = 0u;
+    g_kwifi_driver_started = 0u;
+    g_kwifi_driver_starting = 0u;
+    kwifi_select_hardware_from_bootinfo(bi);
 
-    if (bi->pci_nic_count)
-    {
-        terminal_print("[K:WIFI] using stage2 NIC hints; kernel MCFG fallback skipped");
-        terminal_print("[K:WIFI] init end");
-        return;
-    }
-
-    terminal_print("Stage2 NIC hints empty; trying kernel MCFG NIC probe");
-    net_hints = acpi_probe_net_candidates_from_rsdp(bi->acpi_rsdp);
-    pci_kernel_set_net_hints(net_hints);
-    kwifi_print_acpi_net_hints(net_hints);
-    kwifi_print_acpi_resource_windows();
-    pci_kernel_probe_nics_from_mcfg(bi);
-    terminal_print("[K:WIFI] init end");
+    terminal_print("[K:WIFI] init selected hardware; run wifi:networks or wifi:connect to start driver");
 }

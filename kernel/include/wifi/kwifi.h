@@ -3,7 +3,7 @@
 #include "bootinfo.h"
 #include <stdint.h>
 
-#define KWIFI_NETWORK_SCAN_POLL_ROUNDS 8192u
+#define KWIFI_NETWORK_SCAN_POLL_ROUNDS 192u
 
 void kwifi_init(boot_info *bi, int storage_mounted);
 uint32_t kwifi_network_count(void);

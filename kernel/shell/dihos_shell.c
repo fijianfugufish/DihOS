@@ -2042,8 +2042,8 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
 
     if (username && username[0] && automate)
     {
-        for (uint32_t i = 0u; i < 8u; ++i)
-            (void)kwifi_poll_connection(32u);
+        for (uint32_t i = 0u; i < 4u; ++i)
+            (void)kwifi_poll_connection(8u);
 
         if (kwifi_current_connected())
             terminal_success("enterprise auth completed; link reports connected");
@@ -2064,12 +2064,6 @@ static int dihos_cmd_wifi_current(dihos_shell_stage *stage)
     const char *eap_phase = kwifi_current_eap_phase();
     const char *peap_phase = kwifi_current_peap_phase();
     (void)stage;
-
-    for (uint32_t i = 0u; i < 8u; ++i)
-        (void)kwifi_poll_connection(32u);
-    status = kwifi_current_status();
-    eap_phase = kwifi_current_eap_phase();
-    peap_phase = kwifi_current_peap_phase();
 
     terminal_print("wifi current:");
     terminal_print_inline("  connected: ");
