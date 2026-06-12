@@ -320,13 +320,38 @@ $ldsX64  = Join-Path $KerDir "kernel_x64.ld"
 Build-Kernel -Arch "aa64" -Target "aarch64-unknown-none-elf" -ObjDir $ObjKAA64 -OutFile $KernelAa64OutFull -LinkerScript $ldsAA64
 Build-Kernel -Arch "x64"  -Target "x86_64-unknown-none-elf"  -ObjDir $ObjKX64  -OutFile $KernelX64OutFull  -LinkerScript $ldsX64
 
+# ---- IMAGE EDITOR SACX (fat AA64 + x64 package) ----
+$imageEditorBuild = Join-Path $ProjectRoot "build_sacx_app.ps1"
+$imageEditorSources = @(
+  (Join-Path $ProjectRoot "sdk\sacx\apps\image_viewer\main.cpp"),
+  (Join-Path $ProjectRoot "sdk\sacx\apps\image_viewer\document.cpp"),
+  (Join-Path $ProjectRoot "sdk\sacx\apps\image_viewer\project.cpp"),
+  (Join-Path $ProjectRoot "sdk\sacx\apps\image_viewer\runtime.cpp")
+)
+$imageEditorOut = Join-Path $ProjectRoot "build\sacx\image_viewer.sacx"
+$imageEditorElfAA64 = Join-Path $ProjectRoot "build\sacx\image_viewer_aa64.elf"
+$imageEditorElfX64 = Join-Path $ProjectRoot "build\sacx\image_viewer_x64.elf"
+$imageEditorImports = Join-Path $ProjectRoot "sdk\sacx\imports\default.imports.txt"
+
+& $imageEditorBuild `
+  -ProjectRoot $ProjectRoot `
+  -Source $imageEditorSources `
+  -OutSacx $imageEditorOut `
+  -OutElfAA64 $imageEditorElfAA64 `
+  -OutElfX64 $imageEditorElfX64 `
+  -Imports $imageEditorImports `
+  -Config $Config `
+  -BuildX64
+if ($LASTEXITCODE) { throw "image editor SACX build failed" }
+
 # ---- USB copy (U:\) if present ----
 $UsbRoot = "U:\"
 if (Test-Path $UsbRoot) {
   $destBoot = Join-Path $UsbRoot "EFI\BOOT"
   $destAA64 = Join-Path $UsbRoot "OS\aa64"
   $destX64  = Join-Path $UsbRoot "OS\x64"
-  New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64 | Out-Null
+  $destImageEditor = Join-Path $UsbRoot "OS\System\Programs\Image Viewer"
+  New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
 
   Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
   Copy-Item -Force $BootX64OutFull    (Join-Path $destBoot "BOOTX64.EFI")
@@ -334,6 +359,7 @@ if (Test-Path $UsbRoot) {
   Copy-Item -Force $Stage2X64OutFull  (Join-Path $destX64 "STAGE2.EFI")
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
   Copy-Item -Force $KernelX64OutFull  (Join-Path $destX64 "KERNEL.ELF")
+  Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
 
   Write-Host "Copied outputs to U:\ successfully:" -ForegroundColor Green
   Write-Host "  U:\EFI\BOOT\BOOTAA64.EFI"
@@ -342,6 +368,7 @@ if (Test-Path $UsbRoot) {
   Write-Host "  U:\OS\x64\STAGE2.EFI"
   Write-Host "  U:\OS\aa64\KERNEL.ELF"
   Write-Host "  U:\OS\x64\KERNEL.ELF"
+  Write-Host "  U:\OS\System\Programs\Image Viewer\image_viewer.sacx"
 } else {
   Write-Host "USB drive U:\ not found. Skipping copy." -ForegroundColor Yellow
   Write-Host ""
@@ -352,4 +379,5 @@ if (Test-Path $UsbRoot) {
   Write-Host ("  \OS\x64\STAGE2.EFI        <= " + $Stage2X64OutFull)
   Write-Host ("  \OS\aa64\KERNEL.ELF       <= " + $KernelAa64OutFull)
   Write-Host ("  \OS\x64\KERNEL.ELF        <= " + $KernelX64OutFull)
+  Write-Host ("  \OS\System\Programs\Image Viewer\image_viewer.sacx <= " + $imageEditorOut)
 }

@@ -322,6 +322,10 @@ extern "C"
     int kgfx_obj_destroy(kgfx_obj_handle h);
 
     void kgfx_put_px_blend(int x, int y, kcolor c, uint8_t a);
+    int kgfx_target_argb_begin(uint32_t *argb, uint32_t w, uint32_t h, uint32_t stride_px);
+    void kgfx_target_argb_end(void);
+    int kgfx_capture_argb(uint32_t *dst, uint32_t dst_stride_px,
+                          int32_t x, int32_t y, uint32_t w, uint32_t h);
     void kgfx_render_all(kcolor clear_color);
 
 #ifdef __cplusplus

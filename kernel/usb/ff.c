@@ -19,6 +19,7 @@
 /----------------------------------------------------------------------------*/
 
 #include "kwrappers/string.h"
+#include "system/kbusy.h"
 #include "usb/ff.h"		/* Basic definitions and declarations of API */
 #include "usb/diskio.h" /* Declarations of MAI */
 
@@ -1570,6 +1571,7 @@ static FRESULT remove_chain(			  /* FR_OK(0):succeeded, !=0:error */
 {
 	FRESULT res = FR_OK;
 	DWORD nxt;
+	DWORD busy_clusters = 0;
 	FATFS *fs = obj->fs;
 #if FF_FS_EXFAT || FF_USE_TRIM
 	DWORD scl = clst, ecl = clst;
@@ -1634,6 +1636,11 @@ static FRESULT remove_chain(			  /* FR_OK(0):succeeded, !=0:error */
 		}
 #endif
 		clst = nxt; /* Next cluster */
+		if (++busy_clusters >= 16)
+		{
+			busy_clusters = 0;
+			kbusy_pump();
+		}
 	} while (clst < fs->n_fatent); /* Repeat until the last link */
 
 #if FF_FS_EXFAT

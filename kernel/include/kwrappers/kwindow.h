@@ -89,6 +89,10 @@ extern "C"
     kgfx_obj_handle kwindow_root(kwindow_handle h);
     int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y);
     int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y);
+    int kwindow_set_close_deferred(kwindow_handle h, uint8_t deferred);
+    int kwindow_close_requested(kwindow_handle h);
+    int kwindow_close_accept(kwindow_handle h);
+    int kwindow_close_cancel(kwindow_handle h);
 
 #ifdef __cplusplus
 }

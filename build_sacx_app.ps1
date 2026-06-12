@@ -3,7 +3,7 @@ param(
   [string]$ProjectRoot,
 
   [Parameter(Mandatory = $true)]
-  [string]$Source,
+  [string[]]$Source,
 
   [string]$OutSacx = "build\sacx\app.sacx",
 
@@ -24,8 +24,13 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$SourcePath = if ([System.IO.Path]::IsPathRooted($Source)) { $Source } else { Join-Path $ProjectRoot $Source }
-$SourcePath = (Resolve-Path -LiteralPath $SourcePath).Path
+$SourcePaths = @(
+  foreach ($sourceItem in $Source) {
+    $sourcePath = if ([System.IO.Path]::IsPathRooted($sourceItem)) { $sourceItem } else { Join-Path $ProjectRoot $sourceItem }
+    (Resolve-Path -LiteralPath $sourcePath).Path
+  }
+)
+if (!$SourcePaths) { throw "At least one SACX source file is required." }
 
 $llvm = Join-Path $Env:ProgramFiles "LLVM\bin"
 if (Test-Path (Join-Path $llvm "clang++.exe")) {
@@ -45,8 +50,8 @@ $objDir = Join-Path $buildDir "obj"
 $packerExeStable = Join-Path $buildDir "clang_cache_host.exe"
 $packerExe = $packerExeStable
 
-$objAA64 = Join-Path $objDir "app_aa64.o"
-$objX64 = Join-Path $objDir "app_x64.o"
+$objAA64 = @()
+$objX64 = @()
 
 $elfOutAA64 = if ([System.IO.Path]::IsPathRooted($OutElfAA64)) { $OutElfAA64 } else { Join-Path $ProjectRoot $OutElfAA64 }
 $elfOutX64  = if ([System.IO.Path]::IsPathRooted($OutElfX64))  { $OutElfX64 }  else { Join-Path $ProjectRoot $OutElfX64 }
@@ -58,33 +63,51 @@ New-Item -Force -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($e
 
 $opt = if ($Config -eq "Release") { "-O2" } else { "-O0" }
 
-Write-Host "== Compile AA64 object ==" -ForegroundColor Cyan
-& $clangxx `
-  "-target" "aarch64-unknown-none-elf" `
-  "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
-  "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
-  $opt "-g" `
-  "-I" $sdkInc `
-  "-c" $SourcePath "-o" $objAA64
-if ($LASTEXITCODE) { throw "AA64 clang++ failed" }
+Write-Host "== Compile AA64 objects ==" -ForegroundColor Cyan
+for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
+{
+  $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
+  $obj = Join-Path $objDir ("app_aa64_{0}_{1}.o" -f $i, $baseName)
+  & $clangxx `
+    "-target" "aarch64-unknown-none-elf" `
+    "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
+    "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
+    $opt "-g" `
+    "-I" $sdkInc `
+    "-c" $SourcePaths[$i] "-o" $obj
+  if ($LASTEXITCODE) { throw "AA64 clang++ failed on $($SourcePaths[$i])" }
+  $objAA64 += $obj
+}
 
 Write-Host "== Link AA64 ELF ==" -ForegroundColor Cyan
+if (Test-Path -LiteralPath $elfOutAA64) {
+  Remove-Item -LiteralPath $elfOutAA64 -Force
+}
 & $ld "-pie" "-nostdlib" "-e" "sacx_main" "-o" $elfOutAA64 $objAA64
 if ($LASTEXITCODE) { throw "AA64 ld.lld failed" }
 
 if ($BuildX64)
 {
-  Write-Host "== Compile x64 object ==" -ForegroundColor Cyan
-  & $clangxx `
-    "-target" "x86_64-unknown-none-elf" `
-    "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
-    "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
-    $opt "-g" `
-    "-I" $sdkInc `
-    "-c" $SourcePath "-o" $objX64
-  if ($LASTEXITCODE) { throw "x64 clang++ failed" }
+  Write-Host "== Compile x64 objects ==" -ForegroundColor Cyan
+  for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
+  {
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
+    $obj = Join-Path $objDir ("app_x64_{0}_{1}.o" -f $i, $baseName)
+    & $clangxx `
+      "-target" "x86_64-unknown-none-elf" `
+      "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
+      "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
+      $opt "-g" `
+      "-I" $sdkInc `
+      "-c" $SourcePaths[$i] "-o" $obj
+    if ($LASTEXITCODE) { throw "x64 clang++ failed on $($SourcePaths[$i])" }
+    $objX64 += $obj
+  }
 
   Write-Host "== Link x64 ELF ==" -ForegroundColor Cyan
+  if (Test-Path -LiteralPath $elfOutX64) {
+    Remove-Item -LiteralPath $elfOutX64 -Force
+  }
   & $ld "-pie" "-nostdlib" "-e" "sacx_main" "-o" $elfOutX64 $objX64
   if ($LASTEXITCODE) { throw "x64 ld.lld failed" }
 }

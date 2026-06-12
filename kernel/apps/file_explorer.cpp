@@ -20,8 +20,8 @@ namespace
 {
     static const char *kFolderIcon = "[D]";
     static const char *kFileIcon = "[F]";
-    static const char *kImageViewerRawPath = "0:/OS/System/Programs/image_viewer.sacx";
-    static const char *kImageViewerFriendlyPath = "/OS/System/Programs/image_viewer.sacx";
+    static const char *kImageViewerRawPath = "0:/OS/System/Programs/Image Viewer/image_viewer.sacx";
+    static const char *kImageViewerFriendlyPath = "/OS/System/Programs/Image Viewer/image_viewer.sacx";
 
     static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
     {
@@ -206,7 +206,8 @@ namespace
         return has_extension_ci(name, ".bmp") ||
                has_extension_ci(name, ".png") ||
                has_extension_ci(name, ".jpg") ||
-               has_extension_ci(name, ".jpeg");
+               has_extension_ci(name, ".jpeg") ||
+               has_extension_ci(name, ".dimg");
     }
 
     class FileExplorer
@@ -241,6 +242,13 @@ namespace
             MODAL_RENAME,
             MODAL_DELETE_CONFIRM,
             MODAL_OPEN_WITH
+        };
+
+        enum BusyMode
+        {
+            BUSY_NONE = 0,
+            BUSY_DELETE,
+            BUSY_RELOAD
         };
 
         struct Entry
@@ -292,6 +300,11 @@ namespace
         void ActivateSelection(void);
         void RefreshDirectory(void);
         int ReloadDirectory(const char *preferred_name);
+        int BeginReload(const char *preferred_name, const char *success_text,
+                        kcolor success_color, const char *failure_text);
+        void UpdateBusy(void);
+        void InsertEntrySorted(const kdirent &entry);
+        void FinishBusy(const char *status, kcolor color);
         void SortEntries(void);
         int NavigateTo(const char *input);
         void OpenCreateFolderModal(void);
@@ -376,6 +389,15 @@ namespace
         int last_click_index_;
         uint32_t last_click_frame_;
         uint8_t truncated_;
+        BusyMode busy_mode_;
+        uint8_t busy_phase_;
+        KDir busy_dir_;
+        char busy_path_[DIHOS_PATH_CAP];
+        char busy_preferred_[256];
+        char busy_success_[STATUS_CAP];
+        char busy_failure_[STATUS_CAP];
+        kcolor busy_success_color_;
+        uint32_t busy_saved_cursor_;
         char current_dir_[DIHOS_PATH_CAP];
         char current_raw_[DIHOS_PATH_CAP];
         char status_buffer_[STATUS_CAP];
@@ -436,6 +458,14 @@ namespace
         last_click_frame_ = 0u;
         entry_count_ = 0;
         truncated_ = 0u;
+        busy_mode_ = BUSY_NONE;
+        busy_phase_ = 0u;
+        busy_path_[0] = 0;
+        busy_preferred_[0] = 0;
+        busy_success_[0] = 0;
+        busy_failure_[0] = 0;
+        busy_success_color_ = rgb(148, 232, 180);
+        busy_saved_cursor_ = KMOUSE_CURSOR_ARROW;
         layout_dirty_ = 1u;
         actions_dirty_ = 1u;
         rows_dirty_ = 1u;
@@ -1372,6 +1402,140 @@ namespace
         }
     }
 
+    void FileExplorer::InsertEntrySorted(const kdirent &entry)
+    {
+        Entry item;
+        int insert_at = entry_count_;
+
+        if (entry_count_ >= MAX_ENTRIES)
+        {
+            truncated_ = 1u;
+            return;
+        }
+
+        copy_text(item.name, sizeof(item.name), entry.name);
+        item.is_dir = entry.is_dir;
+        item.size = entry.size;
+        for (int i = 0; i < entry_count_; ++i)
+        {
+            if ((entries_[i].is_dir != item.is_dir && entries_[i].is_dir < item.is_dir) ||
+                (entries_[i].is_dir == item.is_dir && strcmp(entries_[i].name, item.name) > 0))
+            {
+                insert_at = i;
+                break;
+            }
+        }
+        for (int i = entry_count_; i > insert_at; --i)
+            entries_[i] = entries_[i - 1];
+        entries_[insert_at] = item;
+        ++entry_count_;
+    }
+
+    void FileExplorer::FinishBusy(const char *status, kcolor color)
+    {
+        busy_mode_ = BUSY_NONE;
+        busy_phase_ = 0u;
+        (void)kmouse_set_cursor((kmouse_cursor)busy_saved_cursor_);
+        actions_dirty_ = 1u;
+        rows_dirty_ = 1u;
+        if (status && status[0])
+            SetStatus(status, color);
+        else
+            ShowDefaultStatus();
+    }
+
+    int FileExplorer::BeginReload(const char *preferred_name, const char *success_text,
+                                  kcolor success_color, const char *failure_text)
+    {
+        if (busy_mode_ != BUSY_NONE)
+            return -1;
+        if (preferred_name && preferred_name[0])
+            copy_text(busy_preferred_, sizeof(busy_preferred_), preferred_name);
+        else if (selected_index_ >= 0 && selected_index_ < entry_count_)
+            copy_text(busy_preferred_, sizeof(busy_preferred_), entries_[selected_index_].name);
+        else
+            busy_preferred_[0] = 0;
+        copy_text(busy_success_, sizeof(busy_success_), success_text);
+        copy_text(busy_failure_, sizeof(busy_failure_), failure_text);
+        busy_success_color_ = success_color;
+        busy_saved_cursor_ = (uint32_t)kmouse_current_cursor();
+        busy_mode_ = BUSY_RELOAD;
+        busy_phase_ = 0u;
+        actions_dirty_ = 1u;
+        return 0;
+    }
+
+    void FileExplorer::UpdateBusy(void)
+    {
+        if (kwindow_point_can_receive_input(window_, kmouse_x(), kmouse_y()))
+            (void)kmouse_set_cursor(KMOUSE_CURSOR_WAIT);
+        else if (kmouse_current_cursor() == KMOUSE_CURSOR_WAIT)
+            (void)kmouse_set_cursor((kmouse_cursor)busy_saved_cursor_);
+
+        if (busy_mode_ == BUSY_DELETE)
+        {
+            if (busy_phase_++ == 0u)
+                return;
+            if (kfile_unlink(busy_path_) != 0)
+            {
+                FinishBusy("unable to delete entry", rgb(255, 140, 140));
+                return;
+            }
+            busy_mode_ = BUSY_RELOAD;
+            busy_phase_ = 0u;
+            return;
+        }
+
+        if (busy_mode_ != BUSY_RELOAD)
+            return;
+        if (busy_phase_ == 0u)
+        {
+            entry_count_ = 0;
+            selected_index_ = -1;
+            scroll_top_ = 0;
+            truncated_ = 0u;
+            rows_dirty_ = 1u;
+            if (kdir_open(&busy_dir_, current_raw_) != 0)
+            {
+                FinishBusy(busy_failure_, rgb(255, 140, 140));
+                return;
+            }
+            busy_phase_ = 1u;
+            return;
+        }
+
+        for (uint32_t count = 0u; count < 12u; ++count)
+        {
+            kdirent entry;
+            int rc = kdir_next(&busy_dir_, &entry);
+            if (rc < 0)
+            {
+                kdir_close(&busy_dir_);
+                FinishBusy(busy_failure_, rgb(255, 140, 140));
+                return;
+            }
+            if (rc == 0 || entry_count_ >= MAX_ENTRIES)
+            {
+                if (entry_count_ >= MAX_ENTRIES)
+                    truncated_ = 1u;
+                kdir_close(&busy_dir_);
+                if (busy_preferred_[0])
+                    for (int i = 0; i < entry_count_; ++i)
+                        if (strings_equal(entries_[i].name, busy_preferred_))
+                        {
+                            selected_index_ = i;
+                            break;
+                        }
+                EnsureSelectionVisible();
+                ResetDoubleClick();
+                FinishBusy(busy_success_, busy_success_color_);
+                return;
+            }
+            InsertEntrySorted(entry);
+        }
+        rows_dirty_ = 1u;
+    }
+
     int FileExplorer::ReloadDirectory(const char *preferred_name)
     {
         KDir dir;
@@ -1483,30 +1647,31 @@ namespace
         copy_text(current_raw_, sizeof(current_raw_), raw);
         ktextbox_set_text(path_box_, current_dir_);
 
-        if (ReloadDirectory(0) != 0)
+        SetStatus("Opening directory...", rgb(182, 198, 220));
+        if (BeginReload(0, "", rgb(182, 198, 220), "unable to open directory") != 0)
         {
             SetStatus("unable to open directory", rgb(255, 140, 140));
             return -1;
         }
-
-        ShowDefaultStatus();
         return 0;
     }
 
     void FileExplorer::RefreshDirectory(void)
     {
-        if (ReloadDirectory(0) != 0)
+        SetStatus("Refreshing...", rgb(182, 198, 220));
+        if (BeginReload(0, "directory refreshed", rgb(148, 232, 180),
+                        "unable to refresh directory") != 0)
         {
             SetStatus("unable to refresh directory", rgb(255, 140, 140));
             return;
         }
-
-        ShowDefaultStatus();
     }
 
     void FileExplorer::SyncActionStates(void)
     {
         uint8_t modal_active = modal_mode_ != MODAL_NONE;
+        uint8_t busy_active = busy_mode_ != BUSY_NONE;
+        uint8_t input_blocked = (modal_active || busy_active) ? 1u : 0u;
         uint8_t dialog_active = dialog_mode_ != FILE_EXPLORER_DIALOG_NONE;
         uint8_t save_dialog = dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE;
         uint8_t has_selection = (selected_index_ >= 0 && selected_index_ < entry_count_) ? 1u : 0u;
@@ -1514,26 +1679,26 @@ namespace
         uint8_t is_root = strings_equal(current_dir_, "/") ? 1u : 0u;
 
         RefreshActionLabels();
-        ktextbox_set_enabled(path_box_, modal_active ? 0u : 1u);
-        kbutton_set_enabled(up_button_.button, (!modal_active && !is_root) ? 1u : 0u);
-        kbutton_set_enabled(refresh_button_.button, modal_active ? 0u : 1u);
-        kbutton_set_enabled(new_folder_button_.button, modal_active ? 0u : 1u);
-        kbutton_set_enabled(new_file_button_.button, modal_active ? 0u : 1u);
-        kbutton_set_enabled(open_with_button_.button, (!dialog_active && !modal_active && selected_file) ? 1u : 0u);
-        kbutton_set_enabled(rename_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
-        kbutton_set_enabled(delete_button_.button, (!dialog_active && !modal_active && has_selection) ? 1u : 0u);
+        ktextbox_set_enabled(path_box_, input_blocked ? 0u : 1u);
+        kbutton_set_enabled(up_button_.button, (!input_blocked && !is_root) ? 1u : 0u);
+        kbutton_set_enabled(refresh_button_.button, input_blocked ? 0u : 1u);
+        kbutton_set_enabled(new_folder_button_.button, input_blocked ? 0u : 1u);
+        kbutton_set_enabled(new_file_button_.button, input_blocked ? 0u : 1u);
+        kbutton_set_enabled(open_with_button_.button, (!dialog_active && !input_blocked && selected_file) ? 1u : 0u);
+        kbutton_set_enabled(rename_button_.button, (!dialog_active && !input_blocked && has_selection) ? 1u : 0u);
+        kbutton_set_enabled(delete_button_.button, (!dialog_active && !input_blocked && has_selection) ? 1u : 0u);
 
         SetButtonVisible(open_with_button_, dialog_active ? 0u : 1u);
         SetButtonVisible(rename_button_, dialog_active ? 0u : 1u);
         SetButtonVisible(delete_button_, dialog_active ? 0u : 1u);
         SetObjectVisible(dialog_name_label_, save_dialog ? 1u : 0u);
         SetTextboxVisible(dialog_name_box_, save_dialog ? 1u : 0u);
-        ktextbox_set_enabled(dialog_name_box_, (save_dialog && !modal_active) ? 1u : 0u);
+        ktextbox_set_enabled(dialog_name_box_, (save_dialog && !input_blocked) ? 1u : 0u);
 
         for (int i = 0; i < MAX_VISIBLE_ROWS; ++i)
         {
             if (rows_[i].entry_index >= 0 && i < visible_rows_)
-                kbutton_set_enabled(rows_[i].button, modal_active ? 0u : 1u);
+                kbutton_set_enabled(rows_[i].button, input_blocked ? 0u : 1u);
             else
                 kbutton_set_enabled(rows_[i].button, 0u);
         }
@@ -1771,11 +1936,11 @@ namespace
         if (terminal_open_program_with_arg_ex(kImageViewerRawPath, kImageViewerFriendlyPath,
                                               raw, friendly, TERMINAL_OPEN_FLAG_NO_WINDOW) != 0)
         {
-            SetStatus("unable to open image viewer", rgb(255, 140, 140));
+            SetStatus("unable to open image editor", rgb(255, 140, 140));
             return;
         }
 
-        SetStatus("opening image viewer", rgb(148, 232, 180));
+        SetStatus("opening image editor", rgb(148, 232, 180));
     }
 
     void FileExplorer::OpenSelectedInTextEditor(void)
@@ -1919,7 +2084,7 @@ namespace
         if (SelectedIsSacScript())
             OpenModal(MODAL_OPEN_WITH, "Open With", body, "Run", 0);
         else if (SelectedIsImage())
-            OpenModal(MODAL_OPEN_WITH, "Open With", body, "Image Viewer", 0);
+            OpenModal(MODAL_OPEN_WITH, "Open With", body, "Image Editor", 0);
         else
             OpenModal(MODAL_OPEN_WITH, "Open With", body, "Text Editor", 0);
 
@@ -1958,15 +2123,14 @@ namespace
             return;
         }
 
-        if (ReloadDirectory(name) != 0)
+        CloseModal();
+        SetStatus("Refreshing...", rgb(182, 198, 220));
+        if (BeginReload(name, "folder created", rgb(148, 232, 180),
+                        "folder created but refresh failed") != 0)
         {
             SetStatus("folder created but refresh failed", rgb(255, 214, 120));
-            CloseModal();
             return;
         }
-
-        CloseModal();
-        SetStatus("folder created", rgb(148, 232, 180));
     }
 
     void FileExplorer::ApplyCreateFile(void)
@@ -2001,15 +2165,14 @@ namespace
 
         kfile_close(&file);
 
-        if (ReloadDirectory(name) != 0)
+        CloseModal();
+        SetStatus("Refreshing...", rgb(182, 198, 220));
+        if (BeginReload(name, "file created", rgb(148, 232, 180),
+                        "file created but refresh failed") != 0)
         {
             SetStatus("file created but refresh failed", rgb(255, 214, 120));
-            CloseModal();
             return;
         }
-
-        CloseModal();
-        SetStatus("file created", rgb(148, 232, 180));
     }
 
     void FileExplorer::ApplyRename(void)
@@ -2053,15 +2216,14 @@ namespace
             return;
         }
 
-        if (ReloadDirectory(new_name) != 0)
+        CloseModal();
+        SetStatus("Refreshing...", rgb(182, 198, 220));
+        if (BeginReload(new_name, "entry renamed", rgb(148, 232, 180),
+                        "rename worked but refresh failed") != 0)
         {
             SetStatus("rename worked but refresh failed", rgb(255, 214, 120));
-            CloseModal();
             return;
         }
-
-        CloseModal();
-        SetStatus("entry renamed", rgb(148, 232, 180));
     }
 
     void FileExplorer::ApplyDelete(void)
@@ -2084,21 +2246,17 @@ namespace
             return;
         }
 
-        if (kfile_unlink(raw) != 0)
-        {
-            copy_text(modal_error_buffer_, sizeof(modal_error_buffer_), "unable to delete entry");
-            return;
-        }
-
-        if (ReloadDirectory(0) != 0)
-        {
-            SetStatus("delete worked but refresh failed", rgb(255, 214, 120));
-            CloseModal();
-            return;
-        }
-
         CloseModal();
-        SetStatus("entry deleted", rgb(148, 232, 180));
+        copy_text(busy_path_, sizeof(busy_path_), raw);
+        busy_preferred_[0] = 0;
+        copy_text(busy_success_, sizeof(busy_success_), "entry deleted");
+        copy_text(busy_failure_, sizeof(busy_failure_), "delete worked but refresh failed");
+        busy_success_color_ = rgb(148, 232, 180);
+        busy_saved_cursor_ = (uint32_t)kmouse_current_cursor();
+        busy_mode_ = BUSY_DELETE;
+        busy_phase_ = 0u;
+        actions_dirty_ = 1u;
+        SetStatus("Deleting...", rgb(255, 214, 120));
     }
 
     void FileExplorer::CommitModal(void)
@@ -2261,11 +2419,23 @@ namespace
             layout_dirty_ = 1u;
         }
 
+        if (layout_dirty_)
+            Layout();
+        if (busy_mode_ != BUSY_NONE)
+        {
+            if (actions_dirty_)
+                SyncActionStates();
+            UpdateBusy();
+            if (rows_dirty_)
+                SyncRows();
+            if (actions_dirty_)
+                SyncActionStates();
+            return;
+        }
+
         if (modal_mode_ != MODAL_NONE && kinput_key_pressed(KEY_ESCAPE))
             CloseModal();
 
-        if (layout_dirty_)
-            Layout();
         HandleMouseWheel();
         if (rows_dirty_)
             SyncRows();

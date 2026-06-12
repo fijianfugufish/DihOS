@@ -8,6 +8,7 @@ extern "C"
 #endif
 
     struct kfont;
+    typedef struct kimg kimg;
 
     typedef void (*sacx_runtime_print_fn)(const char *text, void *user);
     typedef void (*sacx_runtime_console_visible_fn)(uint8_t visible, void *user);
@@ -51,6 +52,11 @@ extern "C"
                                const char *arg_friendly_path,
                                const sacx_runtime_io *io,
                                uint32_t *out_task_id);
+    int sacx_runtime_launch_image(const char *raw_path,
+                                  const char *friendly_path,
+                                  const kimg *image,
+                                  const sacx_runtime_io *io,
+                                  uint32_t *out_task_id);
 
     int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_status);
     int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message);

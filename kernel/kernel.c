@@ -14,6 +14,7 @@
 #include "kwrappers/kwindow.h"
 #include "system/dihos_time.h"
 #include "apps/desktop_shell_api.h"
+#include "apps/screenshot_service.h"
 #include "apps/file_explorer_api.h"
 #include "apps/sacx_runtime.h"
 #include "apps/text_editor_api.h"
@@ -279,6 +280,7 @@ void kmain(boot_info *bi)
         terminal_warn("cursor not loaded");
     }
     kmouse_set_sensitivity_pct(500);
+    screenshot_service_init(have_font ? &font : 0);
 
     kgfx_render_all(black);
 
@@ -292,13 +294,16 @@ void kmain(boot_info *bi)
 
         kinput_poll();
         kmouse_update();
-        kwindow_update_all();
-        file_explorer_update();
-        text_editor_update();
-        desktop_shell_update();
-        kbutton_update_all();
-        ktextbox_update_all();
-        terminal_update_input();
+        if (!screenshot_service_update())
+        {
+            kwindow_update_all();
+            file_explorer_update();
+            text_editor_update();
+            desktop_shell_update();
+            kbutton_update_all();
+            ktextbox_update_all();
+            terminal_update_input();
+        }
 
         kgfx_render_all(black);
         sacx_runtime_update();

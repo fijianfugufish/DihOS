@@ -2,6 +2,7 @@
 #include "usb/ff.h"
 #include "usb/diskio.h"
 #include "usb/blockdev.h"
+#include "system/kbusy.h"
 
 static FATFS g_fs;
 static blockdev_t *g_bd = 0;
@@ -171,7 +172,14 @@ void kfile_close(KFile *f)
         f_close(&f->fil);
 }
 
-int kfile_unlink(const char *p) { return (f_unlink(p) == FR_OK) ? 0 : -1; }
+int kfile_unlink(const char *p)
+{
+    int rc;
+    kbusy_begin();
+    rc = (f_unlink(p) == FR_OK) ? 0 : -1;
+    kbusy_end();
+    return rc;
+}
 int kfile_rename(const char *a, const char *b) { return (f_rename(a, b) == FR_OK) ? 0 : -1; }
 int kfile_mkdir(const char *p) { return (f_mkdir(p) == FR_OK) ? 0 : -1; }
 

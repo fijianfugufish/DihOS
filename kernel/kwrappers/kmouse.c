@@ -70,6 +70,7 @@ static uint8_t kmouse_cursor_needs_bw_invert(kmouse_cursor cursor)
     case KMOUSE_CURSOR_SIZE3:
     case KMOUSE_CURSOR_SIZE4:
     case KMOUSE_CURSOR_BEAM:
+    case KMOUSE_CURSOR_CROSS:
         return 1u;
     default:
         return 0u;
@@ -833,6 +834,14 @@ void kmouse_set_sensitivity_pct(uint32_t pct)
 uint32_t kmouse_sensitivity_pct(void)
 {
     return G.sensitivity_pct;
+}
+
+void kmouse_set_visible(uint8_t visible)
+{
+    kgfx_obj *cursor_obj = kgfx_obj_ref(G.cursor_handle);
+    G.state.visible = visible ? 1u : 0u;
+    if (cursor_obj)
+        cursor_obj->visible = G.state.visible;
 }
 
 void kmouse_update(void)

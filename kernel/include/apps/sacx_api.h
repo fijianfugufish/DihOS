@@ -34,6 +34,13 @@ extern "C"
 
     enum
     {
+        SACX_IMG_FORMAT_PNG = 1,
+        SACX_IMG_FORMAT_JPEG = 2,
+        SACX_IMG_FORMAT_BMP = 3,
+    };
+
+    enum
+    {
         SACX_MOUSE_CURSOR_ARROW = 0,
         SACX_MOUSE_CURSOR_BEAM,
         SACX_MOUSE_CURSOR_WAIT,
@@ -506,6 +513,24 @@ extern "C"
                                           sacx_color bg_color, uint8_t bg_alpha,
                                           uint32_t scale, uint32_t *out_instance);
         int (*k3d_instance_set_casts_shadow)(uint32_t scene_handle, uint32_t instance_handle, uint32_t casts_shadow);
+
+        /* ABI v1 append-only image editing extension. Check struct_size before use. */
+        int (*img_create)(uint32_t w, uint32_t h, uint32_t argb, uint32_t *out_image_handle);
+        int (*img_clone)(uint32_t image_handle, uint32_t *out_image_handle);
+        int (*img_pixels)(uint32_t image_handle, uint32_t **out_argb, uint32_t *out_stride_px);
+        int (*img_touch)(uint32_t image_handle);
+        int (*img_save)(uint32_t image_handle, const char *path, uint32_t format, uint32_t quality);
+        int (*img_draw_text)(uint32_t image_handle, int32_t x, int32_t y, const char *text,
+                             sacx_color color, uint8_t alpha, uint32_t scale);
+        int (*img_clipboard_set)(uint32_t image_handle);
+        int (*img_clipboard_get)(uint32_t *out_image_handle);
+        uint32_t (*app_arg_image)(void);
+        int (*dialog_save_file)(const char *initial_dir, const char *suggested_name,
+                                sacx_file_dialog_fn on_result, void *user);
+        int (*window_set_close_deferred)(uint32_t window_handle, uint32_t deferred);
+        int (*window_close_requested)(uint32_t window_handle);
+        int (*window_close_accept)(uint32_t window_handle);
+        int (*window_close_cancel)(uint32_t window_handle);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

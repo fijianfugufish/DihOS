@@ -3,7 +3,7 @@
 #include "kwrappers/kwindow.h"
 
 #ifndef KBUTTON_MAX
-#define KBUTTON_MAX 128
+#define KBUTTON_MAX 256
 #endif
 
 #define KBUTTON_MOUSE_LEFT 0x01u
@@ -37,6 +37,9 @@ typedef struct
 
 static kbutton_slot G_buttons[KBUTTON_MAX];
 static uint8_t G_prev_buttons = 0;
+static uint8_t G_prev_hovered[KBUTTON_MAX];
+static uint8_t G_prev_pressed[KBUTTON_MAX];
+static kbutton_resolved_rect G_resolved[KBUTTON_MAX];
 
 static inline int32_t kbutton_max_i32(int32_t a, int32_t b)
 {
@@ -284,11 +287,8 @@ void kbutton_update_all(void)
     uint8_t left_now = 0;
     uint8_t left_pressed = 0;
     uint8_t left_released = 0;
-    uint8_t prev_hovered[KBUTTON_MAX];
-    uint8_t prev_pressed[KBUTTON_MAX];
     int hovered_idx = -1;
     int32_t hovered_z = 0;
-    kbutton_resolved_rect resolved[KBUTTON_MAX];
 
     kmouse_get_state(&mouse);
 
@@ -300,23 +300,23 @@ void kbutton_update_all(void)
     {
         int inside = 0;
 
-        prev_hovered[i] = G_buttons[i].hovered;
-        prev_pressed[i] = G_buttons[i].pressed;
-        resolved[i] = (kbutton_resolved_rect){0};
+        G_prev_hovered[i] = G_buttons[i].hovered;
+        G_prev_pressed[i] = G_buttons[i].pressed;
+        G_resolved[i] = (kbutton_resolved_rect){0};
         G_buttons[i].hovered = 0;
 
-        if (!kbutton_resolve_root_bounds(&G_buttons[i], &resolved[i]))
+        if (!kbutton_resolve_root_bounds(&G_buttons[i], &G_resolved[i]))
             continue;
 
-        inside = mouse.x >= resolved[i].clip.x0 && mouse.y >= resolved[i].clip.y0 &&
-                 mouse.x < resolved[i].clip.x1 && mouse.y < resolved[i].clip.y1;
+        inside = mouse.x >= G_resolved[i].clip.x0 && mouse.y >= G_resolved[i].clip.y0 &&
+                 mouse.x < G_resolved[i].clip.x1 && mouse.y < G_resolved[i].clip.y1;
         if (inside && !kwindow_obj_can_receive_input(G_buttons[i].root, mouse.x, mouse.y))
             inside = 0;
 
-        if (inside && (hovered_idx < 0 || resolved[i].z >= hovered_z))
+        if (inside && (hovered_idx < 0 || G_resolved[i].z >= hovered_z))
         {
             hovered_idx = (int)i;
-            hovered_z = resolved[i].z;
+            hovered_z = G_resolved[i].z;
         }
     }
 
@@ -351,8 +351,8 @@ void kbutton_update_all(void)
 
     for (uint32_t i = 0; i < KBUTTON_MAX; ++i)
         if (G_buttons[i].used &&
-            (G_buttons[i].hovered != prev_hovered[i] ||
-             G_buttons[i].pressed != prev_pressed[i]))
+            (G_buttons[i].hovered != G_prev_hovered[i] ||
+             G_buttons[i].pressed != G_prev_pressed[i]))
             kbutton_apply_visual(&G_buttons[i]);
 
     G_prev_buttons = mouse.buttons;

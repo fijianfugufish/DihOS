@@ -207,7 +207,7 @@ const kfb *kgfx_info(void) { return &FB; }
 /* =================== scene + backbuffer =================== */
 
 #ifndef KGFX_MAX_OBJS
-#define KGFX_MAX_OBJS 512
+#define KGFX_MAX_OBJS 1024
 #endif
 
 #ifndef KGFX_DIRTY_TILE_SIZE
@@ -295,6 +295,10 @@ static uint8_t *BB_ptr = NULL;
 static uint32_t BB_stride = 0;
 static uint64_t BB_bytes = 0;
 static kgfx_clip_rect g_bb_clip = {0, 0, 0, 0, 0};
+static uint32_t *G_argb_target = 0;
+static uint32_t G_argb_target_w = 0u;
+static uint32_t G_argb_target_h = 0u;
+static uint32_t G_argb_target_stride = 0u;
 
 typedef struct
 {
@@ -328,6 +332,10 @@ typedef struct
 } kgfx_image_cache;
 
 static kgfx_image_cache g_image_cache[KGFX_MAX_OBJS];
+static kgfx_resolved_obj g_render_resolved[KGFX_MAX_OBJS];
+static kgfx_render_entry g_render_entries[KGFX_MAX_OBJS];
+static kgfx_render_entry g_render_sort_tmp[KGFX_MAX_OBJS];
+static kgfx_obj_snapshot g_render_current[KGFX_MAX_OBJS];
 
 static int kgfx_image_cache_key_matches(const kgfx_image_cache *cache,
                                         const uint32_t *argb,
@@ -1527,6 +1535,45 @@ static inline uint32_t blend_over(uint32_t dst, uint8_t sr, uint8_t sg, uint8_t 
 
 void kgfx_put_px_blend(int x, int y, kcolor c, uint8_t a)
 {
+    if (G_argb_target)
+    {
+        uint32_t *pixel = 0;
+        uint32_t dst = 0u;
+        uint32_t da = 0u;
+        uint32_t out_a = 0u;
+        uint32_t inv = 0u;
+        uint32_t dr = 0u;
+        uint32_t dg = 0u;
+        uint32_t db = 0u;
+        uint32_t out_r = 0u;
+        uint32_t out_g = 0u;
+        uint32_t out_b = 0u;
+
+        if (a == 0u || x < 0 || y < 0 ||
+            x >= (int32_t)G_argb_target_w || y >= (int32_t)G_argb_target_h)
+            return;
+
+        pixel = G_argb_target + (uint64_t)(uint32_t)y * G_argb_target_stride + (uint32_t)x;
+        dst = *pixel;
+        da = dst >> 24;
+        dr = (dst >> 16) & 0xFFu;
+        dg = (dst >> 8) & 0xFFu;
+        db = dst & 0xFFu;
+        inv = 255u - a;
+        out_a = a + (da * inv + 127u) / 255u;
+        if (!out_a)
+        {
+            *pixel = 0u;
+            return;
+        }
+
+        out_r = ((uint32_t)c.r * a + (dr * da * inv + 127u) / 255u + out_a / 2u) / out_a;
+        out_g = ((uint32_t)c.g * a + (dg * da * inv + 127u) / 255u + out_a / 2u) / out_a;
+        out_b = ((uint32_t)c.b * a + (db * da * inv + 127u) / 255u + out_a / 2u) / out_a;
+        *pixel = (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
+        return;
+    }
+
     if (a == 0)
         return;
     if (x < 0 || y < 0 || x >= (int)FB.width || y >= (int)FB.height)
@@ -1556,6 +1603,51 @@ void kgfx_put_px_blend(int x, int y, kcolor c, uint8_t a)
     uint8_t ob = (uint8_t)((c.b * a + db * inv + 127) / 255);
 
     *pix = ((uint32_t)or_ << sR) | ((uint32_t)og << sG) | ((uint32_t)ob << sB);
+}
+
+int kgfx_target_argb_begin(uint32_t *argb, uint32_t w, uint32_t h, uint32_t stride_px)
+{
+    if (!argb || !w || !h || stride_px < w || G_argb_target)
+        return -1;
+    G_argb_target = argb;
+    G_argb_target_w = w;
+    G_argb_target_h = h;
+    G_argb_target_stride = stride_px;
+    return 0;
+}
+
+void kgfx_target_argb_end(void)
+{
+    G_argb_target = 0;
+    G_argb_target_w = 0u;
+    G_argb_target_h = 0u;
+    G_argb_target_stride = 0u;
+}
+
+int kgfx_capture_argb(uint32_t *dst, uint32_t dst_stride_px,
+                      int32_t x, int32_t y, uint32_t w, uint32_t h)
+{
+    if (!dst || dst_stride_px < w || !w || !h || !BB_ptr)
+        return -1;
+    if (x < 0 || y < 0 ||
+        (uint64_t)(uint32_t)x + w > FB.width ||
+        (uint64_t)(uint32_t)y + h > FB.height)
+        return -1;
+
+    for (uint32_t iy = 0u; iy < h; ++iy)
+    {
+        const uint32_t *src_row = (const uint32_t *)(BB_ptr + ((uint32_t)y + iy) * BB_stride) + (uint32_t)x;
+        uint32_t *dst_row = dst + (uint64_t)iy * dst_stride_px;
+        for (uint32_t ix = 0u; ix < w; ++ix)
+        {
+            uint32_t pixel = src_row[ix];
+            uint32_t r = (pixel & mR) >> sR;
+            uint32_t g = (pixel & mG) >> sG;
+            uint32_t b = (pixel & mB) >> sB;
+            dst_row[ix] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    }
+    return 0;
 }
 
 // fast span blender for a constant src color+alpha
@@ -2630,7 +2722,6 @@ static void sort_render_entries(kgfx_render_entry *entries, uint16_t n,
         return;
     }
 
-    kgfx_render_entry tmp[KGFX_MAX_OBJS];
     for (uint16_t width = 1; width < n; width <<= 1)
     {
         uint16_t out = 0;
@@ -2643,17 +2734,17 @@ static void sort_render_entries(kgfx_render_entry *entries, uint16_t n,
             while (a < M && b < R)
             {
                 if (render_entry_cmp(&entries[a], &entries[b], resolved) <= 0)
-                    tmp[out++] = entries[a++];
+                    g_render_sort_tmp[out++] = entries[a++];
                 else
-                    tmp[out++] = entries[b++];
+                    g_render_sort_tmp[out++] = entries[b++];
             }
             while (a < M)
-                tmp[out++] = entries[a++];
+                g_render_sort_tmp[out++] = entries[a++];
             while (b < R)
-                tmp[out++] = entries[b++];
+                g_render_sort_tmp[out++] = entries[b++];
         }
         for (uint16_t i = 0; i < n; ++i)
-            entries[i] = tmp[i];
+            entries[i] = g_render_sort_tmp[i];
     }
 }
 
@@ -3090,9 +3181,9 @@ static void store_prev_snapshots(const kgfx_obj_snapshot *current, uint16_t coun
 
 void kgfx_render_all(kcolor clear_color)
 {
-    kgfx_resolved_obj resolved[KGFX_MAX_OBJS] = {0};
-    kgfx_render_entry entries[KGFX_MAX_OBJS];
-    kgfx_obj_snapshot current[KGFX_MAX_OBJS] = {0};
+    kgfx_resolved_obj *resolved = g_render_resolved;
+    kgfx_render_entry *entries = g_render_entries;
+    kgfx_obj_snapshot *current = g_render_current;
     kgfx_dirty_tiles dirty_tiles;
     kgfx_clip_rect full = fb_clip_rect();
     uint8_t full_redraw = 0;
@@ -3100,6 +3191,11 @@ void kgfx_render_all(kcolor clear_color)
     if (!BB_ptr)
         return;
 
+    for (uint16_t i = 0; i < g_obj_count; ++i)
+    {
+        resolved[i] = (kgfx_resolved_obj){0};
+        current[i] = (kgfx_obj_snapshot){0};
+    }
     dirty_tiles_init(&dirty_tiles);
 
     // 1) collect visible objects and build visual snapshots

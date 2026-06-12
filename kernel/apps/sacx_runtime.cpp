@@ -22,6 +22,7 @@ extern "C"
 #include "kwrappers/string.h"
 #include "memory/pmem.h"
 #include "system/dihos_time.h"
+#include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
 }
 
@@ -32,7 +33,7 @@ extern "C"
 #define SACX_MAX_TASK_BUTTONS 64u
 #define SACX_MAX_TASK_TEXTBOXES 32u
 #define SACX_MAX_TASK_GFX_OBJECTS 512u
-#define SACX_MAX_TASK_IMAGES 32u
+#define SACX_MAX_TASK_IMAGES 128u
 #define SACX_MAX_TASK_3D_SCENES 8u
 #define SACX_MAX_TASK_3D_PLAYERS 8u
 #define SACX_MAX_SEGMENTS 128u
@@ -147,6 +148,7 @@ typedef struct sacx_task
     char friendly_path[256];
     char launch_arg_raw[256];
     char launch_arg_friendly[256];
+    uint32_t launch_arg_image;
 
     sacx_file_slot files[SACX_MAX_TASK_FILES];
     sacx_dir_slot dirs[SACX_MAX_TASK_DIRS];
@@ -461,6 +463,20 @@ static const char *G_known_imports[] = {
     "k3d_scene_apply_default_world",
     "k3d_scene_add_room",
     "k3d_scene_add_obstacle_cube",
+    "img_create",
+    "img_clone",
+    "img_pixels",
+    "img_touch",
+    "img_save",
+    "img_draw_text",
+    "img_clipboard_set",
+    "img_clipboard_get",
+    "app_arg_image",
+    "dialog_save_file",
+    "window_set_close_deferred",
+    "window_close_requested",
+    "window_close_accept",
+    "window_close_cancel",
 };
 
 static int sacx_import_known(const char *name)
@@ -1502,6 +1518,33 @@ static int sacx_api_dialog_open_file(const char *initial_dir,
     return 0;
 }
 
+static int sacx_api_dialog_save_file(const char *initial_dir,
+                                     const char *suggested_name,
+                                     sacx_file_dialog_fn on_result,
+                                     void *user)
+{
+    if (!G_current_task || !on_result)
+        return -1;
+    if (!sacx_ptr_in_image(G_current_task, (const void *)on_result))
+        return -1;
+    if (file_explorer_dialog_active())
+        return -1;
+
+    G_current_task->dialog_callback = on_result;
+    G_current_task->dialog_user = user;
+    if (file_explorer_begin_dialog(FILE_EXPLORER_DIALOG_SAVE_FILE,
+                                   (initial_dir && initial_dir[0]) ? initial_dir : "/",
+                                   suggested_name,
+                                   sacx_file_dialog_trampoline,
+                                   G_current_task) != 0)
+    {
+        G_current_task->dialog_callback = 0;
+        G_current_task->dialog_user = 0;
+        return -1;
+    }
+    return 0;
+}
+
 static int sacx_api_dialog_active(void)
 {
     return file_explorer_dialog_active();
@@ -1571,6 +1614,13 @@ static const char *sacx_api_app_arg_friendly_path(void)
     if (!G_current_task)
         return "";
     return G_current_task->launch_arg_friendly;
+}
+
+static uint32_t sacx_api_app_arg_image(void)
+{
+    if (!G_current_task)
+        return 0u;
+    return G_current_task->launch_arg_image;
 }
 
 static sacx_file_slot *sacx_file_from_handle(sacx_task *task, uint32_t handle)
@@ -1812,6 +1862,38 @@ static int sacx_api_window_focused(uint32_t handle)
     if (!slot)
         return 0;
     return kwindow_focused(slot->handle);
+}
+
+static int sacx_api_window_set_close_deferred(uint32_t handle, uint32_t deferred)
+{
+    sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
+    if (!slot)
+        return -1;
+    return kwindow_set_close_deferred(slot->handle, deferred ? 1u : 0u);
+}
+
+static int sacx_api_window_close_requested(uint32_t handle)
+{
+    sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
+    if (!slot)
+        return 0;
+    return kwindow_close_requested(slot->handle);
+}
+
+static int sacx_api_window_close_accept(uint32_t handle)
+{
+    sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
+    if (!slot)
+        return -1;
+    return kwindow_close_accept(slot->handle);
+}
+
+static int sacx_api_window_close_cancel(uint32_t handle)
+{
+    sacx_window_slot *slot = sacx_window_from_handle(G_current_task, handle);
+    if (!slot)
+        return -1;
+    return kwindow_close_cancel(slot->handle);
 }
 
 static int sacx_api_window_raise(uint32_t handle)
@@ -2686,9 +2768,16 @@ static uint32_t sacx_api_text_scale_mul_px(uint32_t px, uint32_t scale)
     return ktext_scale_mul_px(px, scale ? scale : 1u);
 }
 
+static uint64_t sacx_task_image_bytes(const sacx_task *task);
+
 static int sacx_api_img_register_loaded(kimg *image, uint32_t *out_image_handle)
 {
+    uint64_t bytes = 0u;
     if (!G_current_task || !image || !image->px || !out_image_handle)
+        return -1;
+    bytes = (uint64_t)image->w * image->h * 4ull;
+    if (!bytes || image->w > 8192u || image->h > 8192u ||
+        sacx_task_image_bytes(G_current_task) + bytes > 256ull * 1024ull * 1024ull)
         return -1;
 
     for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
@@ -2700,6 +2789,40 @@ static int sacx_api_img_register_loaded(kimg *image, uint32_t *out_image_handle)
         *out_image_handle = i + 1u;
         return 0;
     }
+    return -1;
+}
+
+static int sacx_task_register_image_copy(sacx_task *task, const kimg *source, uint32_t *out_image_handle)
+{
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+    uint32_t *pixels = 0;
+
+    if (!task || !source || !source->px || !source->w || !source->h || !out_image_handle)
+        return -1;
+    bytes = (uint64_t)source->w * source->h * 4ull;
+    if (!bytes || source->w > 8192u || source->h > 8192u ||
+        sacx_task_image_bytes(task) + bytes > 256ull * 1024ull * 1024ull)
+        return -1;
+    pages = (bytes + 4095ull) >> 12;
+    pixels = (uint32_t *)pmem_alloc_pages(pages);
+    if (!pixels)
+        return -1;
+    memcpy(pixels, source->px, (size_t)bytes);
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
+    {
+        if (task->images[i].used)
+            continue;
+        task->images[i].used = 1u;
+        task->images[i].image.px = pixels;
+        task->images[i].image.w = source->w;
+        task->images[i].image.h = source->h;
+        *out_image_handle = i + 1u;
+        return 0;
+    }
+
+    pmem_free_pages(pixels, pages);
     return -1;
 }
 
@@ -2856,6 +2979,151 @@ static int sacx_api_img_size(uint32_t image_handle, uint32_t *out_w, uint32_t *o
         return -1;
     *out_w = slot->image.w;
     *out_h = slot->image.h;
+    return 0;
+}
+
+static uint64_t sacx_task_image_bytes(const sacx_task *task)
+{
+    uint64_t total = 0u;
+    if (!task)
+        return 0u;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
+    {
+        if (task->images[i].used)
+            total += (uint64_t)task->images[i].image.w * task->images[i].image.h * 4ull;
+    }
+    return total;
+}
+
+static int sacx_api_img_create(uint32_t w, uint32_t h, uint32_t argb, uint32_t *out_image_handle)
+{
+    kimg image = {0};
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+
+    if (!G_current_task || !out_image_handle || !w || !h || w > 8192u || h > 8192u)
+        return -1;
+    bytes = (uint64_t)w * h * 4ull;
+    if (!bytes || bytes > 256ull * 1024ull * 1024ull ||
+        sacx_task_image_bytes(G_current_task) + bytes > 256ull * 1024ull * 1024ull)
+        return -1;
+    pages = (bytes + 4095ull) >> 12;
+    image.px = (uint32_t *)pmem_alloc_pages(pages);
+    if (!image.px)
+        return -1;
+    image.w = w;
+    image.h = h;
+    for (uint64_t i = 0u; i < (uint64_t)w * h; ++i)
+        image.px[i] = argb;
+    if (sacx_api_img_register_loaded(&image, out_image_handle) != 0)
+    {
+        pmem_free_pages(image.px, pages);
+        return -1;
+    }
+    return 0;
+}
+
+static int sacx_api_img_clone(uint32_t image_handle, uint32_t *out_image_handle)
+{
+    sacx_image_slot *source = sacx_image_from_handle(G_current_task, image_handle);
+    kimg image = {0};
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+
+    if (!source || !source->image.px || !out_image_handle)
+        return -1;
+    bytes = (uint64_t)source->image.w * source->image.h * 4ull;
+    if (!bytes || sacx_task_image_bytes(G_current_task) + bytes > 256ull * 1024ull * 1024ull)
+        return -1;
+    pages = (bytes + 4095ull) >> 12;
+    image.px = (uint32_t *)pmem_alloc_pages(pages);
+    if (!image.px)
+        return -1;
+    memcpy(image.px, source->image.px, (size_t)bytes);
+    image.w = source->image.w;
+    image.h = source->image.h;
+    if (sacx_api_img_register_loaded(&image, out_image_handle) != 0)
+    {
+        pmem_free_pages(image.px, pages);
+        return -1;
+    }
+    return 0;
+}
+
+static int sacx_api_img_pixels(uint32_t image_handle, uint32_t **out_argb, uint32_t *out_stride_px)
+{
+    sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    if (!slot || !slot->image.px || !out_argb || !out_stride_px)
+        return -1;
+    *out_argb = slot->image.px;
+    *out_stride_px = slot->image.w;
+    return 0;
+}
+
+static int sacx_api_img_touch(uint32_t image_handle)
+{
+    sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    if (!slot || !slot->image.px)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
+    {
+        kgfx_obj *obj = 0;
+        if (!G_current_task->gfx_objects[i].used)
+            continue;
+        obj = kgfx_obj_ref(G_current_task->gfx_objects[i].handle);
+        if (obj && obj->kind == KGFX_OBJ_IMAGE && obj->u.image.argb == slot->image.px)
+            kgfx_image_touch(G_current_task->gfx_objects[i].handle);
+    }
+    return 0;
+}
+
+static int sacx_api_img_save(uint32_t image_handle, const char *path, uint32_t format, uint32_t quality)
+{
+    sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    if (!slot || !slot->image.px || !path || !path[0])
+        return -1;
+    return kimg_save(&slot->image, path, format, quality);
+}
+
+static int sacx_api_img_draw_text(uint32_t image_handle, int32_t x, int32_t y, const char *text,
+                                  sacx_color color, uint8_t alpha, uint32_t scale)
+{
+    sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    if (!slot || !slot->image.px || !G_runtime_font || !text || !scale)
+        return -1;
+    if (kgfx_target_argb_begin(slot->image.px, slot->image.w, slot->image.h, slot->image.w) != 0)
+        return -1;
+    ktext_draw_str_ex(G_runtime_font, x, y, text, sacx_to_kcolor(color), alpha, scale, 0, 0);
+    kgfx_target_argb_end();
+    return sacx_api_img_touch(image_handle);
+}
+
+static int sacx_api_img_clipboard_set(uint32_t image_handle)
+{
+    sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    if (!slot || !slot->image.px)
+        return -1;
+    return kimage_clipboard_set(&slot->image);
+}
+
+static int sacx_api_img_clipboard_get(uint32_t *out_image_handle)
+{
+    kimg image = {0};
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+
+    if (!G_current_task || !out_image_handle || kimage_clipboard_copy(&image) != 0)
+        return -1;
+    bytes = (uint64_t)image.w * image.h * 4ull;
+    if (sacx_task_image_bytes(G_current_task) + bytes > 256ull * 1024ull * 1024ull ||
+        sacx_api_img_register_loaded(&image, out_image_handle) != 0)
+    {
+        pages = (bytes + 4095ull) >> 12;
+        if (image.px && pages)
+            pmem_free_pages(image.px, pages);
+        return -1;
+    }
     return 0;
 }
 
@@ -3539,6 +3807,21 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.k3d_scene_apply_default_world = sacx_api_k3d_scene_apply_default_world;
     task->api.k3d_scene_add_room = sacx_api_k3d_scene_add_room;
     task->api.k3d_scene_add_obstacle_cube = sacx_api_k3d_scene_add_obstacle_cube;
+
+    task->api.img_create = sacx_api_img_create;
+    task->api.img_clone = sacx_api_img_clone;
+    task->api.img_pixels = sacx_api_img_pixels;
+    task->api.img_touch = sacx_api_img_touch;
+    task->api.img_save = sacx_api_img_save;
+    task->api.img_draw_text = sacx_api_img_draw_text;
+    task->api.img_clipboard_set = sacx_api_img_clipboard_set;
+    task->api.img_clipboard_get = sacx_api_img_clipboard_get;
+    task->api.app_arg_image = sacx_api_app_arg_image;
+    task->api.dialog_save_file = sacx_api_dialog_save_file;
+    task->api.window_set_close_deferred = sacx_api_window_set_close_deferred;
+    task->api.window_close_requested = sacx_api_window_close_requested;
+    task->api.window_close_accept = sacx_api_window_close_accept;
+    task->api.window_close_cancel = sacx_api_window_close_cancel;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -3629,6 +3912,38 @@ extern "C" int sacx_runtime_launch(const char *raw_path,
                                    uint32_t *out_task_id)
 {
     return sacx_runtime_launch_ex(raw_path, friendly_path, 0, 0, io, out_task_id);
+}
+
+extern "C" int sacx_runtime_launch_image(const char *raw_path,
+                                         const char *friendly_path,
+                                         const kimg *image,
+                                         const sacx_runtime_io *io,
+                                         uint32_t *out_task_id)
+{
+    uint32_t task_id = 0u;
+    uint32_t image_handle = 0u;
+    sacx_task *task = 0;
+
+    if (!image || !image->px || !image->w || !image->h)
+        return -1;
+    if (sacx_runtime_launch_ex(raw_path, friendly_path, 0, 0, io, &task_id) != 0)
+        return -1;
+
+    task = sacx_find_task_by_id(task_id);
+    if (!task || sacx_task_register_image_copy(task, image, &image_handle) != 0)
+    {
+        if (task)
+        {
+            sacx_task_finish(task, -1, "startup image allocation failed", SACX_TASK_FAULTED);
+            sacx_task_reset(task);
+        }
+        return -1;
+    }
+
+    task->launch_arg_image = image_handle;
+    if (out_task_id)
+        *out_task_id = task_id;
+    return 0;
 }
 
 extern "C" void sacx_runtime_update(void)

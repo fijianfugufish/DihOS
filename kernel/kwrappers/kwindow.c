@@ -38,6 +38,8 @@ typedef struct
     uint8_t resizing;
     uint8_t resize_edges;
     uint8_t fullscreen;
+    uint8_t close_deferred;
+    uint8_t close_requested;
     kgfx_obj_handle root;
     kgfx_obj_handle titlebar;
     kgfx_obj_handle title_text;
@@ -654,6 +656,12 @@ static void kwindow_close_click(kbutton_handle button, void *user)
     if (!slot)
         return;
 
+    if (slot->close_deferred)
+    {
+        slot->close_requested = 1u;
+        return;
+    }
+
     slot->visible = 0;
     slot->dragging = 0;
     slot->resizing = 0;
@@ -1154,6 +1162,8 @@ void kwindow_set_visible(kwindow_handle h, uint8_t visible)
         return;
 
     G_windows[h.idx].visible = visible ? 1u : 0u;
+    if (visible)
+        G_windows[h.idx].close_requested = 0u;
     G_windows[h.idx].dragging = 0;
     G_windows[h.idx].resizing = 0;
     G_windows[h.idx].resize_edges = 0;
@@ -1207,6 +1217,40 @@ int kwindow_focused(kwindow_handle h)
     }
 
     return found_front && target_z >= front_z;
+}
+
+int kwindow_set_close_deferred(kwindow_handle h, uint8_t deferred)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return -1;
+    G_windows[h.idx].close_deferred = deferred ? 1u : 0u;
+    if (!deferred)
+        G_windows[h.idx].close_requested = 0u;
+    return 0;
+}
+
+int kwindow_close_requested(kwindow_handle h)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return 0;
+    return G_windows[h.idx].close_requested ? 1 : 0;
+}
+
+int kwindow_close_accept(kwindow_handle h)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return -1;
+    G_windows[h.idx].close_requested = 0u;
+    kwindow_set_visible(h, 0u);
+    return 0;
+}
+
+int kwindow_close_cancel(kwindow_handle h)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+        return -1;
+    G_windows[h.idx].close_requested = 0u;
+    return 0;
 }
 
 int kwindow_raise(kwindow_handle h)

@@ -162,3 +162,17 @@ k3d_player_update
 k3d_scene_apply_default_world
 k3d_scene_add_room
 k3d_scene_add_obstacle_cube
+img_create
+img_clone
+img_pixels
+img_touch
+img_save
+img_draw_text
+img_clipboard_set
+img_clipboard_get
+app_arg_image
+dialog_save_file
+window_set_close_deferred
+window_close_requested
+window_close_accept
+window_close_cancel

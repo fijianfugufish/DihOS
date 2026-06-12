@@ -27,6 +27,16 @@ int kimg_load_jpeg(kimg *out, const char *path);
 // Auto-detect by file signature and dispatch to BMP/PNG/JPEG loader.
 int kimg_load(kimg *out, const char *path);
 
+enum
+{
+    KIMG_FORMAT_PNG = 1u,
+    KIMG_FORMAT_JPEG = 2u,
+    KIMG_FORMAT_BMP = 3u,
+};
+
+// Save ARGB pixels to PNG, baseline JPEG, or 32-bit BMP.
+int kimg_save(const kimg *img, const char *path, uint32_t format, uint32_t quality);
+
 // Draw at (x,y). global_alpha multiplies per-pixel alpha (0..255).
 void kimg_draw(const kimg *img, int x, int y, uint8_t global_alpha);
 
