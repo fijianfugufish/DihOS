@@ -710,9 +710,9 @@ int document_add_layer(uint32_t type)
     layer->effect_strength = (type == EDITOR_LAYER_PIXELATE) ? 12u : 4u;
     if (type == EDITOR_LAYER_HIGHLIGHTER)
     {
-        layer->opacity = 110u;
+        layer->opacity = 15u;
         layer->color = 0xFFFFD60Au;
-        layer->stroke = 20u;
+        layer->stroke = 32u;
     }
     layer->x0 = 0;
     layer->y0 = 0;

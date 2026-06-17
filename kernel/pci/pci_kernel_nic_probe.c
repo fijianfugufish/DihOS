@@ -749,6 +749,7 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_WMI_PEER_ASSOC_CONF_EVENTID 0x6006u
 #define QWIFI_WMI_SERVICE_MGMT_TX_HTT 75u
 #define QWIFI_WMI_SERVICE_MGMT_TX_WMI 76u
+/* WMI service-ready bitmaps advertise four service bits in each u32. */
 #define QWIFI_WMI_SERVICE_BITS_PER_WORD 4u
 #define QWIFI_WMI_TLV_TAG_ARRAY_BYTE 17u
 #define QWIFI_WMI_TLV_TAG_MGMT_RX_HDR 44u
@@ -855,25 +856,31 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_HW_TXRX_RAW 0u
 #define QWIFI_HW_TXRX_NATIVE_WIFI 1u
 #define QWIFI_HW_TXRX_ETHERNET 2u
+#define QWIFI_HW_TXRX_UNKNOWN 0xFFFFFFFFu
 #define QWIFI_SEND_EXPLICIT_STA_MLME 1u
 #define QWIFI_MINIMAL_HOST_MLME_PREAUTH 0u
-#define QWIFI_PREAUTH_VDEV_UP 0u
-#define QWIFI_WMI_MGMT_TX_LEGACY_FOR_MLME 0u
+#define QWIFI_PREAUTH_VDEV_UP 1u
+#define QWIFI_WMI_MGMT_TX_LEGACY_FOR_MLME 1u
 #define QWIFI_WMI_MGMT_TX_BY_VALUE 0u
 #define QWIFI_WMI_MGMT_TX_APPEND_MLO_PARAMS 0u
 #define QWIFI_WMI_MGMT_TX_HW_LINK_ID 0xFFFFFFFFu
-#define QWIFI_WMI_MGMT_TX_COMPLETION_WAIT_ROUNDS 48u
+#define QWIFI_WMI_MGMT_TX_COMPLETION_WAIT_ROUNDS 256u
 #define QWIFI_WMI_MGMT_TX_DIAG_LEGACY_FALLBACK 0u
 #define QWIFI_WMI_MGMT_TX_DUMP_BYTES 1u
 #define QWIFI_WMI_MLME_RETRY_AFTER_NO_RX 0u
 #define QWIFI_WMI_AUTH_RESPONSE_WAIT_ROUNDS 64u
 #define QWIFI_WMI_ASSOC_RESPONSE_WAIT_ROUNDS 96u
-#define QWIFI_WMI_PEER_CREATE_BEFORE_VDEV_START 0u
+#define QWIFI_WMI_PEER_CREATE_BEFORE_VDEV_START 1u
 #define QWIFI_WMI_PEER_ROUTE_BEFORE_VDEV_START 0u
 #define QWIFI_WMI_PEER_REORDER_BEFORE_VDEV_START 0u
-#define QWIFI_WMI_PEER_CREATE_BEFORE_AUTH 1u
-#define QWIFI_WMI_PEER_ROUTE_BEFORE_AUTH 1u
-#define QWIFI_WMI_PEER_REORDER_BEFORE_AUTH 1u
+#define QWIFI_WMI_PEER_NONQOS_REORDER_BEFORE_VDEV_START 0u
+#define QWIFI_WMI_PEER_CREATE_BEFORE_AUTH 0u
+#define QWIFI_WMI_PEER_ROUTE_BEFORE_AUTH 0u
+#define QWIFI_WMI_PEER_REORDER_BEFORE_AUTH 0u
+#define QWIFI_WMI_DISABLE_STA_PS_BEFORE_AUTH 0u
+#define QWIFI_WMI_TX_ENCAP_BEFORE_AUTH 0u
+#define QWIFI_WMI_PREAUTH_TX_ENCAP_MODE QWIFI_HW_TXRX_NATIVE_WIFI
+#define QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS 2u
 #define QWIFI_WMI_MGMT_TX_OFFCHAN_CMD_FOR_EXPLICIT 0u
 #define QWIFI_WMI_STA_MLME_FIRST_EXPLICIT 0u
 #define QWIFI_WMI_CHAN_INFO_MODE_MASK 0x3Fu
@@ -883,6 +890,12 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_WMI_CHAN_INFO_ALLOW_HT (1u << 11)
 #define QWIFI_WMI_CHAN_INFO_ALLOW_VHT (1u << 12)
 #define QWIFI_WMI_CHAN_INFO_ALLOW_HE (1u << 17)
+#define QWIFI_WMI_RECENT_EVENT_SLOTS 12u
+#define QWIFI_WMI_DIAG_FORCE_DUMP_DWORDS 64u
+#define QWIFI_WMI_DIAG_TRACE_RECORDS 16u
+#define QWIFI_WMI_DIAG_ASCII_MIN_RUN 4u
+#define QWIFI_WMI_DIAG_ASCII_MAX_SNIPS 4u
+#define QWIFI_WMI_DIAG_ASCII_MAX_LEN 80u
 #define QWIFI_WIFI_NETWORK_MAX 32u
 #define QWIFI_WIFI_SSID_MAX 32u
 #define QWIFI_WIFI_EVENT_POLL_MAX_ROUNDS 512u
@@ -1125,6 +1138,14 @@ static uint32_t g_qwifi_htt_peer_map_ast_hash;
 static uint8_t g_qwifi_htt_peer_map_mac[6];
 static uint32_t g_qwifi_wmi_event_count;
 static uint32_t g_qwifi_wmi_last_event_id;
+static uint32_t g_qwifi_wmi_recent_pos;
+static uint32_t g_qwifi_wmi_recent_seq[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_eid[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_id[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_len[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_w1[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_w2[QWIFI_WMI_RECENT_EVENT_SLOTS];
+static uint32_t g_qwifi_wmi_recent_w3[QWIFI_WMI_RECENT_EVENT_SLOTS];
 static uint32_t g_qwifi_wmi_ssid_count;
 static uint32_t g_qwifi_wmi_service_available_seen;
 static uint32_t g_qwifi_wmi_service_ready_seen;
@@ -1156,7 +1177,9 @@ static uint32_t g_qwifi_wmi_pairwise_key_sent;
 static uint32_t g_qwifi_wmi_peer_authorized;
 static uint32_t g_qwifi_wmi_vdev_nss_configured;
 static uint32_t g_qwifi_wmi_vdev_tx_encap_set;
+static uint32_t g_qwifi_wmi_vdev_tx_encap_mode = QWIFI_HW_TXRX_UNKNOWN;
 static uint32_t g_qwifi_wmi_vdev_txrx_mode_set;
+static uint32_t g_qwifi_wmi_vdev_txrx_mode = QWIFI_HW_TXRX_UNKNOWN;
 static uint32_t g_qwifi_wmi_sta_ps_configured;
 static uint32_t g_qwifi_wmi_mlo_setup_sent;
 static uint32_t g_qwifi_wmi_mlo_ready_sent;
@@ -1172,12 +1195,20 @@ static uint32_t g_qwifi_wmi_scan_req_seq;
 static uint32_t g_qwifi_wmi_diag_event_count;
 static uint32_t g_qwifi_wmi_diag_force_print;
 static uint32_t g_qwifi_wmi_mgmt_rx_event_count;
+static uint32_t g_qwifi_wmi_mgmt_rx_force_print;
 static uint32_t g_qwifi_wmi_mgmt_tx_event_count;
 static uint32_t g_qwifi_wmi_mgmt_tx_last_desc;
 static uint32_t g_qwifi_wmi_mgmt_tx_last_status;
 static uint32_t g_qwifi_wmi_mgmt_tx_last_pdev_id;
 static uint32_t g_qwifi_wmi_mgmt_tx_last_ack_rssi;
+static uint32_t g_qwifi_wmi_mgmt_tx_last_send_cmd;
+static uint32_t g_qwifi_wmi_mgmt_tx_last_send_desc;
+static uint32_t g_qwifi_wmi_mgmt_tx_last_send_paddr_lo;
+static uint32_t g_qwifi_wmi_mgmt_tx_last_send_len;
 static uint32_t g_qwifi_wmi_l2_tx_use_offchan;
+static uint32_t g_qwifi_htc_credit_report_count;
+static uint32_t g_qwifi_htc_wmi_credit_report_count;
+static uint32_t g_qwifi_htc_scan_credit_report_count;
 static uint32_t g_qwifi_wmi_roam_reason;
 static int32_t g_qwifi_wmi_roam_rssi;
 static uint32_t g_qwifi_assoc_resp_seen;
@@ -1333,8 +1364,15 @@ static int qwifi_wmi_send_vdev_txrx_mode(uint64_t bar0_base, uint32_t mode);
 static int qwifi_wmi_configure_vdev_tx_encap(uint64_t bar0_base, uint32_t mode);
 static int qwifi_wmi_configure_vdev_nss(uint64_t bar0_base);
 static int qwifi_wmi_configure_sta_power_save(uint64_t bar0_base);
+static int qwifi_wmi_send_sta_powersave_mode(uint64_t bar0_base, uint32_t mode);
+static int qwifi_htc_wmi_wait_for_tx_credit(uint64_t bar0_base,
+                                            uint32_t *tx_credits,
+                                            uint32_t cost,
+                                            const char *label,
+                                            uint32_t max_rounds);
 static int qwifi_wmi_send_peer_create(uint64_t bar0_base);
 static int qwifi_wmi_send_peer_default_routing(uint64_t bar0_base);
+static int qwifi_wmi_send_peer_reorder_queue(uint64_t bar0_base, uint32_t tid);
 static int qwifi_wmi_send_peer_reorder_queues(uint64_t bar0_base);
 static int qwifi_wmi_send_peer_assoc(uint64_t bar0_base);
 static int qwifi_wmi_send_vdev_start(uint64_t bar0_base, const char *ssid, uint32_t chan_mhz);
@@ -2119,7 +2157,10 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
     g_qwifi_wmi_peer_create_last_status = 0xFFFFFFFFu;
     g_qwifi_wmi_peer_reorder_setup_count = 0u;
     g_qwifi_wmi_peer_reorder_last_status = 0xFFFFFFFFu;
+    g_qwifi_wmi_vdev_tx_encap_set = 0u;
+    g_qwifi_wmi_vdev_tx_encap_mode = QWIFI_HW_TXRX_UNKNOWN;
     g_qwifi_wmi_vdev_txrx_mode_set = 0u;
+    g_qwifi_wmi_vdev_txrx_mode = QWIFI_HW_TXRX_UNKNOWN;
     g_qwifi_wmi_vdev_start_max_tx_power = 0u;
     g_qwifi_wmi_vdev_start_max_tx_power_valid = 0u;
     g_qwifi_htt_peer_map_valid = 0u;
@@ -2157,6 +2198,24 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         else
         {
             terminal_print("[K:QWIFI] peer routing before vdev start skipped/failed");
+            terminal_flush_log();
+        }
+    }
+#endif
+#if QWIFI_WMI_PEER_NONQOS_REORDER_BEFORE_VDEV_START
+    if (g_qwifi_wmi_peer_created)
+    {
+        if (qwifi_wmi_send_peer_reorder_queue(g_qwifi_ipcr_bar0_base,
+                                              QWIFI_REO_NON_QOS_TID))
+        {
+            terminal_print("[K:QWIFI] peer non-QoS reorder before vdev start sent tid=");
+            terminal_print_inline_hex64(QWIFI_REO_NON_QOS_TID);
+            terminal_print(" preserving final credit for vdev start");
+            terminal_flush_log();
+        }
+        else
+        {
+            terminal_print("[K:QWIFI] peer non-QoS reorder before vdev start failed");
             terminal_flush_log();
         }
     }
@@ -2201,9 +2260,65 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
     terminal_print("[K:QWIFI] connect minimal preauth: skip NSS/PS/peer/vdev-up before host MLME");
     terminal_flush_log();
 #else
-    terminal_print("[K:QWIFI] connect pre-auth: defer TX/RX encapsulation and NSS to preserve HTC credits");
+    terminal_print("[K:QWIFI] connect pre-auth: defer RX decap and NSS to preserve HTC credits");
     terminal_flush_log();
+#if QWIFI_WMI_TX_ENCAP_BEFORE_AUTH
+    if (g_qwifi_htc_wmi_control_tx_credits == 0u)
+    {
+        (void)qwifi_htc_wmi_wait_for_tx_credit(g_qwifi_ipcr_bar0_base,
+                                               &g_qwifi_htc_wmi_control_tx_credits,
+                                               1u,
+                                               "preauth-tx-encap-credit",
+                                               256u);
+    }
+    if (g_qwifi_htc_wmi_control_tx_credits == 0u)
+    {
+        terminal_print("[K:QWIFI] connect pre-auth: skip TX encap; no WMI credit credits=");
+        terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
+        terminal_flush_log();
+    }
+    else
+    {
+        if (!qwifi_wmi_configure_vdev_tx_encap(g_qwifi_ipcr_bar0_base,
+                                               QWIFI_WMI_PREAUTH_TX_ENCAP_MODE))
+        {
+            terminal_print("[K:QWIFI] connect waiting: vdev TX encapsulation before auth failed");
+            terminal_flush_log();
+            goto connect_log;
+        }
+        terminal_print("[K:QWIFI] connect pre-auth: vdev TX encapsulation set for host MLME mode=");
+        terminal_print_inline_hex64(QWIFI_WMI_PREAUTH_TX_ENCAP_MODE);
+        terminal_print(" credits_after_send=");
+        terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
+        terminal_flush_log();
+        (void)pci_kernel_wifi_poll_events(64u);
+        if (g_qwifi_htc_wmi_control_tx_credits < QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS)
+        {
+            (void)qwifi_htc_wmi_wait_for_tx_credit(g_qwifi_ipcr_bar0_base,
+                                                   &g_qwifi_htc_wmi_control_tx_credits,
+                                                   QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS,
+                                                   "preauth-tx-encap-reserve",
+                                                   256u);
+        }
+        terminal_print("[K:QWIFI] connect pre-auth: TX encap reserve credits=");
+        terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
+        terminal_print(" need=");
+        terminal_print_inline_hex64(QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS);
+        terminal_flush_log();
+    }
+#endif
+#if QWIFI_WMI_DISABLE_STA_PS_BEFORE_AUTH
+    if (!qwifi_wmi_send_sta_powersave_mode(g_qwifi_ipcr_bar0_base,
+                                           QWIFI_WMI_STA_PS_MODE_DISABLED))
+    {
+        terminal_print("[K:QWIFI] connect waiting: disable STA power save before auth failed");
+        terminal_flush_log();
+        goto connect_log;
+    }
+    terminal_print("[K:QWIFI] connect pre-auth: STA power save disabled; preserving final credit for auth");
+#else
     terminal_print("[K:QWIFI] connect pre-auth: defer STA power-save commands to preserve HTC credits");
+#endif
     terminal_flush_log();
     if (target_mhz >= 5955u)
     {
@@ -2271,7 +2386,21 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
 #endif
 
 #if QWIFI_PREAUTH_VDEV_UP
-    if (!qwifi_wmi_send_vdev_up(g_qwifi_ipcr_bar0_base))
+    if (g_qwifi_htc_wmi_control_tx_credits < QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS)
+    {
+        (void)qwifi_htc_wmi_wait_for_tx_credit(g_qwifi_ipcr_bar0_base,
+                                               &g_qwifi_htc_wmi_control_tx_credits,
+                                               QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS,
+                                               "preauth-vdev-up-auth-reserve",
+                                               256u);
+    }
+    if (g_qwifi_htc_wmi_control_tx_credits < QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS)
+    {
+        terminal_print("[K:QWIFI] connect warning: pre-auth vdev up skipped to preserve auth credit credits=");
+        terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
+        terminal_flush_log();
+    }
+    else if (!qwifi_wmi_send_vdev_up(g_qwifi_ipcr_bar0_base))
     {
         terminal_print("[K:QWIFI] connect warning: pre-auth vdev up send failed; trying auth anyway");
         terminal_flush_log();
@@ -6976,6 +7105,68 @@ static void qwifi_wmi_try_mgmt_rx_ssids(const uint8_t *payload, uint32_t len)
     if (frame_len > frame_tlv_len)
         frame_len = frame_tlv_len;
 
+    if (frame_len >= 2u)
+    {
+        uint16_t fc = qwifi_read_le16(frame);
+        uint32_t type = (fc >> 2) & 0x3u;
+        uint32_t subtype = (fc >> 4) & 0xFu;
+        uint32_t force_print = g_qwifi_wmi_mgmt_rx_force_print ? 1u : 0u;
+        uint32_t log_rx = (force_print ||
+                           g_qwifi_wmi_mgmt_rx_event_count <= 32u ||
+                           subtype == 1u ||
+                           subtype == 3u ||
+                           subtype == 11u) ? 1u : 0u;
+
+        if (log_rx)
+        {
+            terminal_print("[K:QWIFI] WMI mgmt rx frame len=");
+            terminal_print_inline_hex64(frame_len);
+            terminal_print(" tlv_len=");
+            terminal_print_inline_hex64(frame_tlv_len);
+            terminal_print(" mhz=");
+            terminal_print_inline_hex64(frame_mhz);
+            terminal_print(" rssi=");
+            terminal_print_inline_hex64(frame_rssi_valid ? (uint32_t)frame_rssi_dbm : 0xFFFFFFFFu);
+            terminal_print(" fc=");
+            terminal_print_inline_hex64(fc);
+            terminal_print(" type=");
+            terminal_print_inline_hex64(type);
+            terminal_print(" subtype=");
+            terminal_print_inline_hex64(subtype);
+            if (force_print)
+            {
+                terminal_print(" forced=");
+                terminal_print_inline_hex64(g_qwifi_wmi_mgmt_rx_force_print);
+                g_qwifi_wmi_mgmt_rx_force_print--;
+            }
+            if (frame_len >= 24u)
+            {
+                terminal_print(" a1=");
+                for (uint32_t i = 0u; i < 6u; ++i)
+                {
+                    terminal_print_inline_hex8(frame[4u + i]);
+                    if (i != 5u)
+                        terminal_print(":");
+                }
+                terminal_print(" a2=");
+                for (uint32_t i = 0u; i < 6u; ++i)
+                {
+                    terminal_print_inline_hex8(frame[10u + i]);
+                    if (i != 5u)
+                        terminal_print(":");
+                }
+                terminal_print(" a3=");
+                for (uint32_t i = 0u; i < 6u; ++i)
+                {
+                    terminal_print_inline_hex8(frame[16u + i]);
+                    if (i != 5u)
+                        terminal_print(":");
+                }
+            }
+            terminal_flush_log();
+        }
+    }
+
     (void)qwifi_wmi_try_store_80211_ssid(frame, frame_len, frame_mhz, frame_rssi_dbm, frame_rssi_valid);
     (void)qwifi_wmi_try_parse_auth_resp(frame, frame_len);
     (void)qwifi_wmi_try_parse_assoc_resp(frame, frame_len);
@@ -9354,7 +9545,9 @@ static int qwifi_wmi_send_vdev_create(uint64_t bar0_base)
 
     g_qwifi_wmi_vdev_created = 1u;
     g_qwifi_wmi_vdev_tx_encap_set = 0u;
+    g_qwifi_wmi_vdev_tx_encap_mode = QWIFI_HW_TXRX_UNKNOWN;
     g_qwifi_wmi_vdev_txrx_mode_set = 0u;
+    g_qwifi_wmi_vdev_txrx_mode = QWIFI_HW_TXRX_UNKNOWN;
     g_qwifi_wmi_vdev_nss_configured = 0u;
     return 1;
 }
@@ -9536,14 +9729,15 @@ static int qwifi_wmi_send_vdev_txrx_mode(uint64_t bar0_base, uint32_t mode)
 {
     if (!g_qwifi_wmi_vdev_created)
         return 0;
-    if (g_qwifi_wmi_vdev_txrx_mode_set)
+    if (g_qwifi_wmi_vdev_txrx_mode_set && g_qwifi_wmi_vdev_txrx_mode == mode)
         return 1;
 
-    if (!g_qwifi_wmi_vdev_tx_encap_set)
+    if (!g_qwifi_wmi_vdev_tx_encap_set || g_qwifi_wmi_vdev_tx_encap_mode != mode)
     {
         if (!qwifi_wmi_send_vdev_set_param(bar0_base, QWIFI_WMI_VDEV_PARAM_TX_ENCAP_TYPE, mode, "tx-encap"))
             return 0;
         g_qwifi_wmi_vdev_tx_encap_set = 1u;
+        g_qwifi_wmi_vdev_tx_encap_mode = mode;
     }
     if (!qwifi_wmi_send_vdev_set_param(bar0_base, QWIFI_WMI_VDEV_PARAM_RX_DECAP_TYPE, mode, "rx-decap"))
         return 0;
@@ -9553,6 +9747,7 @@ static int qwifi_wmi_send_vdev_txrx_mode(uint64_t bar0_base, uint32_t mode)
     terminal_flush_log();
 
     g_qwifi_wmi_vdev_txrx_mode_set = 1u;
+    g_qwifi_wmi_vdev_txrx_mode = mode;
     return 1;
 }
 
@@ -9560,7 +9755,7 @@ static int qwifi_wmi_configure_vdev_tx_encap(uint64_t bar0_base, uint32_t mode)
 {
     if (!g_qwifi_wmi_vdev_created)
         return 0;
-    if (g_qwifi_wmi_vdev_tx_encap_set)
+    if (g_qwifi_wmi_vdev_tx_encap_set && g_qwifi_wmi_vdev_tx_encap_mode == mode)
         return 1;
 
     if (!qwifi_wmi_send_vdev_set_param(bar0_base,
@@ -9572,6 +9767,9 @@ static int qwifi_wmi_configure_vdev_tx_encap(uint64_t bar0_base, uint32_t mode)
     }
 
     g_qwifi_wmi_vdev_tx_encap_set = 1u;
+    g_qwifi_wmi_vdev_tx_encap_mode = mode;
+    g_qwifi_wmi_vdev_txrx_mode_set = 0u;
+    g_qwifi_wmi_vdev_txrx_mode = QWIFI_HW_TXRX_UNKNOWN;
     terminal_print("[K:QWIFI] WMI vdev TX encapsulation configured mode=");
     terminal_print_inline_hex64(mode);
     terminal_flush_log();
@@ -10288,6 +10486,51 @@ static uint32_t qwifi_wmi_build_80211_eapol_frame(uint8_t *out, uint32_t out_cap
     return total_len;
 }
 
+static void qwifi_wmi_debug_print_recent_events(const char *label, uint32_t since_seq)
+{
+    uint32_t printed = 0u;
+
+    terminal_print("[K:QWIFI] WMI recent events label=");
+    terminal_print(label ? label : "?");
+    terminal_print(" since=");
+    terminal_print_inline_hex64(since_seq);
+    terminal_print(" total=");
+    terminal_print_inline_hex64(g_qwifi_wmi_event_count);
+    terminal_flush_log();
+
+    for (uint32_t n = 0u; n < QWIFI_WMI_RECENT_EVENT_SLOTS; ++n)
+    {
+        uint32_t idx = (g_qwifi_wmi_recent_pos + n) % QWIFI_WMI_RECENT_EVENT_SLOTS;
+        uint32_t seq = g_qwifi_wmi_recent_seq[idx];
+
+        if (seq == 0u || seq <= since_seq)
+            continue;
+
+        terminal_print("[K:QWIFI]   recent seq=");
+        terminal_print_inline_hex64(seq);
+        terminal_print(" eid=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_eid[idx]);
+        terminal_print(" id=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_id[idx]);
+        terminal_print(" len=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_len[idx]);
+        terminal_print(" w1=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_w1[idx]);
+        terminal_print(" w2=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_w2[idx]);
+        terminal_print(" w3=");
+        terminal_print_inline_hex64(g_qwifi_wmi_recent_w3[idx]);
+        terminal_flush_log();
+        printed++;
+    }
+
+    if (!printed)
+    {
+        terminal_print("[K:QWIFI]   recent none");
+        terminal_flush_log();
+    }
+}
+
 static int qwifi_wmi_wait_mgmt_tx_completion(uint64_t bar0_base,
                                              uint32_t desc_id,
                                              uint32_t start_count,
@@ -10296,15 +10539,26 @@ static int qwifi_wmi_wait_mgmt_tx_completion(uint64_t bar0_base,
 {
     uint32_t used_rounds = 0u;
     uint32_t done = 0u;
+    uint32_t start_wmi_events = g_qwifi_wmi_event_count;
+    uint32_t start_last_wmi = g_qwifi_wmi_last_event_id;
+    uint32_t start_diag = g_qwifi_wmi_diag_event_count;
+    uint32_t start_mgmt_rx = g_qwifi_wmi_mgmt_rx_event_count;
+    uint32_t start_scan = g_qwifi_wmi_scan_event_count;
+    uint32_t start_htt_rx = g_qwifi_htc_htt_rx_event_count;
+    uint32_t start_credit_reports = g_qwifi_htc_credit_report_count;
+    uint32_t start_wmi_credit_reports = g_qwifi_htc_wmi_credit_report_count;
+    uint32_t start_wmi_credits = g_qwifi_htc_wmi_control_tx_credits;
+    uint64_t start_ce_rx = g_qwifi_ce_rx_nonempty_total;
 
     g_qwifi_wmi_diag_force_print = 8u;
+    g_qwifi_wmi_mgmt_rx_force_print = 16u;
     for (uint32_t round = 0u; round < rounds; ++round)
     {
         qwifi_ce_poll_rx_pipe(bar0_base, QWIFI_CE_HTC_CONTROL_RX);
         qwifi_ce_poll_rx_pipe(bar0_base, QWIFI_CE_WMI_CONTROL_RX);
         used_rounds = round + 1u;
         if (g_qwifi_wmi_mgmt_tx_event_count != start_count &&
-            g_qwifi_wmi_mgmt_tx_last_desc == desc_id)
+            (desc_id == 0u || g_qwifi_wmi_mgmt_tx_last_desc == desc_id))
         {
             done = 1u;
             break;
@@ -10343,6 +10597,38 @@ static int qwifi_wmi_wait_mgmt_tx_completion(uint64_t bar0_base,
     terminal_print_inline_hex64(g_qwifi_wmi_last_event_id);
     terminal_flush_log();
 
+    terminal_print("[K:QWIFI] WMI l2 tx wait deltas desc=");
+    terminal_print_inline_hex64(desc_id);
+    terminal_print(" label=");
+    terminal_print(label ? label : "?");
+    terminal_print(" wmi_events=");
+    terminal_print_inline_hex64(g_qwifi_wmi_event_count - start_wmi_events);
+    terminal_print(" diag=");
+    terminal_print_inline_hex64(g_qwifi_wmi_diag_event_count - start_diag);
+    terminal_print(" mgmt_rx=");
+    terminal_print_inline_hex64(g_qwifi_wmi_mgmt_rx_event_count - start_mgmt_rx);
+    terminal_print(" scan=");
+    terminal_print_inline_hex64(g_qwifi_wmi_scan_event_count - start_scan);
+    terminal_print(" htt_rx=");
+    terminal_print_inline_hex64(g_qwifi_htc_htt_rx_event_count - start_htt_rx);
+    terminal_print(" ce_rx=");
+    terminal_print_inline_hex64(g_qwifi_ce_rx_nonempty_total - start_ce_rx);
+    terminal_print(" credit_reports=");
+    terminal_print_inline_hex64(g_qwifi_htc_credit_report_count - start_credit_reports);
+    terminal_print(" wmi_credit_reports=");
+    terminal_print_inline_hex64(g_qwifi_htc_wmi_credit_report_count - start_wmi_credit_reports);
+    terminal_print(" credits_start=");
+    terminal_print_inline_hex64(start_wmi_credits);
+    terminal_print(" credits_end=");
+    terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
+    terminal_print(" last_before=");
+    terminal_print_inline_hex64(start_last_wmi);
+    terminal_print(" last_after=");
+    terminal_print_inline_hex64(g_qwifi_wmi_last_event_id);
+    terminal_flush_log();
+
+    qwifi_wmi_debug_print_recent_events(label, start_wmi_events);
+
     return done ? 1 : 0;
 }
 
@@ -10363,6 +10649,8 @@ static int qwifi_wmi_send_mgmt_tx_legacy(uint64_t bar0_base,
 
     if (!tx_frame || tx_len == 0u || sizeof(body) < 32u + frame_dl_aligned)
         return 0;
+
+    desc_id = 0u; /* Legacy MGMT_TX_CMDID has no host descriptor field. */
 
     if (g_qwifi_connect_bssid_valid)
         peer = g_qwifi_connect_bssid;
@@ -10427,6 +10715,10 @@ static int qwifi_wmi_send_mgmt_tx_legacy(uint64_t bar0_base,
 #endif
 
     start_count = g_qwifi_wmi_mgmt_tx_event_count;
+    g_qwifi_wmi_mgmt_tx_last_send_cmd = QWIFI_WMI_MGMT_TX_CMDID;
+    g_qwifi_wmi_mgmt_tx_last_send_desc = desc_id;
+    g_qwifi_wmi_mgmt_tx_last_send_paddr_lo = 0u;
+    g_qwifi_wmi_mgmt_tx_last_send_len = tx_len;
     if (!qwifi_wmi_send_cmd(bar0_base,
                             QWIFI_WMI_MGMT_TX_CMDID,
                             body,
@@ -10669,6 +10961,10 @@ static int qwifi_wmi_send_mgmt_tx(uint64_t bar0_base, const uint8_t *frame, uint
 #endif
 
     start_count = g_qwifi_wmi_mgmt_tx_event_count;
+    g_qwifi_wmi_mgmt_tx_last_send_cmd = cmd_id;
+    g_qwifi_wmi_mgmt_tx_last_send_desc = desc_id;
+    g_qwifi_wmi_mgmt_tx_last_send_paddr_lo = (uint32_t)frame_pa;
+    g_qwifi_wmi_mgmt_tx_last_send_len = tx_len;
     sent = qwifi_wmi_send_cmd(bar0_base, cmd_id, body, off, cmd_label);
     if (!sent)
         return 0;
@@ -10702,7 +10998,18 @@ static int qwifi_wmi_send_mgmt_tx(uint64_t bar0_base, const uint8_t *frame, uint
     }
 
     if (is_mgmt_frame)
+    {
+        if (!tx_completed && (g_qwifi_auth_resp_seen || g_qwifi_assoc_resp_seen))
+        {
+            terminal_print("[K:QWIFI] WMI l2 tx continuing: response frame seen despite missing tx completion auth=");
+            terminal_print_inline_hex64(g_qwifi_auth_resp_seen ? 1u : 0u);
+            terminal_print(" assoc=");
+            terminal_print_inline_hex64(g_qwifi_assoc_resp_seen ? 1u : 0u);
+            terminal_flush_log();
+            return 1;
+        }
         return tx_completed ? 1 : 0;
+    }
 
     return 1;
 }
@@ -10997,6 +11304,10 @@ static void qwifi_wmi_parse_service_ready(const uint8_t *payload, uint32_t len)
     uint32_t service_bitmap_words = 0u;
     uint32_t mgmt_htt_word = 0u;
     uint32_t mgmt_wmi_word = 0u;
+    uint32_t mgmt_htt_index = 0u;
+    uint32_t mgmt_wmi_index = 0u;
+    uint32_t mgmt_htt_bit = 0u;
+    uint32_t mgmt_wmi_bit = 0u;
 
     if (!payload || len < 8u + 128u)
         return;
@@ -11034,25 +11345,27 @@ static void qwifi_wmi_parse_service_ready(const uint8_t *payload, uint32_t len)
 
         if (item_tag == QWIFI_WMI_TAG_ARRAY_UINT32 && item_len >= 12u)
         {
-            uint32_t htt_index =
+            mgmt_htt_index =
                 QWIFI_WMI_SERVICE_MGMT_TX_HTT / QWIFI_WMI_SERVICE_BITS_PER_WORD;
-            uint32_t wmi_index =
+            mgmt_wmi_index =
                 QWIFI_WMI_SERVICE_MGMT_TX_WMI / QWIFI_WMI_SERVICE_BITS_PER_WORD;
+            mgmt_htt_bit =
+                QWIFI_WMI_SERVICE_MGMT_TX_HTT % QWIFI_WMI_SERVICE_BITS_PER_WORD;
+            mgmt_wmi_bit =
+                QWIFI_WMI_SERVICE_MGMT_TX_WMI % QWIFI_WMI_SERVICE_BITS_PER_WORD;
 
             service_bitmap_words = item_len / 4u;
-            if (htt_index < service_bitmap_words)
+            if (mgmt_htt_index < service_bitmap_words)
             {
-                mgmt_htt_word = qwifi_read_le32(payload + data_off + htt_index * 4u);
+                mgmt_htt_word = qwifi_read_le32(payload + data_off + mgmt_htt_index * 4u);
                 g_qwifi_wmi_service_mgmt_tx_htt =
-                    (mgmt_htt_word >>
-                     (QWIFI_WMI_SERVICE_MGMT_TX_HTT % QWIFI_WMI_SERVICE_BITS_PER_WORD)) & 1u;
+                    (mgmt_htt_word >> mgmt_htt_bit) & 1u;
             }
-            if (wmi_index < service_bitmap_words)
+            if (mgmt_wmi_index < service_bitmap_words)
             {
-                mgmt_wmi_word = qwifi_read_le32(payload + data_off + wmi_index * 4u);
+                mgmt_wmi_word = qwifi_read_le32(payload + data_off + mgmt_wmi_index * 4u);
                 g_qwifi_wmi_service_mgmt_tx_wmi =
-                    (mgmt_wmi_word >>
-                     (QWIFI_WMI_SERVICE_MGMT_TX_WMI % QWIFI_WMI_SERVICE_BITS_PER_WORD)) & 1u;
+                    (mgmt_wmi_word >> mgmt_wmi_bit) & 1u;
             }
             break;
         }
@@ -11074,9 +11387,17 @@ static void qwifi_wmi_parse_service_ready(const uint8_t *payload, uint32_t len)
     terminal_print_inline_hex64(g_qwifi_wmi_service_mgmt_tx_wmi);
     terminal_print(" svc_words=");
     terminal_print_inline_hex64(service_bitmap_words);
-    terminal_print(" word18=");
+    terminal_print(" htt_idx=");
+    terminal_print_inline_hex64(mgmt_htt_index);
+    terminal_print(" htt_bit=");
+    terminal_print_inline_hex64(mgmt_htt_bit);
+    terminal_print(" htt_word=");
     terminal_print_inline_hex64(mgmt_htt_word);
-    terminal_print(" word19=");
+    terminal_print(" wmi_idx=");
+    terminal_print_inline_hex64(mgmt_wmi_index);
+    terminal_print(" wmi_bit=");
+    terminal_print_inline_hex64(mgmt_wmi_bit);
+    terminal_print(" wmi_word=");
     terminal_print_inline_hex64(mgmt_wmi_word);
     terminal_flush_log();
 }
@@ -11154,6 +11475,230 @@ static void qwifi_wmi_parse_ready(const uint8_t *payload, uint32_t len)
     terminal_flush_log();
 }
 
+static void qwifi_wmi_diag_dump_dwords(const uint8_t *buf, uint32_t len)
+{
+    uint32_t words;
+
+    if (!buf)
+        return;
+
+    words = len / 4u;
+    if (words > QWIFI_WMI_DIAG_FORCE_DUMP_DWORDS)
+        words = QWIFI_WMI_DIAG_FORCE_DUMP_DWORDS;
+
+    for (uint32_t i = 0u; i < words; i += 4u)
+    {
+        terminal_print("[K:QWIFI] WMI diag dwords +");
+        terminal_print_inline_hex64(i * 4u);
+        terminal_print(":");
+        for (uint32_t j = 0u; j < 4u && i + j < words; ++j)
+        {
+            terminal_print(" w");
+            terminal_print_inline_hex64(i + j);
+            terminal_print("=");
+            terminal_print_inline_hex64(qwifi_read_le32(buf + ((i + j) * 4u)));
+        }
+        terminal_flush_log();
+    }
+}
+
+static uint32_t qwifi_wmi_diag_count_word(const uint8_t *buf, uint32_t len, uint32_t value)
+{
+    uint32_t count = 0u;
+    uint32_t words;
+
+    if (!buf)
+        return 0u;
+
+    words = len / 4u;
+    for (uint32_t i = 0u; i < words; ++i)
+    {
+        if (qwifi_read_le32(buf + (i * 4u)) == value)
+            count++;
+    }
+
+    return count;
+}
+
+static uint32_t qwifi_wmi_diag_qsr_word(uint32_t value)
+{
+    uint32_t a = (value >> 24) & 0xFFu;
+    uint32_t b = (value >> 16) & 0xFFu;
+
+    return (a >= 'A' && a <= 'Z' && b >= 'A' && b <= 'Z') ? 1u : 0u;
+}
+
+static void qwifi_wmi_diag_print_qsr_pair(uint32_t value)
+{
+    char qsr[3];
+
+    qsr[0] = (char)((value >> 24) & 0xFFu);
+    qsr[1] = (char)((value >> 16) & 0xFFu);
+    qsr[2] = 0;
+    terminal_print(qsr);
+}
+
+static void qwifi_wmi_diag_dump_trace_candidates(const uint8_t *buf, uint32_t len)
+{
+    uint32_t words;
+    uint32_t printed = 0u;
+
+    if (!buf)
+        return;
+
+    words = len / 4u;
+    if (words < 8u)
+        return;
+
+    terminal_print("[K:QWIFI] WMI diag classify words=");
+    terminal_print_inline_hex64(words);
+    terminal_print(" hdr2=");
+    terminal_print_inline_hex64(qwifi_read_le32(buf + 8u));
+    terminal_print(" hdr3=");
+    terminal_print_inline_hex64(qwifi_read_le32(buf + 12u));
+    terminal_print(" hdr5=");
+    terminal_print_inline_hex64(qwifi_read_le32(buf + 20u));
+    terminal_print(" hdr6=");
+    terminal_print_inline_hex64(qwifi_read_le32(buf + 24u));
+    terminal_print(" has_txcmd=");
+    terminal_print_inline_hex64(qwifi_wmi_diag_count_word(buf, len, g_qwifi_wmi_mgmt_tx_last_send_cmd));
+    terminal_print(" has_comp=");
+    terminal_print_inline_hex64(qwifi_wmi_diag_count_word(buf, len, QWIFI_WMI_MGMT_TX_COMPLETION_EVENTID));
+    terminal_print(" has_desc=");
+    terminal_print_inline_hex64(qwifi_wmi_diag_count_word(buf, len, g_qwifi_wmi_mgmt_tx_last_send_desc));
+    terminal_print(" has_pa=");
+    terminal_print_inline_hex64(qwifi_wmi_diag_count_word(buf, len, g_qwifi_wmi_mgmt_tx_last_send_paddr_lo));
+    terminal_print(" txcmd=");
+    terminal_print_inline_hex64(g_qwifi_wmi_mgmt_tx_last_send_cmd);
+    terminal_print(" desc=");
+    terminal_print_inline_hex64(g_qwifi_wmi_mgmt_tx_last_send_desc);
+    terminal_print(" pa=");
+    terminal_print_inline_hex64(g_qwifi_wmi_mgmt_tx_last_send_paddr_lo);
+    terminal_print(" len=");
+    terminal_print_inline_hex64(g_qwifi_wmi_mgmt_tx_last_send_len);
+    terminal_flush_log();
+
+    for (uint32_t i = 8u; i + 2u < words && printed < QWIFI_WMI_DIAG_TRACE_RECORDS; ++i)
+    {
+        uint32_t marker = qwifi_read_le32(buf + (i * 4u));
+        uint32_t stamp = qwifi_read_le32(buf + ((i + 1u) * 4u));
+        uint32_t id = qwifi_read_le32(buf + ((i + 2u) * 4u));
+
+        if (marker == 0x07000000u && qwifi_wmi_diag_qsr_word(id))
+        {
+            terminal_print("[K:QWIFI] WMI diag trace marker +");
+            terminal_print_inline_hex64(i * 4u);
+            terminal_print(" stamp=");
+            terminal_print_inline_hex64(stamp);
+            terminal_print(" id=");
+            terminal_print_inline_hex64(id);
+            terminal_print(" qsr=");
+            qwifi_wmi_diag_print_qsr_pair(id);
+            for (uint32_t arg = 0u; arg < 4u && i + 3u + arg < words; ++arg)
+            {
+                terminal_print(" a");
+                terminal_print_inline_hex64(arg);
+                terminal_print("=");
+                terminal_print_inline_hex64(qwifi_read_le32(buf + ((i + 3u + arg) * 4u)));
+            }
+            terminal_flush_log();
+            printed++;
+            i += 2u;
+        }
+        else if (qwifi_wmi_diag_qsr_word(marker))
+        {
+            terminal_print("[K:QWIFI] WMI diag trace qsr +");
+            terminal_print_inline_hex64(i * 4u);
+            terminal_print(" id=");
+            terminal_print_inline_hex64(marker);
+            terminal_print(" qsr=");
+            qwifi_wmi_diag_print_qsr_pair(marker);
+            terminal_print(" prev=");
+            terminal_print_inline_hex64(i ? qwifi_read_le32(buf + ((i - 1u) * 4u)) : 0u);
+            terminal_print(" next=");
+            terminal_print_inline_hex64(stamp);
+            terminal_print(" next2=");
+            terminal_print_inline_hex64(id);
+            terminal_flush_log();
+            printed++;
+        }
+    }
+
+    if (!printed)
+    {
+        terminal_print("[K:QWIFI] WMI diag trace candidates none");
+        terminal_flush_log();
+    }
+}
+
+static uint32_t qwifi_wmi_diag_ascii_char(uint8_t c)
+{
+    return (c >= 32u && c <= 126u) ? 1u : 0u;
+}
+
+static uint32_t qwifi_wmi_diag_ascii_useful(const uint8_t *buf, uint32_t len)
+{
+    if (!buf)
+        return 0u;
+
+    for (uint32_t i = 0u; i < len; ++i)
+    {
+        if (buf[i] >= 33u && buf[i] <= 126u)
+            return 1u;
+    }
+
+    return 0u;
+}
+
+static void qwifi_wmi_diag_dump_ascii_snips(const uint8_t *buf, uint32_t len)
+{
+    uint32_t off = 0u;
+    uint32_t printed = 0u;
+
+    if (!buf)
+        return;
+
+    while (off < len && printed < QWIFI_WMI_DIAG_ASCII_MAX_SNIPS)
+    {
+        uint32_t start;
+        uint32_t run;
+        uint32_t dump_len;
+
+        while (off < len && !qwifi_wmi_diag_ascii_char(buf[off]))
+            off++;
+        start = off;
+        while (off < len && qwifi_wmi_diag_ascii_char(buf[off]))
+            off++;
+        run = off - start;
+
+        if (run < QWIFI_WMI_DIAG_ASCII_MIN_RUN ||
+            !qwifi_wmi_diag_ascii_useful(buf + start, run))
+            continue;
+
+        dump_len = run;
+        if (dump_len > QWIFI_WMI_DIAG_ASCII_MAX_LEN)
+            dump_len = QWIFI_WMI_DIAG_ASCII_MAX_LEN;
+
+        terminal_print("[K:QWIFI] WMI diag ascii +");
+        terminal_print_inline_hex64(start);
+        terminal_print(" len=");
+        terminal_print_inline_hex64(run);
+        terminal_print(" text=\"");
+        qwifi_print_ascii_bytes(buf + start, dump_len);
+        if (dump_len < run)
+            terminal_print("...");
+        terminal_print("\"");
+        terminal_flush_log();
+        printed++;
+    }
+
+    if (!printed)
+    {
+        terminal_print("[K:QWIFI] WMI diag ascii none");
+        terminal_flush_log();
+    }
+}
+
 static void qwifi_wmi_parse_diag_event(const uint8_t *payload, uint32_t len)
 {
     uint32_t off = 4u;
@@ -11176,13 +11721,15 @@ static void qwifi_wmi_parse_diag_event(const uint8_t *payload, uint32_t len)
 
         if (tag == QWIFI_WMI_TLV_TAG_ARRAY_BYTE)
         {
+            uint32_t force_dump = g_qwifi_wmi_diag_force_print ? 1u : 0u;
+
             if (g_qwifi_wmi_diag_event_count <= 3u ||
                 (g_qwifi_wmi_diag_event_count & 0x0Fu) == 0u ||
-                g_qwifi_wmi_diag_force_print)
+                force_dump)
             {
                 terminal_print("[K:QWIFI] WMI diag bytes count=");
                 terminal_print_inline_hex64(g_qwifi_wmi_diag_event_count);
-                if (g_qwifi_wmi_diag_force_print)
+                if (force_dump)
                 {
                     terminal_print(" forced=");
                     terminal_print_inline_hex64(g_qwifi_wmi_diag_force_print);
@@ -11233,6 +11780,13 @@ static void qwifi_wmi_parse_diag_event(const uint8_t *payload, uint32_t len)
                 terminal_flush_log();
             }
 
+            if (force_dump)
+            {
+                qwifi_wmi_diag_dump_trace_candidates(payload + data_off, tlv_len);
+                qwifi_wmi_diag_dump_dwords(payload + data_off, tlv_len);
+                qwifi_wmi_diag_dump_ascii_snips(payload + data_off, tlv_len);
+            }
+
             return;
         }
 
@@ -11246,6 +11800,8 @@ static void qwifi_wmi_parse_diag_event(const uint8_t *payload, uint32_t len)
 static void qwifi_wmi_parse_event(uint32_t eid, const uint8_t *payload, uint32_t len)
 {
     uint32_t event_id;
+    uint32_t event_seq;
+    uint32_t recent_idx;
     uint32_t dump_words;
     uint32_t log_event_line = 1u;
 
@@ -11254,7 +11810,17 @@ static void qwifi_wmi_parse_event(uint32_t eid, const uint8_t *payload, uint32_t
 
     event_id = qwifi_read_le32(payload);
     g_qwifi_wmi_last_event_id = event_id;
-    g_qwifi_wmi_event_count++;
+    event_seq = g_qwifi_wmi_event_count + 1u;
+    g_qwifi_wmi_event_count = event_seq;
+    recent_idx = g_qwifi_wmi_recent_pos;
+    g_qwifi_wmi_recent_seq[recent_idx] = event_seq;
+    g_qwifi_wmi_recent_eid[recent_idx] = eid;
+    g_qwifi_wmi_recent_id[recent_idx] = event_id;
+    g_qwifi_wmi_recent_len[recent_idx] = len;
+    g_qwifi_wmi_recent_w1[recent_idx] = (len >= 8u) ? qwifi_read_le32(payload + 4u) : 0u;
+    g_qwifi_wmi_recent_w2[recent_idx] = (len >= 12u) ? qwifi_read_le32(payload + 8u) : 0u;
+    g_qwifi_wmi_recent_w3[recent_idx] = (len >= 16u) ? qwifi_read_le32(payload + 12u) : 0u;
+    g_qwifi_wmi_recent_pos = (g_qwifi_wmi_recent_pos + 1u) % QWIFI_WMI_RECENT_EVENT_SLOTS;
     if (event_id == QWIFI_WMI_SERVICE_AVAILABLE_EVENTID)
         g_qwifi_wmi_service_available_seen = 1u;
     else if (event_id == QWIFI_WMI_SERVICE_READY_EVENTID)
@@ -11771,10 +12337,17 @@ static int qwifi_htc_send_setup_complete(uint64_t bar0_base)
 
 static void qwifi_htc_process_credit_report(uint32_t report_eid, uint32_t credits)
 {
+    g_qwifi_htc_credit_report_count++;
     if (report_eid == g_qwifi_htc_wmi_control_eid && credits)
+    {
         g_qwifi_htc_wmi_control_tx_credits += credits;
+        g_qwifi_htc_wmi_credit_report_count++;
+    }
     if (report_eid == g_qwifi_htc_wmi_scan_eid && credits)
+    {
         g_qwifi_htc_wmi_scan_tx_credits += credits;
+        g_qwifi_htc_scan_credit_report_count++;
+    }
 
     terminal_print("[K:QWIFI] HTC credit report eid=");
     terminal_print_inline_hex64(report_eid);
@@ -11784,6 +12357,8 @@ static void qwifi_htc_process_credit_report(uint32_t report_eid, uint32_t credit
     terminal_print_inline_hex64(g_qwifi_htc_wmi_control_tx_credits);
     terminal_print(" scan_total=");
     terminal_print_inline_hex64(g_qwifi_htc_wmi_scan_tx_credits);
+    terminal_print(" reports=");
+    terminal_print_inline_hex64(g_qwifi_htc_credit_report_count);
     terminal_flush_log();
 }
 

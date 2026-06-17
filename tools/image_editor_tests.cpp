@@ -405,8 +405,8 @@ static void test_highlighter_defaults_and_async_export()
     int layer = document_add_layer(EDITOR_LAYER_HIGHLIGHTER);
     check(layer >= 0, "add highlighter");
     check(g_doc.layers[layer].color == 0xFFFFD60Au &&
-              g_doc.layers[layer].stroke == 20u &&
-              g_doc.layers[layer].opacity == 110u,
+              g_doc.layers[layer].stroke == 32u &&
+              g_doc.layers[layer].opacity == 15u,
           "highlighter defaults are thick yellow and transparent");
     document_commit();
 

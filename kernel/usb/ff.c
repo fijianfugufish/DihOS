@@ -1636,7 +1636,7 @@ static FRESULT remove_chain(			  /* FR_OK(0):succeeded, !=0:error */
 		}
 #endif
 		clst = nxt; /* Next cluster */
-		if (++busy_clusters >= 16)
+		if (++busy_clusters >= 4)
 		{
 			busy_clusters = 0;
 			kbusy_pump();

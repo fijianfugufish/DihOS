@@ -98,7 +98,7 @@ static int writer_write(kimg_writer *writer, const void *data, uint32_t size)
         }
         total += written;
         writer->bytes_since_pump += written;
-        if (writer->bytes_since_pump >= 65536u)
+        if (writer->bytes_since_pump >= 16384u)
         {
             writer->bytes_since_pump = 0u;
             kbusy_pump();
@@ -352,7 +352,7 @@ static int kimg_write_jpeg(const kimg *img, kimg_writer *writer, uint32_t qualit
             rgb[i * 3ull + 1ull] = (uint8_t)((((pixel >> 8) & 0xFFu) * alpha + 255u * inv + 127u) / 255u);
             rgb[i * 3ull + 2ull] = (uint8_t)(((pixel & 0xFFu) * alpha + 255u * inv + 127u) / 255u);
         }
-        if ((y & 31u) == 31u)
+        if ((y & 7u) == 7u)
             kbusy_pump();
     }
 

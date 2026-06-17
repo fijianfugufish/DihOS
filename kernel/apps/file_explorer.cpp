@@ -14,6 +14,7 @@ extern "C"
 #include "kwrappers/kinput.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
+#include "system/kbusy.h"
 }
 
 namespace
@@ -248,7 +249,9 @@ namespace
         {
             BUSY_NONE = 0,
             BUSY_DELETE,
-            BUSY_RELOAD
+            BUSY_RELOAD,
+            BUSY_LAUNCH_PROGRAM,
+            BUSY_OPEN_TEXT
         };
 
         struct Entry
@@ -302,6 +305,11 @@ namespace
         int ReloadDirectory(const char *preferred_name);
         int BeginReload(const char *preferred_name, const char *success_text,
                         kcolor success_color, const char *failure_text);
+        int BeginProgramLaunch(const char *raw_path, const char *friendly_path,
+                               const char *arg_raw_path, const char *arg_friendly_path,
+                               uint32_t flags, const char *success_text);
+        int BeginTextOpen(const char *raw_path, const char *friendly_path);
+        void BeginWindowBusyPump(void);
         void UpdateBusy(void);
         void InsertEntrySorted(const kdirent &entry);
         void FinishBusy(const char *status, kcolor color);
@@ -393,11 +401,15 @@ namespace
         uint8_t busy_phase_;
         KDir busy_dir_;
         char busy_path_[DIHOS_PATH_CAP];
+        char busy_friendly_[DIHOS_PATH_CAP];
+        char busy_arg_raw_[DIHOS_PATH_CAP];
+        char busy_arg_friendly_[DIHOS_PATH_CAP];
         char busy_preferred_[256];
         char busy_success_[STATUS_CAP];
         char busy_failure_[STATUS_CAP];
         kcolor busy_success_color_;
         uint32_t busy_saved_cursor_;
+        uint32_t busy_launch_flags_;
         char current_dir_[DIHOS_PATH_CAP];
         char current_raw_[DIHOS_PATH_CAP];
         char status_buffer_[STATUS_CAP];
@@ -461,11 +473,15 @@ namespace
         busy_mode_ = BUSY_NONE;
         busy_phase_ = 0u;
         busy_path_[0] = 0;
+        busy_friendly_[0] = 0;
+        busy_arg_raw_[0] = 0;
+        busy_arg_friendly_[0] = 0;
         busy_preferred_[0] = 0;
         busy_success_[0] = 0;
         busy_failure_[0] = 0;
         busy_success_color_ = rgb(148, 232, 180);
         busy_saved_cursor_ = KMOUSE_CURSOR_ARROW;
+        busy_launch_flags_ = 0u;
         layout_dirty_ = 1u;
         actions_dirty_ = 1u;
         rows_dirty_ = 1u;
@@ -1465,6 +1481,53 @@ namespace
         return 0;
     }
 
+    int FileExplorer::BeginProgramLaunch(const char *raw_path, const char *friendly_path,
+                                         const char *arg_raw_path, const char *arg_friendly_path,
+                                         uint32_t flags, const char *success_text)
+    {
+        if (busy_mode_ != BUSY_NONE || !raw_path || !raw_path[0])
+            return -1;
+        copy_text(busy_path_, sizeof(busy_path_), raw_path);
+        copy_text(busy_friendly_, sizeof(busy_friendly_), friendly_path);
+        copy_text(busy_arg_raw_, sizeof(busy_arg_raw_), arg_raw_path);
+        copy_text(busy_arg_friendly_, sizeof(busy_arg_friendly_), arg_friendly_path);
+        copy_text(busy_success_, sizeof(busy_success_), success_text);
+        copy_text(busy_failure_, sizeof(busy_failure_), "unable to open app");
+        busy_success_color_ = rgb(148, 232, 180);
+        busy_saved_cursor_ = (uint32_t)kmouse_current_cursor();
+        busy_launch_flags_ = flags;
+        busy_mode_ = BUSY_LAUNCH_PROGRAM;
+        busy_phase_ = 0u;
+        actions_dirty_ = 1u;
+        SetStatus("Opening app...", rgb(255, 214, 120));
+        return 0;
+    }
+
+    int FileExplorer::BeginTextOpen(const char *raw_path, const char *friendly_path)
+    {
+        if (busy_mode_ != BUSY_NONE || !raw_path || !raw_path[0])
+            return -1;
+        copy_text(busy_path_, sizeof(busy_path_), raw_path);
+        copy_text(busy_friendly_, sizeof(busy_friendly_), friendly_path);
+        copy_text(busy_success_, sizeof(busy_success_), "opened in text editor");
+        copy_text(busy_failure_, sizeof(busy_failure_), "unable to open file in text editor");
+        busy_success_color_ = rgb(148, 232, 180);
+        busy_saved_cursor_ = (uint32_t)kmouse_current_cursor();
+        busy_mode_ = BUSY_OPEN_TEXT;
+        busy_phase_ = 0u;
+        actions_dirty_ = 1u;
+        SetStatus("Opening text editor...", rgb(255, 214, 120));
+        return 0;
+    }
+
+    void FileExplorer::BeginWindowBusyPump(void)
+    {
+        if (window_.idx >= 0)
+            kbusy_begin_window(window_);
+        else
+            kbusy_begin();
+    }
+
     void FileExplorer::UpdateBusy(void)
     {
         if (kwindow_point_can_receive_input(window_, kmouse_x(), kmouse_y()))
@@ -1472,11 +1535,44 @@ namespace
         else if (kmouse_current_cursor() == KMOUSE_CURSOR_WAIT)
             (void)kmouse_set_cursor((kmouse_cursor)busy_saved_cursor_);
 
+        if (busy_mode_ == BUSY_LAUNCH_PROGRAM)
+        {
+            int rc;
+            if (busy_phase_++ == 0u)
+                return;
+            BeginWindowBusyPump();
+            rc = terminal_open_program_with_arg_ex(
+                busy_path_, busy_friendly_,
+                busy_arg_raw_[0] ? busy_arg_raw_ : 0,
+                busy_arg_friendly_[0] ? busy_arg_friendly_ : 0,
+                busy_launch_flags_);
+            kbusy_end();
+            FinishBusy(rc == 0 ? busy_success_ : busy_failure_,
+                       rc == 0 ? busy_success_color_ : rgb(255, 140, 140));
+            return;
+        }
+
+        if (busy_mode_ == BUSY_OPEN_TEXT)
+        {
+            int rc;
+            if (busy_phase_++ == 0u)
+                return;
+            BeginWindowBusyPump();
+            rc = text_editor_open_path(busy_path_, busy_friendly_);
+            kbusy_end();
+            FinishBusy(rc == 0 ? busy_success_ : busy_failure_,
+                       rc == 0 ? busy_success_color_ : rgb(255, 140, 140));
+            return;
+        }
+
         if (busy_mode_ == BUSY_DELETE)
         {
             if (busy_phase_++ == 0u)
                 return;
-            if (kfile_unlink(busy_path_) != 0)
+            BeginWindowBusyPump();
+            int rc = kfile_unlink(busy_path_);
+            kbusy_end();
+            if (rc != 0)
             {
                 FinishBusy("unable to delete entry", rgb(255, 140, 140));
                 return;
@@ -1912,13 +2008,12 @@ namespace
 
         is_sacx = has_sacx_extension(entries_[selected_index_].name);
 
-        if (terminal_open_program(raw, friendly) != 0)
+        if (BeginProgramLaunch(raw, friendly, 0, 0, TERMINAL_OPEN_FLAG_NONE,
+                               is_sacx ? "running SACX app" : "running SAC script") != 0)
         {
             SetStatus("unable to open app terminal", rgb(255, 140, 140));
             return;
         }
-
-        SetStatus(is_sacx ? "running SACX app" : "running SAC script", rgb(148, 232, 180));
     }
 
     void FileExplorer::OpenSelectedInImageViewer(void)
@@ -1933,14 +2028,13 @@ namespace
             return;
         }
 
-        if (terminal_open_program_with_arg_ex(kImageViewerRawPath, kImageViewerFriendlyPath,
-                                              raw, friendly, TERMINAL_OPEN_FLAG_NO_WINDOW) != 0)
+        if (BeginProgramLaunch(kImageViewerRawPath, kImageViewerFriendlyPath,
+                               raw, friendly, TERMINAL_OPEN_FLAG_NO_WINDOW,
+                               "opening image editor") != 0)
         {
             SetStatus("unable to open image editor", rgb(255, 140, 140));
             return;
         }
-
-        SetStatus("opening image editor", rgb(148, 232, 180));
     }
 
     void FileExplorer::OpenSelectedInTextEditor(void)
@@ -1955,7 +2049,7 @@ namespace
             return;
         }
 
-        if (text_editor_open_path(raw, friendly) != 0)
+        if (BeginTextOpen(raw, friendly) != 0)
             SetStatus("unable to open file in text editor", rgb(255, 140, 140));
     }
 

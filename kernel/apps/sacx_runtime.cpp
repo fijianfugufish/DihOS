@@ -22,6 +22,7 @@ extern "C"
 #include "kwrappers/string.h"
 #include "memory/pmem.h"
 #include "system/dihos_time.h"
+#include "system/kbusy.h"
 #include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
 }
@@ -42,7 +43,6 @@ extern "C"
 #define SACX_MAX_SLICES 8u
 #define SACX_MAX_FILE_BYTES (32u * 1024u * 1024u)
 #define SACX_APP_ARENA_BYTES (64u * 1024u * 1024u)
-#define SACX_APP_ARENA_PAGES (SACX_APP_ARENA_BYTES / 4096u)
 #define SACX_SCHED_DEFAULT_QUANTUM_TICKS 1u
 
 typedef struct sacx_task sacx_task;
@@ -167,9 +167,19 @@ static uint32_t G_next_task_id = 1u;
 static uint32_t G_rr_cursor = 0u;
 static const kfont *G_runtime_font = 0;
 
+static kwindow_handle sacx_task_busy_window(sacx_task *task);
+
 static void sacx_sync_executable_range(const void *base, uint32_t size)
 {
-    asm_sync_executable_range(base, (uint64_t)size);
+    const uint8_t *bytes = (const uint8_t *)base;
+    while (size)
+    {
+        uint32_t chunk = size > 65536u ? 65536u : size;
+        asm_sync_executable_range(bytes, (uint64_t)chunk);
+        bytes += chunk;
+        size -= chunk;
+        kbusy_pump();
+    }
 }
 
 static int sacx_ptr_in_image(const sacx_task *task, const void *ptr)
@@ -280,9 +290,39 @@ static uint32_t sacx_crc32_zero_range(const uint8_t *data, uint32_t size, uint32
             else
                 crc >>= 1;
         }
+        if ((i & 0x3FFFu) == 0x3FFFu)
+            kbusy_pump();
     }
 
     return ~crc;
+}
+
+static void sacx_memset_cooperative(void *dst, uint8_t value, uint32_t size)
+{
+    uint8_t *bytes = (uint8_t *)dst;
+    while (size)
+    {
+        uint32_t chunk = size > 65536u ? 65536u : size;
+        memset(bytes, value, chunk);
+        bytes += chunk;
+        size -= chunk;
+        kbusy_pump();
+    }
+}
+
+static void sacx_memcpy_cooperative(void *dst, const void *src, uint32_t size)
+{
+    uint8_t *out = (uint8_t *)dst;
+    const uint8_t *in = (const uint8_t *)src;
+    while (size)
+    {
+        uint32_t chunk = size > 65536u ? 65536u : size;
+        memcpy(out, in, chunk);
+        out += chunk;
+        in += chunk;
+        size -= chunk;
+        kbusy_pump();
+    }
 }
 
 static int sacx_range_ok(uint32_t off, uint32_t len, uint32_t total)
@@ -1167,7 +1207,7 @@ static int sacx_read_file_all(const char *path, uint8_t **out_buf, uint32_t *out
     KFile file;
     uint64_t size64 = 0u;
     uint32_t size = 0u;
-    uint32_t read = 0u;
+    uint32_t total_read = 0u;
     uint32_t pages = 0u;
     uint8_t *buf = 0;
 
@@ -1196,11 +1236,20 @@ static int sacx_read_file_all(const char *path, uint8_t **out_buf, uint32_t *out
         return -1;
     }
 
-    if (kfile_read(&file, buf, size, &read) != 0 || read != size)
+    while (total_read < size)
     {
-        pmem_free_pages(buf, pages);
-        kfile_close(&file);
-        return -1;
+        uint32_t chunk = size - total_read;
+        uint32_t read = 0u;
+        if (chunk > 16384u)
+            chunk = 16384u;
+        if (kfile_read(&file, buf + total_read, chunk, &read) != 0 || read != chunk)
+        {
+            pmem_free_pages(buf, pages);
+            kfile_close(&file);
+            return -1;
+        }
+        total_read += read;
+        kbusy_pump();
     }
 
     kfile_close(&file);
@@ -1324,6 +1373,7 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
     const char *strings = 0;
     const uint8_t *image_blob = 0;
     uint32_t image_blob_size = 0u;
+    uint32_t arena_pages = 0u;
 
     if (!task || !file_data || file_size < sizeof(sacx_header))
         return -1;
@@ -1369,11 +1419,12 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
             return -1;
     }
 
-    task->arena = (uint8_t *)pmem_alloc_executable_pages(SACX_APP_ARENA_PAGES);
+    arena_pages = (hdr->image_size + 4095u) / 4096u;
+    task->arena = (uint8_t *)pmem_alloc_executable_pages(arena_pages);
     if (!task->arena)
         return -1;
-    task->arena_size = SACX_APP_ARENA_BYTES;
-    memset(task->arena, 0, task->arena_size);
+    task->arena_size = arena_pages * 4096u;
+    sacx_memset_cooperative(task->arena, 0u, task->arena_size);
     task->image_base = task->arena;
     task->image_size = hdr->image_size;
 
@@ -1395,9 +1446,9 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
         dst = task->image_base + seg.rva;
         src = image_blob + seg.file_offset;
         if (seg.file_size)
-            memcpy(dst, src, seg.file_size);
+            sacx_memcpy_cooperative(dst, src, seg.file_size);
         if (seg.mem_size > seg.file_size)
-            memset(dst + seg.file_size, 0, seg.mem_size - seg.file_size);
+            sacx_memset_cooperative(dst + seg.file_size, 0u, seg.mem_size - seg.file_size);
     }
 
     for (uint32_t i = 0u; i < hdr->reloc_count; ++i)
@@ -1711,9 +1762,18 @@ static int sacx_api_file_close(uint32_t handle)
 
 static int sacx_api_file_unlink(const char *path)
 {
+    kwindow_handle busy_window;
+    int rc;
     if (!path)
         return -1;
-    return kfile_unlink(path);
+    busy_window = sacx_task_busy_window(G_current_task);
+    if (busy_window.idx >= 0)
+        kbusy_begin_window(busy_window);
+    else
+        kbusy_begin();
+    rc = kfile_unlink(path);
+    kbusy_end();
+    return rc;
 }
 
 static int sacx_api_file_rename(const char *src, const char *dst)
@@ -3078,12 +3138,40 @@ static int sacx_api_img_touch(uint32_t image_handle)
     return 0;
 }
 
+static kwindow_handle sacx_task_busy_window(sacx_task *task)
+{
+    kwindow_handle none = {-1};
+    if (!task)
+        return none;
+    for (uint32_t pass = 0u; pass < 2u; ++pass)
+    {
+        for (uint32_t i = 0u; i < SACX_MAX_TASK_WINDOWS; ++i)
+        {
+            if (!task->windows[i].used || !kwindow_visible(task->windows[i].handle))
+                continue;
+            if (pass == 0u && !kwindow_focused(task->windows[i].handle))
+                continue;
+            return task->windows[i].handle;
+        }
+    }
+    return none;
+}
+
 static int sacx_api_img_save(uint32_t image_handle, const char *path, uint32_t format, uint32_t quality)
 {
     sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    kwindow_handle busy_window;
+    int rc;
     if (!slot || !slot->image.px || !path || !path[0])
         return -1;
-    return kimg_save(&slot->image, path, format, quality);
+    busy_window = sacx_task_busy_window(G_current_task);
+    if (busy_window.idx >= 0)
+        kbusy_begin_window(busy_window);
+    else
+        kbusy_begin();
+    rc = kimg_save(&slot->image, path, format, quality);
+    kbusy_end();
+    return rc;
 }
 
 static int sacx_api_img_draw_text(uint32_t image_handle, int32_t x, int32_t y, const char *text,
