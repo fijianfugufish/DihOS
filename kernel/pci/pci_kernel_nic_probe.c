@@ -859,8 +859,8 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_HW_TXRX_UNKNOWN 0xFFFFFFFFu
 #define QWIFI_SEND_EXPLICIT_STA_MLME 1u
 #define QWIFI_MINIMAL_HOST_MLME_PREAUTH 0u
-#define QWIFI_PREAUTH_VDEV_UP 1u
-#define QWIFI_WMI_MGMT_TX_LEGACY_FOR_MLME 1u
+#define QWIFI_PREAUTH_VDEV_UP 0u
+#define QWIFI_WMI_MGMT_TX_LEGACY_FOR_MLME 0u
 #define QWIFI_WMI_MGMT_TX_BY_VALUE 0u
 #define QWIFI_WMI_MGMT_TX_APPEND_MLO_PARAMS 0u
 #define QWIFI_WMI_MGMT_TX_HW_LINK_ID 0xFFFFFFFFu
@@ -882,7 +882,7 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_WMI_PREAUTH_TX_ENCAP_MODE QWIFI_HW_TXRX_NATIVE_WIFI
 #define QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS 2u
 #define QWIFI_WMI_MGMT_TX_OFFCHAN_CMD_FOR_EXPLICIT 0u
-#define QWIFI_WMI_STA_MLME_FIRST_EXPLICIT 0u
+#define QWIFI_WMI_STA_MLME_FIRST_EXPLICIT 1u
 #define QWIFI_WMI_CHAN_INFO_MODE_MASK 0x3Fu
 #define QWIFI_WMI_PHY_MODE_11AX_HE20 16u
 #define QWIFI_WMI_PHY_MODE_11AX_HE20_2G 21u
@@ -2411,6 +2411,9 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         terminal_flush_log();
         (void)pci_kernel_wifi_poll_events(64u);
     }
+#else
+    terminal_print("[K:QWIFI] connect pre-auth: defer vdev up until after AP association");
+    terminal_flush_log();
 #endif
 #endif
 
@@ -10728,12 +10731,11 @@ static int qwifi_wmi_send_mgmt_tx_legacy(uint64_t bar0_base,
         return 0;
     }
 
-    (void)qwifi_wmi_wait_mgmt_tx_completion(bar0_base,
-                                            desc_id,
-                                            start_count,
-                                            QWIFI_WMI_MGMT_TX_COMPLETION_WAIT_ROUNDS,
-                                            "legacy-mgmt");
-    return 1;
+    return qwifi_wmi_wait_mgmt_tx_completion(bar0_base,
+                                             desc_id,
+                                             start_count,
+                                             QWIFI_WMI_MGMT_TX_COMPLETION_WAIT_ROUNDS,
+                                             "legacy-mgmt") ? 1 : 0;
 }
 
 static int qwifi_wmi_send_mgmt_tx(uint64_t bar0_base, const uint8_t *frame, uint32_t len, uint32_t use_offchan)
