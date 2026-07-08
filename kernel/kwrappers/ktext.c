@@ -217,20 +217,10 @@ static void foreach_outline_offset(uint32_t t, void (*fn)(int dx, int dy, void *
     }
 }
 
-/* ------------ public load (PSF2 or PSF1) -------------- */
-int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t *out_size)
+static int ktext_parse_psf_blob(const uint8_t *p, uint32_t sz, kfont *out)
 {
-    if (!path || !out || !out_blob || !out_size)
+    if (!p || !out || sz < 4)
         return -1;
-
-    void *blob = 0;
-    uint32_t sz = 0;
-    if (read_all_file(path, &blob, &sz) != 0)
-        return -1;
-    if (sz < 4)
-        return -1;
-
-    const uint8_t *p = (const uint8_t *)blob;
 
     /* Try PSF2 first */
     if (sz >= sizeof(psf2_hdr))
@@ -278,8 +268,6 @@ int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t 
                 sp_adv = out->tight_width[' '];
             out->space_advance = sp_adv;
 
-            *out_blob = blob;
-            *out_size = sz;
             return 0;
         }
     }
@@ -328,13 +316,39 @@ int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t 
                 sp_adv = out->tight_width[' '];
             out->space_advance = sp_adv;
 
-            *out_blob = blob;
-            *out_size = sz;
             return 0;
         }
     }
 
     return -1; // unknown format
+}
+
+int ktext_load_psf_blob(const void *blob, uint32_t size, kfont *out)
+{
+    if (!blob || !out)
+        return -1;
+    *out = (kfont){0};
+    return ktext_parse_psf_blob((const uint8_t *)blob, size, out);
+}
+
+/* ------------ public load (PSF2 or PSF1) -------------- */
+int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t *out_size)
+{
+    if (!path || !out || !out_blob || !out_size)
+        return -1;
+
+    void *blob = 0;
+    uint32_t sz = 0;
+    if (read_all_file(path, &blob, &sz) != 0)
+        return -1;
+
+    *out = (kfont){0};
+    if (ktext_parse_psf_blob((const uint8_t *)blob, sz, out) != 0)
+        return -1;
+
+    *out_blob = blob;
+    *out_size = sz;
+    return 0;
 }
 
 /* ------------ drawing -------------- */

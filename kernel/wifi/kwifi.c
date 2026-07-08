@@ -58,6 +58,7 @@ typedef struct
     uint8_t reconnect_attempts;
     uint8_t assoc_kick_attempts;
     uint8_t terminal_failure;
+    uint8_t auth_type;
     uint16_t peap_clienthello_len;
     uint32_t peap_tls_rx_bytes;
     uint32_t peap_tls_rx_total_len;
@@ -90,11 +91,18 @@ static uint32_t kwifi_try_assoc_kick(void)
     assoc_done = pci_kernel_wifi_peer_assoc_done();
     if (assoc_done || !g_kwifi_connect.requested || !g_kwifi_connect.ssid[0])
         return assoc_done;
+    if (pci_kernel_wifi_wmi_control_credits() == 0u)
+    {
+        terminal_print("[K:WIFI] assoc kick skipped: waiting for WMI control credit ssid=");
+        terminal_print(g_kwifi_connect.ssid);
+        terminal_flush_log();
+        return assoc_done;
+    }
     if (g_kwifi_connect.assoc_kick_attempts >= 3u)
         return assoc_done;
 
     g_kwifi_connect.assoc_kick_attempts++;
-    terminal_print("[K:WIFI] enterprise assoc kick attempt=");
+    terminal_print("[K:WIFI] assoc kick attempt=");
     terminal_print_inline_hex64(g_kwifi_connect.assoc_kick_attempts);
     terminal_print(" ssid=");
     terminal_print(g_kwifi_connect.ssid);
@@ -245,6 +253,44 @@ static uint32_t kwifi_have_visible_network(const char *ssid)
     }
 
     return 0u;
+}
+
+static uint32_t kwifi_find_visible_network_auth_type(const char *ssid)
+{
+    uint32_t count = kwifi_network_count();
+
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        const char *name;
+        if (kwifi_network_hidden(i))
+            continue;
+
+        name = kwifi_network_name(i);
+        if (name && kwifi_str_eq(name, ssid))
+            return pci_kernel_wifi_network_auth_type(i);
+    }
+
+    return PCI_KERNEL_WIFI_AUTH_AUTO;
+}
+
+static const char *kwifi_auth_type_name(uint32_t auth_type)
+{
+    switch (auth_type)
+    {
+    case PCI_KERNEL_WIFI_AUTH_OPEN:
+        return "open";
+    case PCI_KERNEL_WIFI_AUTH_WPA2_PERSONAL:
+        return "wpa2-personal";
+    case PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE:
+        return "wpa2-enterprise";
+    case PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL:
+        return "wpa3-personal";
+    case PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN:
+        return "protected-unknown";
+    case PCI_KERNEL_WIFI_AUTH_AUTO:
+    default:
+        return "auto";
+    }
 }
 
 static void kwifi_set_status(const char *status)
@@ -1471,6 +1517,11 @@ uint32_t kwifi_network_hidden(uint32_t index)
     return pci_kernel_wifi_network_hidden(index);
 }
 
+const char *kwifi_network_auth_mode(uint32_t index)
+{
+    return pci_kernel_wifi_network_auth_mode(index);
+}
+
 int kwifi_network_refresh(void)
 {
     if (!kwifi_start_driver_if_needed("networks"))
@@ -1521,6 +1572,7 @@ int kwifi_connect_request(const char *ssid,
     uint32_t user_len;
     uint32_t pass_len;
     uint32_t found;
+    uint32_t auth_type;
     uint8_t bssid[6];
     uint32_t bssid_valid = 0u;
     uint32_t chan_mhz = 0u;
@@ -1604,9 +1656,15 @@ int kwifi_connect_request(const char *ssid,
         found = kwifi_have_visible_network(ssid);
     }
 
+    auth_type = (username && username[0]) ? PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE :
+                kwifi_find_visible_network_auth_type(ssid);
+    if (auth_type == PCI_KERNEL_WIFI_AUTH_AUTO)
+        auth_type = found ? PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN : PCI_KERNEL_WIFI_AUTH_AUTO;
+
     g_kwifi_connect.requested = 1u;
     g_kwifi_connect.connected = 0u;
-    g_kwifi_connect.enterprise = (username && username[0]) ? 1u : 0u;
+    g_kwifi_connect.auth_type = (uint8_t)auth_type;
+    g_kwifi_connect.enterprise = (auth_type == PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE) ? 1u : 0u;
     g_kwifi_connect.control_port_authorized = g_kwifi_connect.enterprise ? 0u : 1u;
     g_kwifi_connect.supplicant_ready = 0u;
     g_kwifi_connect.eapol_start_sent = 0u;
@@ -1643,9 +1701,16 @@ int kwifi_connect_request(const char *ssid,
         terminal_print("[K:WIFI] MSCHAPv2 NT password hash prepared");
     }
     kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode),
-                     g_kwifi_connect.enterprise ? "wpa2-enterprise" : "non-enterprise");
+                     kwifi_auth_type_name(auth_type));
     kwifi_set_eap_phase(0u, "none");
     kwifi_set_peap_phase(0u, "none");
+
+    if (!pci_kernel_wifi_set_connect_auth_preference(g_kwifi_connect.enterprise ? PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE :
+                                                                                PCI_KERNEL_WIFI_AUTH_AUTO))
+    {
+        terminal_print("[K:WIFI] connect rejected: auth preference setup failed");
+        return 0;
+    }
 
     if (!pci_kernel_wifi_set_connect_override(bssid, bssid_valid, chan_mhz))
     {
@@ -1660,7 +1725,7 @@ int kwifi_connect_request(const char *ssid,
         return 1;
     }
 
-    if (username && username[0])
+    if (g_kwifi_connect.enterprise)
     {
         if (!pci_kernel_wifi_connect_ssid(ssid))
         {
@@ -1686,8 +1751,23 @@ int kwifi_connect_request(const char *ssid,
 
     if (pci_kernel_wifi_connect_ssid(ssid))
     {
+        auth_type = pci_kernel_wifi_connect_auth_type();
+        g_kwifi_connect.auth_type = (uint8_t)auth_type;
+        kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode),
+                         pci_kernel_wifi_connect_auth_mode());
         kwifi_set_status("firmware association attempt sent; awaiting auth/link confirmation");
         terminal_print("[K:WIFI] connect attempt sent to firmware");
+        return 1;
+    }
+
+    auth_type = pci_kernel_wifi_connect_auth_type();
+    if (auth_type == PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL)
+    {
+        g_kwifi_connect.auth_type = (uint8_t)auth_type;
+        kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode),
+                         pci_kernel_wifi_connect_auth_mode());
+        kwifi_set_status("WPA3-Personal detected; SAE handshake needed before association");
+        terminal_print("[K:WIFI] WPA3-Personal selected; SAE handshake not implemented yet");
         return 1;
     }
 
@@ -1798,8 +1878,9 @@ int kwifi_poll_connection(uint32_t rounds)
     uint32_t assoc_done;
     uint32_t key_done;
     uint32_t roam_reason;
+    uint32_t auth_type;
 
-    if (!g_kwifi_connect.requested || !g_kwifi_connect.enterprise)
+    if (!g_kwifi_connect.requested)
         return 0;
     if (g_kwifi_connect.terminal_failure)
         return 0;
@@ -1809,6 +1890,73 @@ int kwifi_poll_connection(uint32_t rounds)
     if (rounds == 0u)
         rounds = 32u;
     (void)pci_kernel_wifi_poll_events(rounds);
+
+    if (!g_kwifi_connect.enterprise)
+    {
+        auth_type = kwifi_find_visible_network_auth_type(g_kwifi_connect.ssid);
+        if (auth_type == PCI_KERNEL_WIFI_AUTH_AUTO)
+            auth_type = pci_kernel_wifi_connect_auth_type();
+        if (auth_type != PCI_KERNEL_WIFI_AUTH_AUTO)
+        {
+            g_kwifi_connect.auth_type = (uint8_t)auth_type;
+            kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode), kwifi_auth_type_name(auth_type));
+        }
+
+        assoc_done = pci_kernel_wifi_peer_assoc_done();
+        key_done = pci_kernel_wifi_install_key_done();
+        roam_reason = pci_kernel_wifi_roam_reason();
+
+        if (g_kwifi_connect.auth_type == PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL)
+        {
+            g_kwifi_connect.connected = 0u;
+            kwifi_set_status("WPA3-Personal selected; SAE handshake needed before association");
+            return 0;
+        }
+
+        if (!assoc_done && kwifi_have_visible_network(g_kwifi_connect.ssid))
+        {
+            assoc_done = kwifi_try_assoc_kick();
+            key_done = pci_kernel_wifi_install_key_done();
+            roam_reason = pci_kernel_wifi_roam_reason();
+            auth_type = pci_kernel_wifi_connect_auth_type();
+            if (auth_type != PCI_KERNEL_WIFI_AUTH_AUTO)
+            {
+                g_kwifi_connect.auth_type = (uint8_t)auth_type;
+                kwifi_copy_trunc(g_kwifi_connect.auth_mode, sizeof(g_kwifi_connect.auth_mode),
+                                 pci_kernel_wifi_connect_auth_mode());
+            }
+        }
+
+        if (key_done)
+        {
+            g_kwifi_connect.connected = 1u;
+            kwifi_set_status("personal key install complete; link authorized");
+            return 1;
+        }
+        if (assoc_done && roam_reason != 2u)
+        {
+            g_kwifi_connect.connected = 0u;
+            kwifi_set_status("AP association confirmed; personal RSN key handshake needed");
+            return 1;
+        }
+        if (roam_reason == 2u)
+        {
+            g_kwifi_connect.connected = 0u;
+            kwifi_set_status("personal association pending, but firmware reports beacon-miss");
+            return 0;
+        }
+        if (pci_kernel_wifi_wmi_control_credits() == 0u)
+        {
+            g_kwifi_connect.connected = 0u;
+            kwifi_set_status("personal association pending; waiting for WMI control credit");
+            return 0;
+        }
+
+        g_kwifi_connect.connected = 0u;
+        kwifi_set_status("personal association pending; waiting for AP response");
+        return 0;
+    }
+
     (void)kwifi_enterprise_process_rx();
     assoc_done = pci_kernel_wifi_peer_assoc_done();
     key_done = pci_kernel_wifi_install_key_done();

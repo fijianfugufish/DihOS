@@ -7,14 +7,27 @@ void pci_kernel_probe_nics_from_mcfg(const boot_info *bi);
 uint32_t pci_kernel_wifi_network_count(void);
 const char *pci_kernel_wifi_network_name(uint32_t index);
 uint32_t pci_kernel_wifi_network_hidden(uint32_t index);
+uint32_t pci_kernel_wifi_network_auth_type(uint32_t index);
+const char *pci_kernel_wifi_network_auth_mode(uint32_t index);
 int pci_kernel_wifi_trigger_scan(void);
 int pci_kernel_wifi_poll_events(uint32_t rounds);
 uint32_t pci_kernel_wifi_scan_running(void);
 int pci_kernel_wifi_connect_ssid(const char *ssid);
 int pci_kernel_wifi_set_connect_override(const uint8_t *bssid, uint32_t bssid_valid, uint32_t chan_mhz);
+int pci_kernel_wifi_set_connect_auth_preference(uint32_t auth_type);
+uint32_t pci_kernel_wifi_connect_auth_type(void);
+const char *pci_kernel_wifi_connect_auth_mode(void);
+uint32_t pci_kernel_wifi_wmi_control_credits(void);
 int pci_kernel_wifi_set_peer_authorize(uint32_t authorize);
 int pci_kernel_wifi_tx_l2_frame(const uint8_t *frame, uint32_t len);
 int pci_kernel_wifi_tx_l2_frame_mode(const uint8_t *frame, uint32_t len, uint32_t mode);
+
+#define PCI_KERNEL_WIFI_AUTH_AUTO 0u
+#define PCI_KERNEL_WIFI_AUTH_OPEN 1u
+#define PCI_KERNEL_WIFI_AUTH_WPA2_PERSONAL 2u
+#define PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE 3u
+#define PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL 4u
+#define PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN 5u
 
 #define PCI_KERNEL_WIFI_TX_MODE_MGMT 0u
 #define PCI_KERNEL_WIFI_TX_MODE_OFFCHAN 1u

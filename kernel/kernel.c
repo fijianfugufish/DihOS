@@ -13,6 +13,8 @@
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
 #include "system/dihos_time.h"
+#include "system/ksystem_font.h"
+#include "system/kearly_console.h"
 #include "apps/desktop_shell_api.h"
 #include "apps/screenshot_service.h"
 #include "apps/file_explorer_api.h"
@@ -111,6 +113,9 @@ void kmain(boot_info *bi)
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
     pmem_init(bi);
 
+    kfont fallback_font = (kfont){0};
+    int have_fallback_font = (ksystem_font_init_fallback(&fallback_font) == 0);
+
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     /* Probe reads install temporary vectors locally; keep global VBAR untouched. */
 #endif
@@ -120,6 +125,10 @@ void kmain(boot_info *bi)
     kwindow_init();
 
     crumb((kcolor){20, 20, 20});
+    kearly_console_begin(have_fallback_font ? &fallback_font : 0);
+    terminal_print("early console online");
+    if (!have_fallback_font)
+        terminal_warn("embedded psf fallback unavailable; using block debug font");
 
     uint64_t xhci_mmio_order[BOOTINFO_XHCI_MMIO_MAX] = {0};
     uint32_t xhci_mmio_count =
@@ -168,41 +177,71 @@ void kmain(boot_info *bi)
 
     if (xhci_mmio_count || bi->acpi_rsdp)
     {
+        terminal_print("usb: probing xhci storage");
         usb_ok = usbdisk_bind_and_enumerate_multi(
             xhci_mmio_bases,
             xhci_mmio_count,
             bi->acpi_rsdp);
+    }
+    else
+    {
+        terminal_warn("usb: no xhci hints or acpi rsdp");
     }
 
     // Mount only when enumeration succeeded
     int mounted = 0;
     if (usb_ok == 0)
     {
+        terminal_print("usb: storage enumerated; mounting filesystem");
         kfile_bind_blockdev(&g_usb_bd);
         // crumb((kcolor){20, 20, 20});
         mounted = (kfile_mount0() == 0);
+        if (!mounted)
+        {
+            terminal_error("usb: filesystem mount failed");
+            terminal_error("usb: fatal stop for debug");
+            for (;;)
+                asm_wait();
+        }
+    }
+    else
+    {
+        terminal_error("usb: storage unavailable");
+        terminal_error("usb: fatal stop for debug");
+        for (;;)
+            asm_wait();
     }
 
     // Prepare backbuffer/scene after breadcrumbs (they draw to front buffer)
-    if (kgfx_scene_init() != 0 || !mounted)
+    if (kgfx_scene_init() != 0)
+    {
+        terminal_error("gfx: scene init failed");
         for (;;)
             asm_wait();
+    }
+    kearly_console_end();
 
-    // Try to load a PSF font only if mounted
-    kfont font = (kfont){0};
+    // Prefer the disk system font when mounted; otherwise keep the embedded fallback.
+    kfont disk_font = (kfont){0};
     void *font_blob = 0;
     uint32_t font_blob_sz = 0;
-    int have_font = 0;
+    kfont *font = have_fallback_font ? &fallback_font : 0;
+    int have_disk_font = 0;
     if (mounted &&
-        ktext_load_psf_file("0:/OS/System/Fonts/Solarize.psf", &font, &font_blob, &font_blob_sz) == 0)
+        ksystem_font_load_system_file("0:/OS/System/Fonts/Solarize.psf", &disk_font, &font_blob, &font_blob_sz) == 0)
     {
-        have_font = 1;
+        font = &disk_font;
+        have_disk_font = 1;
     }
 
-    sacx_runtime_init(have_font ? &font : 0);
+    sacx_runtime_init(font);
 
-    terminal_initialize(&font);
+    terminal_initialize(font);
     terminal_print("terminal online");
+    if (!mounted)
+        terminal_warn("storage offline; file-backed apps disabled");
+    else if (!have_disk_font)
+        terminal_warn("disk font unavailable; using embedded fallback font");
     terminal_success("sacx runtime online");
 
     terminal_print("[stage2_report] begin");
@@ -260,19 +299,19 @@ void kmain(boot_info *bi)
     terminal_clear();
     kgfx_render_all(black);
 
-    if (have_font)
+    if (mounted && font)
     {
-        file_explorer_init(&font);
+        file_explorer_init(font);
         terminal_success("file explorer online");
-        text_editor_init(&font);
+        text_editor_init(font);
         terminal_success("text editor online");
     }
     else
     {
-        terminal_warn("font unavailable; explorer/editor skipped");
+        terminal_warn("file explorer/editor skipped");
     }
 
-    desktop_shell_init(have_font ? &font : 0);
+    desktop_shell_init(font);
     terminal_success("desktop shell online");
 
     if (kmouse_init() != 0)
@@ -280,7 +319,7 @@ void kmain(boot_info *bi)
         terminal_warn("cursor not loaded");
     }
     kmouse_set_sensitivity_pct(500);
-    screenshot_service_init(have_font ? &font : 0);
+    screenshot_service_init(font);
 
     kgfx_render_all(black);
 

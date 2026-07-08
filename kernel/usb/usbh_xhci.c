@@ -1475,6 +1475,7 @@ static int init_dcbaa_and_scratch(void)
 int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 {
     dot(1, 0xFFFFFF);
+    terminal_print("xhci: init");
 
     uint64_t mmio = xhci_mmio_hint;
 
@@ -1484,19 +1485,24 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
     if (!mmio)
     {
         dot(2, C_ER);
+        terminal_error("xhci: no mmio base");
         return -1;
     }
 
     if (g_xhci_initialized && G.mmio_base == mmio && G.cmd.base && G.ev.evt_base && G.dcbaa)
     {
         dot(7, C_OK);
+        terminal_print("xhci: already initialized");
         return 0;
     }
 
     g_xhci_initialized = 0;
 
     if (xhci_prepare_mmio_before_caps(mmio, acpi_rsdp_hint) != 0)
+    {
+        terminal_error("xhci: mmio prepare failed");
         return -1;
+    }
 
     /* quick sanity: CAPLENGTH in [0x20..0x40], HCIVERSION major == 0x01 */
     {
@@ -1511,11 +1517,17 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 
         dot(17, ok ? C_OK : C_ER);
         if (!ok)
+        {
+            terminal_error("xhci: caps invalid");
             return -1;
+        }
     }
 
     if (xhci_map_regs(mmio))
+    {
+        terminal_error("xhci: register map failed");
         return -1;
+    }
 
     claimed_ports_clear();
 
@@ -1523,30 +1535,45 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 
     /* Reset + start (your file may call either name; alias exists above) */
     if (xhci_reset_start())
+    {
+        terminal_error("xhci: reset/start failed");
         return -1;
+    }
     dot(4, C_S1);
 
     /* Command ring */
     if (init_cmd_ring())
+    {
+        terminal_error("xhci: command ring init failed");
         return -1;
+    }
     dot(5, C_S1);
 
     /* Event ring (your existing code/impl must exist) */
     if (init_event_ring())
+    {
+        terminal_error("xhci: event ring init failed");
         return -1;
+    }
 
     dot(8, 0x00FFFF);
 
     /* DCBAA (+ scratchpads if required) */
     if (init_dcbaa_and_scratch())
+    {
+        terminal_error("xhci: dcbaa/scratch init failed");
         return -1;
+    }
 
     /* Keep the pre-run slot request conservative; enable_irqs_and_run() widens it. */
     {
         uint32_t max_slots = G.R.cap->HCSPARAMS1 & 0xFFu;
         uint32_t cfg_slots;
         if (!max_slots)
+        {
+            terminal_error("xhci: controller reports zero slots");
             return -1;
+        }
 
         cfg_slots = (max_slots >= 2u) ? 2u : 1u;
 
@@ -1555,18 +1582,25 @@ int usbh_init(uint64_t xhci_mmio_hint, uint64_t acpi_rsdp_hint)
 
         /* Run controller (your existing helper) */
         if (enable_irqs_and_run())
+        {
+            terminal_error("xhci: run failed");
             return -1;
+        }
     }
 
     dot(6, C_OK);
 
     /* prove command/event path works */
     if (issue_noop_cmd())
+    {
+        terminal_error("xhci: command/event test failed");
         return -1;
+    }
 
     dot(7, C_OK);
     dot(9, 0x00A0FFu);
     g_xhci_initialized = 1;
+    terminal_success("xhci: ready");
     return 0;
 }
 

@@ -213,7 +213,7 @@ static const dihos_shell_command G_commands[] = {
     {"sys:which", "sys:which [command]", "Show how a command resolves.", 0u, dihos_cmd_sys_which},
     {"sys:trace", "sys:trace [on|off|status]", "Toggle shell execution trace output.", 0u, dihos_cmd_sys_trace},
     {"wifi:networks", "wifi:networks [refresh=yes]", "Print WiFi networks, auto-scanning when the cache is empty.", 0u, dihos_cmd_wifi_networks},
-    {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER] [bssid=AA:BB:CC:DD:EE:FF] [channel=40|5200] [automate=yes|no]", "Save a WiFi connect request and optionally pin AP BSSID/channel; enterprise mode polls state but does not fake PEAP key install.", 0u, dihos_cmd_wifi_connect},
+    {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER] [bssid=AA:BB:CC:DD:EE:FF] [channel=40|5200] [automate=yes|no]", "Save a WiFi connect request and optionally pin AP BSSID/channel; auth mode is chosen from scan when username is omitted.", 0u, dihos_cmd_wifi_connect},
     {"wifi:current", "wifi:current", "Show current WiFi connect target and state.", 0u, dihos_cmd_wifi_current},
     {"wifi:supplicant", "wifi:supplicant ready=yes|no", "Set enterprise supplicant readiness hint (does not by itself prove firmware key install).", 0u, dihos_cmd_wifi_supplicant},
     {"wifi:get", "wifi:get [url] [max=8192]", "Fetch text content for file:// URLs; reports HTTP transport readiness for http(s).", 0u, dihos_cmd_wifi_get},
@@ -2000,6 +2000,8 @@ static int dihos_cmd_wifi_networks(dihos_shell_stage *stage)
             terminal_print_inline("<hidden>");
         else
             terminal_print_inline(name);
+        terminal_print_inline("  auth=");
+        terminal_print_inline(kwifi_network_auth_mode(i));
         terminal_print_inline("\n");
     }
 
@@ -2040,15 +2042,17 @@ static int dihos_cmd_wifi_connect(dihos_shell_stage *stage)
         return -1;
     }
 
-    if (username && username[0] && automate)
+    if (automate)
     {
         for (uint32_t i = 0u; i < 4u; ++i)
             (void)kwifi_poll_connection(8u);
 
         if (kwifi_current_connected())
-            terminal_success("enterprise auth completed; link reports connected");
-        else
+            terminal_success("wifi link reports connected");
+        else if (username && username[0])
             terminal_warn("enterprise EAPOL engine started; PEAP/TLS/MSCHAPv2 still required");
+        else
+            terminal_warn(kwifi_current_status());
     }
 
     terminal_success("wifi connect request queued");

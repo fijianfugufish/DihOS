@@ -870,7 +870,7 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_WMI_MLME_RETRY_AFTER_NO_RX 0u
 #define QWIFI_WMI_AUTH_RESPONSE_WAIT_ROUNDS 64u
 #define QWIFI_WMI_ASSOC_RESPONSE_WAIT_ROUNDS 96u
-#define QWIFI_WMI_PEER_CREATE_BEFORE_VDEV_START 1u
+#define QWIFI_WMI_PEER_CREATE_BEFORE_VDEV_START 0u
 #define QWIFI_WMI_PEER_ROUTE_BEFORE_VDEV_START 0u
 #define QWIFI_WMI_PEER_REORDER_BEFORE_VDEV_START 0u
 #define QWIFI_WMI_PEER_NONQOS_REORDER_BEFORE_VDEV_START 0u
@@ -882,7 +882,7 @@ static void print_acpi_net_resource_windows(void)
 #define QWIFI_WMI_PREAUTH_TX_ENCAP_MODE QWIFI_HW_TXRX_NATIVE_WIFI
 #define QWIFI_WMI_PREAUTH_RESERVED_CONTROL_CREDITS 2u
 #define QWIFI_WMI_MGMT_TX_OFFCHAN_CMD_FOR_EXPLICIT 0u
-#define QWIFI_WMI_STA_MLME_FIRST_EXPLICIT 1u
+#define QWIFI_WMI_STA_MLME_FIRST_EXPLICIT 0u
 #define QWIFI_WMI_CHAN_INFO_MODE_MASK 0x3Fu
 #define QWIFI_WMI_PHY_MODE_11AX_HE20 16u
 #define QWIFI_WMI_PHY_MODE_11AX_HE20_2G 21u
@@ -1032,6 +1032,14 @@ typedef struct
     uint32_t mhz;
     int32_t rssi_dbm;
     uint8_t rssi_valid;
+    uint8_t privacy;
+    uint8_t rsn_seen;
+    uint8_t akm_8021x;
+    uint8_t akm_psk;
+    uint8_t akm_sae;
+    uint8_t pmf_capable;
+    uint8_t pmf_required;
+    uint8_t auth_type;
 } qwifi_wifi_network;
 
 typedef struct
@@ -1220,6 +1228,8 @@ static uint32_t g_qwifi_auth_resp_seq;
 static uint8_t g_qwifi_connect_bssid[6];
 static uint32_t g_qwifi_connect_bssid_valid;
 static uint32_t g_qwifi_connect_chan_mhz;
+static uint32_t g_qwifi_connect_auth_preference = PCI_KERNEL_WIFI_AUTH_AUTO;
+static uint32_t g_qwifi_connect_auth_type = PCI_KERNEL_WIFI_AUTH_AUTO;
 static uint8_t g_qwifi_connect_override_bssid[6];
 static uint32_t g_qwifi_connect_override_bssid_valid;
 static uint32_t g_qwifi_connect_override_chan_mhz;
@@ -1394,6 +1404,8 @@ static int qwifi_wmi_ssid_matches(const qwifi_wifi_network *net, const uint8_t *
 static uint32_t qwifi_wmi_scan_chan_is_passive(uint32_t mhz);
 static int qwifi_wmi_try_parse_assoc_resp(const uint8_t *frame, uint32_t len);
 static int qwifi_wmi_try_parse_auth_resp(const uint8_t *frame, uint32_t len);
+static const char *qwifi_wifi_auth_type_name(uint32_t auth_type);
+static uint32_t qwifi_wifi_auth_type_valid(uint32_t auth_type);
 static uint32_t qwifi_mac_eq6(const uint8_t *a, const uint8_t *b);
 static void qwifi_wmi_try_parse_auth_assoc_in_blob(const uint8_t *blob, uint32_t len);
 static void qwifi_zero(void *ptr, uint64_t bytes);
@@ -1532,6 +1544,71 @@ uint32_t pci_kernel_wifi_network_hidden(uint32_t index)
     return g_qwifi_wifi_networks[index].hidden ? 1u : 0u;
 }
 
+static const char *qwifi_wifi_auth_type_name(uint32_t auth_type)
+{
+    switch (auth_type)
+    {
+    case PCI_KERNEL_WIFI_AUTH_OPEN:
+        return "open";
+    case PCI_KERNEL_WIFI_AUTH_WPA2_PERSONAL:
+        return "wpa2-personal";
+    case PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE:
+        return "wpa2-enterprise";
+    case PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL:
+        return "wpa3-personal";
+    case PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN:
+        return "protected-unknown";
+    case PCI_KERNEL_WIFI_AUTH_AUTO:
+    default:
+        return "auto";
+    }
+}
+
+static uint32_t qwifi_wifi_auth_type_valid(uint32_t auth_type)
+{
+    return auth_type == PCI_KERNEL_WIFI_AUTH_AUTO ||
+           auth_type == PCI_KERNEL_WIFI_AUTH_OPEN ||
+           auth_type == PCI_KERNEL_WIFI_AUTH_WPA2_PERSONAL ||
+           auth_type == PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE ||
+           auth_type == PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL ||
+           auth_type == PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN;
+}
+
+uint32_t pci_kernel_wifi_network_auth_type(uint32_t index)
+{
+    if (index >= g_qwifi_wifi_network_count)
+        return PCI_KERNEL_WIFI_AUTH_AUTO;
+    return g_qwifi_wifi_networks[index].auth_type;
+}
+
+const char *pci_kernel_wifi_network_auth_mode(uint32_t index)
+{
+    return qwifi_wifi_auth_type_name(pci_kernel_wifi_network_auth_type(index));
+}
+
+int pci_kernel_wifi_set_connect_auth_preference(uint32_t auth_type)
+{
+    if (!qwifi_wifi_auth_type_valid(auth_type))
+        return 0;
+    g_qwifi_connect_auth_preference = auth_type;
+    return 1;
+}
+
+uint32_t pci_kernel_wifi_connect_auth_type(void)
+{
+    return g_qwifi_connect_auth_type;
+}
+
+const char *pci_kernel_wifi_connect_auth_mode(void)
+{
+    return qwifi_wifi_auth_type_name(g_qwifi_connect_auth_type);
+}
+
+uint32_t pci_kernel_wifi_wmi_control_credits(void)
+{
+    return g_qwifi_htc_wmi_control_tx_credits;
+}
+
 static uint32_t qwifi_wifi_network_is_passive(const qwifi_wifi_network *net)
 {
     if (!net || !net->mhz)
@@ -1617,6 +1694,34 @@ static const qwifi_wifi_network *qwifi_find_network_by_ssid(const char *ssid)
     return best;
 }
 
+static const qwifi_wifi_network *qwifi_find_network_by_ssid_on_channel(const char *ssid, uint32_t chan_mhz)
+{
+    uint32_t len = 0u;
+    const qwifi_wifi_network *best = 0;
+
+    if (!ssid || !ssid[0] || !chan_mhz)
+        return 0;
+
+    while (ssid[len] && len < QWIFI_WIFI_SSID_MAX)
+        ++len;
+
+    for (uint32_t i = g_qwifi_wifi_network_count; i > 0u; --i)
+    {
+        const qwifi_wifi_network *net = &g_qwifi_wifi_networks[i - 1u];
+        if (net->hidden || net->len != len)
+            continue;
+        if (net->mhz != chan_mhz)
+            continue;
+        if (!qwifi_wmi_ssid_matches(net, (const uint8_t *)ssid, len))
+            continue;
+
+        if (qwifi_wifi_network_is_better_candidate(net, best))
+            best = net;
+    }
+
+    return best;
+}
+
 static const qwifi_wifi_network *qwifi_find_network_by_ssid_excluding_bssid(const char *ssid,
                                                                              const uint8_t *exclude_bssid,
                                                                              uint32_t exclude_valid)
@@ -1635,6 +1740,41 @@ static const qwifi_wifi_network *qwifi_find_network_by_ssid_excluding_bssid(cons
         const qwifi_wifi_network *net = &g_qwifi_wifi_networks[i - 1u];
 
         if (net->hidden || net->len != len)
+            continue;
+        if (!qwifi_wmi_ssid_matches(net, (const uint8_t *)ssid, len))
+            continue;
+        if (exclude_valid && net->bssid_valid && exclude_bssid &&
+            qwifi_mac_eq6(net->bssid, exclude_bssid))
+            continue;
+
+        if (qwifi_wifi_network_is_better_candidate(net, best))
+            best = net;
+    }
+
+    return best;
+}
+
+static const qwifi_wifi_network *qwifi_find_network_by_ssid_excluding_bssid_on_channel(const char *ssid,
+                                                                                       const uint8_t *exclude_bssid,
+                                                                                       uint32_t exclude_valid,
+                                                                                       uint32_t chan_mhz)
+{
+    uint32_t len = 0u;
+    const qwifi_wifi_network *best = 0;
+
+    if (!ssid || !ssid[0] || !chan_mhz)
+        return 0;
+
+    while (ssid[len] && len < QWIFI_WIFI_SSID_MAX)
+        ++len;
+
+    for (uint32_t i = g_qwifi_wifi_network_count; i > 0u; --i)
+    {
+        const qwifi_wifi_network *net = &g_qwifi_wifi_networks[i - 1u];
+
+        if (net->hidden || net->len != len)
+            continue;
+        if (net->mhz != chan_mhz)
             continue;
         if (!qwifi_wmi_ssid_matches(net, (const uint8_t *)ssid, len))
             continue;
@@ -2076,7 +2216,9 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
     if (!qwifi_wmi_send_vdev_create(g_qwifi_ipcr_bar0_base))
         return 0;
 
-    target = qwifi_find_network_by_ssid(ssid);
+    target = g_qwifi_connect_override_chan_mhz ?
+             qwifi_find_network_by_ssid_on_channel(ssid, g_qwifi_connect_override_chan_mhz) :
+             qwifi_find_network_by_ssid(ssid);
     g_qwifi_connect_bssid_valid = 0u;
     g_qwifi_connect_chan_mhz = QWIFI_WMI_VDEV_START_CHAN_MHZ;
     if (g_qwifi_connect_override_bssid_valid)
@@ -2104,6 +2246,18 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         target_mhz = target->mhz;
         g_qwifi_connect_chan_mhz = target->mhz;
     }
+    if (g_qwifi_connect_auth_preference != PCI_KERNEL_WIFI_AUTH_AUTO)
+    {
+        g_qwifi_connect_auth_type = g_qwifi_connect_auth_preference;
+    }
+    else if (target && target->auth_type != PCI_KERNEL_WIFI_AUTH_AUTO)
+    {
+        g_qwifi_connect_auth_type = target->auth_type;
+    }
+    else
+    {
+        g_qwifi_connect_auth_type = PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN;
+    }
     if (target)
     {
         terminal_print("[K:QWIFI] connect target pick ssid=");
@@ -2128,6 +2282,20 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         {
             terminal_print("unknown");
         }
+        terminal_print(" auth=");
+        terminal_print(qwifi_wifi_auth_type_name(target->auth_type));
+        terminal_print(" chosen=");
+        terminal_print(qwifi_wifi_auth_type_name(g_qwifi_connect_auth_type));
+        terminal_print(" pmf_req=");
+        terminal_print_inline_hex64(target->pmf_required ? 1u : 0u);
+        terminal_flush_log();
+    }
+    else
+    {
+        terminal_print("[K:QWIFI] connect target pick ssid=");
+        terminal_print(ssid);
+        terminal_print(" not-in-scan chosen=");
+        terminal_print(qwifi_wifi_auth_type_name(g_qwifi_connect_auth_type));
         terminal_flush_log();
     }
     if (g_qwifi_wmi_scan_inflight)
@@ -2175,6 +2343,13 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
     g_qwifi_auth_resp_seq = 0u;
     mlme_use_offchan = 0u;
     g_qwifi_wmi_l2_tx_use_offchan = 0u;
+
+    if (g_qwifi_connect_auth_type == PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL)
+    {
+        terminal_print("[K:QWIFI] connect waiting: WPA3-Personal selected; SAE auth handshake required before association");
+        terminal_flush_log();
+        goto connect_log;
+    }
 
 #if QWIFI_WMI_PEER_CREATE_BEFORE_VDEV_START
     terminal_print("[K:QWIFI] peer create before vdev start");
@@ -2426,6 +2601,9 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         terminal_print_inline_hex64(g_qwifi_connect_chan_mhz);
         terminal_flush_log();
     }
+#else
+    terminal_print("[K:QWIFI] connect host MLME using on-channel mgmt tx first");
+    terminal_flush_log();
 #endif
 
 #if QWIFI_SEND_EXPLICIT_STA_MLME
@@ -2505,7 +2683,12 @@ int pci_kernel_wifi_connect_ssid(const char *ssid)
         {
             if (!g_qwifi_connect_override_bssid_valid)
             {
-                alt_target = qwifi_find_network_by_ssid_excluding_bssid(ssid,
+                alt_target = g_qwifi_connect_override_chan_mhz ?
+                             qwifi_find_network_by_ssid_excluding_bssid_on_channel(ssid,
+                                                                                   g_qwifi_connect_bssid,
+                                                                                   g_qwifi_connect_bssid_valid,
+                                                                                   g_qwifi_connect_override_chan_mhz) :
+                             qwifi_find_network_by_ssid_excluding_bssid(ssid,
                                                                         g_qwifi_connect_bssid,
                                                                         g_qwifi_connect_bssid_valid);
                 if (alt_target && alt_target->bssid_valid)
@@ -2652,6 +2835,8 @@ connect_log:
     terminal_print_inline_hex64(target_mhz);
     terminal_print(" bssid_known=");
     terminal_print_inline_hex64(g_qwifi_connect_bssid_valid ? 1u : 0u);
+    terminal_print(" auth=");
+    terminal_print(qwifi_wifi_auth_type_name(g_qwifi_connect_auth_type));
     terminal_print(" assoc_ready=");
     terminal_print_inline_hex64(assoc_ready);
     terminal_print(" peer_assoc=");
@@ -6708,15 +6893,120 @@ static void qwifi_wmi_try_parse_auth_assoc_in_blob(const uint8_t *blob, uint32_t
     }
 }
 
+static uint32_t qwifi_wifi_auth_type_from_security(uint32_t privacy,
+                                                   uint32_t rsn_seen,
+                                                   uint32_t akm_8021x,
+                                                   uint32_t akm_psk,
+                                                   uint32_t akm_sae)
+{
+    if (rsn_seen && akm_8021x)
+        return PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE;
+    if (rsn_seen && akm_psk)
+        return PCI_KERNEL_WIFI_AUTH_WPA2_PERSONAL;
+    if (rsn_seen && akm_sae)
+        return PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL;
+    if (privacy)
+        return PCI_KERNEL_WIFI_AUTH_PROTECTED_UNKNOWN;
+    return PCI_KERNEL_WIFI_AUTH_OPEN;
+}
+
+static void qwifi_wmi_parse_rsn_ie(const uint8_t *elem,
+                                   uint32_t elem_len,
+                                   uint32_t *rsn_seen,
+                                   uint32_t *akm_8021x,
+                                   uint32_t *akm_psk,
+                                   uint32_t *akm_sae,
+                                   uint32_t *pmf_capable,
+                                   uint32_t *pmf_required)
+{
+    uint32_t off = 0u;
+    uint32_t pairwise_count;
+    uint32_t akm_count;
+    uint16_t caps;
+
+    if (!elem || elem_len < 2u)
+        return;
+    if (qwifi_read_le16(elem) != 1u)
+        return;
+
+    if (rsn_seen)
+        *rsn_seen = 1u;
+    off = 2u;
+
+    if (off + 4u > elem_len)
+        return;
+    off += 4u; /* group cipher suite */
+
+    if (off + 2u > elem_len)
+        return;
+    pairwise_count = qwifi_read_le16(elem + off);
+    off += 2u;
+    if (off + pairwise_count * 4u > elem_len)
+        return;
+    off += pairwise_count * 4u;
+
+    if (off + 2u > elem_len)
+        return;
+    akm_count = qwifi_read_le16(elem + off);
+    off += 2u;
+    if (off + akm_count * 4u > elem_len)
+        return;
+
+    for (uint32_t i = 0u; i < akm_count; ++i)
+    {
+        const uint8_t *suite = elem + off + i * 4u;
+        if (suite[0] == 0x00u && suite[1] == 0x0Fu && suite[2] == 0xACu)
+        {
+            if (suite[3] == 1u || suite[3] == 5u)
+            {
+                if (akm_8021x)
+                    *akm_8021x = 1u;
+            }
+            else if (suite[3] == 2u || suite[3] == 6u)
+            {
+                if (akm_psk)
+                    *akm_psk = 1u;
+            }
+            else if (suite[3] == 8u)
+            {
+                if (akm_sae)
+                    *akm_sae = 1u;
+            }
+        }
+    }
+    off += akm_count * 4u;
+
+    if (off + 2u <= elem_len)
+    {
+        caps = qwifi_read_le16(elem + off);
+        if (pmf_required && (caps & (1u << 6)))
+            *pmf_required = 1u;
+        if (pmf_capable && (caps & (1u << 7)))
+            *pmf_capable = 1u;
+    }
+}
+
 static int qwifi_wmi_store_network(const uint8_t *ssid,
                                    uint32_t len,
                                    const uint8_t *bssid,
                                    uint32_t mhz,
                                    uint32_t mhz_reliable,
                                    int32_t rssi_dbm,
-                                   uint32_t rssi_valid)
+                                   uint32_t rssi_valid,
+                                   uint32_t privacy,
+                                   uint32_t rsn_seen,
+                                   uint32_t akm_8021x,
+                                   uint32_t akm_psk,
+                                   uint32_t akm_sae,
+                                   uint32_t pmf_capable,
+                                   uint32_t pmf_required)
 {
     qwifi_wifi_network *net;
+    uint32_t auth_type = qwifi_wifi_auth_type_from_security(privacy,
+                                                            rsn_seen,
+                                                            akm_8021x,
+                                                            akm_psk,
+                                                            akm_sae);
 
     if (len == 0u)
     {
@@ -6738,6 +7028,7 @@ static int qwifi_wmi_store_network(const uint8_t *ssid,
                 qwifi_wifi_network *existing = &g_qwifi_wifi_networks[i];
                 uint32_t bssid_changed = 0u;
                 uint32_t mhz_changed = 0u;
+                uint32_t security_changed = 0u;
                 if (bssid && g_qwifi_wifi_networks[i].bssid_valid)
                 {
                     uint32_t same_bssid = 1u;
@@ -6775,7 +7066,23 @@ static int qwifi_wmi_store_network(const uint8_t *ssid,
                     existing->rssi_dbm = rssi_dbm;
                     existing->rssi_valid = 1u;
                 }
-                if (bssid_changed || mhz_changed)
+                if (privacy || rsn_seen)
+                {
+                    security_changed = existing->auth_type != auth_type ||
+                                       existing->rsn_seen != (uint8_t)(rsn_seen ? 1u : 0u) ||
+                                       existing->akm_sae != (uint8_t)(akm_sae ? 1u : 0u) ||
+                                       existing->akm_psk != (uint8_t)(akm_psk ? 1u : 0u) ||
+                                       existing->akm_8021x != (uint8_t)(akm_8021x ? 1u : 0u);
+                    existing->privacy = privacy ? 1u : 0u;
+                    existing->rsn_seen = rsn_seen ? 1u : 0u;
+                    existing->akm_8021x = akm_8021x ? 1u : 0u;
+                    existing->akm_psk = akm_psk ? 1u : 0u;
+                    existing->akm_sae = akm_sae ? 1u : 0u;
+                    existing->pmf_capable = pmf_capable ? 1u : 0u;
+                    existing->pmf_required = pmf_required ? 1u : 0u;
+                    existing->auth_type = auth_type;
+                }
+                if (bssid_changed || mhz_changed || security_changed)
                 {
                     terminal_print("[K:QWIFI] WMI updated SSID #");
                     terminal_print_inline_hex64(i + 1u);
@@ -6801,6 +7108,18 @@ static int qwifi_wmi_store_network(const uint8_t *ssid,
                                 terminal_print(":");
                         }
                     }
+                    terminal_print(" auth=");
+                    terminal_print(qwifi_wifi_auth_type_name(existing->auth_type));
+                    terminal_print(" rsn=");
+                    terminal_print_inline_hex64(existing->rsn_seen ? 1u : 0u);
+                    terminal_print(" akm_psk=");
+                    terminal_print_inline_hex64(existing->akm_psk ? 1u : 0u);
+                    terminal_print(" akm_sae=");
+                    terminal_print_inline_hex64(existing->akm_sae ? 1u : 0u);
+                    terminal_print(" akm_1x=");
+                    terminal_print_inline_hex64(existing->akm_8021x ? 1u : 0u);
+                    terminal_print(" pmf_req=");
+                    terminal_print_inline_hex64(existing->pmf_required ? 1u : 0u);
                     terminal_flush_log();
                 }
                 return 0;
@@ -6825,6 +7144,14 @@ static int qwifi_wmi_store_network(const uint8_t *ssid,
             net->bssid[b] = bssid[b];
     }
     net->mhz = mhz;
+    net->privacy = privacy ? 1u : 0u;
+    net->rsn_seen = rsn_seen ? 1u : 0u;
+    net->akm_8021x = akm_8021x ? 1u : 0u;
+    net->akm_psk = akm_psk ? 1u : 0u;
+    net->akm_sae = akm_sae ? 1u : 0u;
+    net->pmf_capable = pmf_capable ? 1u : 0u;
+    net->pmf_required = pmf_required ? 1u : 0u;
+    net->auth_type = auth_type;
     if (rssi_valid)
     {
         net->rssi_dbm = rssi_dbm;
@@ -6861,6 +7188,18 @@ static int qwifi_wmi_store_network(const uint8_t *ssid,
                 terminal_print(":");
         }
     }
+    terminal_print(" auth=");
+    terminal_print(qwifi_wifi_auth_type_name(net->auth_type));
+    terminal_print(" rsn=");
+    terminal_print_inline_hex64(net->rsn_seen ? 1u : 0u);
+    terminal_print(" akm_psk=");
+    terminal_print_inline_hex64(net->akm_psk ? 1u : 0u);
+    terminal_print(" akm_sae=");
+    terminal_print_inline_hex64(net->akm_sae ? 1u : 0u);
+    terminal_print(" akm_1x=");
+    terminal_print_inline_hex64(net->akm_8021x ? 1u : 0u);
+    terminal_print(" pmf_req=");
+    terminal_print_inline_hex64(net->pmf_required ? 1u : 0u);
     terminal_flush_log();
     return 1;
 }
@@ -6985,6 +7324,15 @@ static int qwifi_wmi_try_store_80211_ssid_policy(const uint8_t *frame,
     uint32_t chan;
     uint32_t mhz;
     uint32_t mhz_reliable = 0u;
+    const uint8_t *ssid = 0;
+    uint32_t ssid_len = 0u;
+    uint32_t privacy;
+    uint32_t rsn_seen = 0u;
+    uint32_t akm_8021x = 0u;
+    uint32_t akm_psk = 0u;
+    uint32_t akm_sae = 0u;
+    uint32_t pmf_capable = 0u;
+    uint32_t pmf_required = 0u;
 
     if (!frame || len < 38u)
         return 0;
@@ -6997,6 +7345,8 @@ static int qwifi_wmi_try_store_80211_ssid_policy(const uint8_t *frame,
         return 0;
     if (!(subtype == 5u || subtype == 8u))
         return 0;
+
+    privacy = (qwifi_read_le16(frame + 34u) & 0x0010u) ? 1u : 0u;
 
     for (uint32_t i = 0u; i < 6u; ++i)
         bssid[i] = frame[16u + i];
@@ -7025,10 +7375,40 @@ static int qwifi_wmi_try_store_80211_ssid_policy(const uint8_t *frame,
         {
             if (elem_len == 0u && !allow_hidden)
                 return 0;
-            return qwifi_wmi_store_network(elem, elem_len, bssid, mhz, mhz_reliable, rssi_dbm, rssi_valid);
+            ssid = elem;
+            ssid_len = elem_len;
+        }
+        else if (elem_id == 48u)
+        {
+            qwifi_wmi_parse_rsn_ie(elem,
+                                   elem_len,
+                                   &rsn_seen,
+                                   &akm_8021x,
+                                   &akm_psk,
+                                   &akm_sae,
+                                   &pmf_capable,
+                                   &pmf_required);
         }
 
         ie_off += 2u + elem_len;
+    }
+
+    if (ssid)
+    {
+        return qwifi_wmi_store_network(ssid,
+                                       ssid_len,
+                                       bssid,
+                                       mhz,
+                                       mhz_reliable,
+                                       rssi_dbm,
+                                       rssi_valid,
+                                       privacy,
+                                       rsn_seen,
+                                       akm_8021x,
+                                       akm_psk,
+                                       akm_sae,
+                                       pmf_capable,
+                                       pmf_required);
     }
 
     return 0;
@@ -10231,6 +10611,24 @@ static int qwifi_wmi_send_sta_assoc_req(uint64_t bar0_base, const char *ssid, ui
         0x00u, 0x0Fu, 0xACu, 0x01u,           /* AKM: 802.1X */
         0x00u, 0x00u                          /* RSN capabilities */
     };
+    static const uint8_t rsn_wpa2_personal_ccmp[] = {
+        0x01u, 0x00u,                         /* RSN version */
+        0x00u, 0x0Fu, 0xACu, 0x04u,           /* group cipher: CCMP */
+        0x01u, 0x00u,                         /* pairwise count */
+        0x00u, 0x0Fu, 0xACu, 0x04u,           /* pairwise cipher: CCMP */
+        0x01u, 0x00u,                         /* AKM count */
+        0x00u, 0x0Fu, 0xACu, 0x02u,           /* AKM: PSK */
+        0x00u, 0x00u                          /* RSN capabilities */
+    };
+    static const uint8_t rsn_wpa3_personal_ccmp[] = {
+        0x01u, 0x00u,                         /* RSN version */
+        0x00u, 0x0Fu, 0xACu, 0x04u,           /* group cipher: CCMP */
+        0x01u, 0x00u,                         /* pairwise count */
+        0x00u, 0x0Fu, 0xACu, 0x04u,           /* pairwise cipher: CCMP */
+        0x01u, 0x00u,                         /* AKM count */
+        0x00u, 0x0Fu, 0xACu, 0x08u,           /* AKM: SAE */
+        0xC0u, 0x00u                          /* RSN capabilities: PMF capable+required */
+    };
     static const uint8_t rates_5g[] = {0x8Cu, 0x12u, 0x98u, 0x24u, 0xB0u, 0x48u, 0x60u, 0x6Cu};
     static const uint8_t rates_2g[] = {0x82u, 0x84u, 0x8Bu, 0x96u, 0x0Cu, 0x12u, 0x18u, 0x24u};
     static const uint8_t ext_rates_2g[] = {0x30u, 0x48u, 0x60u, 0x6Cu};
@@ -10249,7 +10647,10 @@ static int qwifi_wmi_send_sta_assoc_req(uint64_t bar0_base, const char *ssid, ui
     uint32_t rates_len;
     uint32_t is_2g;
     uint32_t chan_num;
+    uint32_t use_privacy;
     uint16_t capability;
+    const uint8_t *rsn_ie = 0;
+    uint32_t rsn_ie_len = 0u;
     uint32_t ssid_len = 0u;
     uint32_t off = 24u;
     uint32_t next;
@@ -10264,9 +10665,28 @@ static int qwifi_wmi_send_sta_assoc_req(uint64_t bar0_base, const char *ssid, ui
 
     is_2g = (g_qwifi_connect_chan_mhz && g_qwifi_connect_chan_mhz < 3000u) ? 1u : 0u;
     chan_num = qwifi_11g_mhz_to_channel(g_qwifi_connect_chan_mhz);
-    capability = is_2g ? 0x0411u : 0x0011u; /* ESS, privacy (+ short slot only on 2.4 GHz) */
+    use_privacy = (g_qwifi_connect_auth_type != PCI_KERNEL_WIFI_AUTH_OPEN) ? 1u : 0u;
+    capability = is_2g ? 0x0401u : 0x0001u; /* ESS (+ short slot only on 2.4 GHz) */
+    if (use_privacy)
+        capability |= 0x0010u;
     if (!is_2g && g_qwifi_connect_chan_mhz >= 5000u && g_qwifi_connect_chan_mhz < 5955u)
         capability |= 0x0100u; /* spectrum management */
+
+    if (g_qwifi_connect_auth_type == PCI_KERNEL_WIFI_AUTH_WPA2_ENTERPRISE)
+    {
+        rsn_ie = rsn_wpa2_enterprise_ccmp;
+        rsn_ie_len = sizeof(rsn_wpa2_enterprise_ccmp);
+    }
+    else if (g_qwifi_connect_auth_type == PCI_KERNEL_WIFI_AUTH_WPA3_PERSONAL)
+    {
+        rsn_ie = rsn_wpa3_personal_ccmp;
+        rsn_ie_len = sizeof(rsn_wpa3_personal_ccmp);
+    }
+    else if (use_privacy)
+    {
+        rsn_ie = rsn_wpa2_personal_ccmp;
+        rsn_ie_len = sizeof(rsn_wpa2_personal_ccmp);
+    }
 
     power_cap_ie[0] = 0u; /* min Tx power: 0 dBm */
     if (g_qwifi_wmi_vdev_start_max_tx_power_valid &&
@@ -10351,17 +10771,20 @@ static int qwifi_wmi_send_sta_assoc_req(uint64_t bar0_base, const char *ssid, ui
         return 0;
     off = next;
 
-    next = qwifi_80211_assoc_append_ie(frame, off, sizeof(frame), 48u,
-                                       rsn_wpa2_enterprise_ccmp,
-                                       sizeof(rsn_wpa2_enterprise_ccmp));
-    if (!next)
-        return 0;
-    off = next;
+    if (rsn_ie && rsn_ie_len)
+    {
+        next = qwifi_80211_assoc_append_ie(frame, off, sizeof(frame), 48u, rsn_ie, rsn_ie_len);
+        if (!next)
+            return 0;
+        off = next;
+    }
 
     terminal_print("[K:QWIFI] WMI STA assoc req send ssid=");
     terminal_print(ssid);
     terminal_print(" len=");
     terminal_print_inline_hex64(off);
+    terminal_print(" auth=");
+    terminal_print(qwifi_wifi_auth_type_name(g_qwifi_connect_auth_type));
     terminal_print(" auth_seen=");
     terminal_print_inline_hex64(g_qwifi_auth_resp_seen ? 1u : 0u);
     terminal_print(" cap=");

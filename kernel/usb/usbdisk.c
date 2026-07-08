@@ -4,6 +4,7 @@
 #include "usb/blockdev.h"
 #include "usb/usbh.h"
 #include "asm/asm.h"
+#include "terminal/terminal_api.h"
 
 extern void usbh_dbg_dot(int n, uint32_t rgb);
 #define D_WHITE 0xFFFFFFu
@@ -1038,12 +1039,14 @@ static int usbdisk_try_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi
 {
 
     usbh_dbg_dot(40, D_WHITE); // entered bind+enumerate
+    terminal_print("usbmsc: bind/enumerate");
     usbh_dev_t dev = (usbh_dev_t){0};
 
     usbh_dbg_dot(41, D_YELL); // about to call usbh_init
     if (usbh_init(xhci_mmio_hint, acpi_rsdp_hint) != 0)
     {
         usbh_dbg_dot(42, D_RED); // usbh_init failed (or crashed before this)
+        terminal_error("usbmsc: xhci init failed");
         return -1;
     }
     usbh_dbg_dot(42, D_GRN); // usbh_init OK
@@ -1052,6 +1055,7 @@ static int usbdisk_try_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi
     if (usbh_enumerate_first_msc(&dev) != 0)
     {
         usbh_dbg_dot(44, D_RED); // enumerate failed
+        terminal_error("usbmsc: no mass-storage device");
         return -2;
     }
     usbh_dbg_dot(44, D_GRN); // enumerate OK
@@ -1060,9 +1064,11 @@ static int usbdisk_try_bind_and_enumerate(uint64_t xhci_mmio_hint, uint64_t acpi
     if (usbdisk_make_blockdev_from_msc(&dev) != 0)
     {
         usbh_dbg_dot(46, D_RED); // bind failed
+        terminal_error("usbmsc: blockdev bind failed");
         return -3;
     }
     usbh_dbg_dot(46, D_GRN); // bind OK
+    terminal_success("usbmsc: blockdev ready");
 
     return 0;
 }

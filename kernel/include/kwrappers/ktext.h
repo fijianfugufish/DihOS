@@ -49,6 +49,7 @@ extern "C"
     // Load PSF1/PSF2 font and precompute tight metrics.
     // out_blob points to the raw font buffer you must keep alive (pmem); out_size returns its size.
     int ktext_load_psf_file(const char *path, kfont *out, void **out_blob, uint32_t *out_size);
+    int ktext_load_psf_blob(const void *blob, uint32_t size, kfont *out);
 
     // Multiline draw with scaling, alpha, char- & line-spacing.
     void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,

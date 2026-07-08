@@ -381,3 +381,47 @@ if (Test-Path $UsbRoot) {
   Write-Host ("  \OS\x64\KERNEL.ELF        <= " + $KernelX64OutFull)
   Write-Host ("  \OS\System\Programs\Image Viewer\image_viewer.sacx <= " + $imageEditorOut)
 }
+
+# ---- Hyper-V VHDX copy ----
+$VhdPath = "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\DihOS.vhdx"
+
+if (Test-Path $VhdPath) {
+  Write-Host "Mounting DihOS VHDX..." -ForegroundColor Cyan
+
+  Mount-VHD -Path $VhdPath -ErrorAction Stop | Out-Null
+  Start-Sleep -Seconds 1
+
+  try {
+    $disk = Get-DiskImage -ImagePath $VhdPath | Get-Disk
+    $vol = $disk | Get-Partition | Get-Volume | Where-Object DriveLetter | Select-Object -First 1
+
+    if (-not $vol -or -not $vol.DriveLetter) {
+      throw "Mounted VHDX but could not find a drive letter."
+    }
+
+    $VhdRoot = "$($vol.DriveLetter):\"
+
+    $destBoot = Join-Path $VhdRoot "EFI\BOOT"
+    $destAA64 = Join-Path $VhdRoot "OS\aa64"
+    $destX64  = Join-Path $VhdRoot "OS\x64"
+    $destImageEditor = Join-Path $VhdRoot "OS\System\Programs\Image Viewer"
+
+    New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
+
+    Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
+    Copy-Item -Force $BootX64OutFull    (Join-Path $destBoot "BOOTX64.EFI")
+    Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
+    Copy-Item -Force $Stage2X64OutFull  (Join-Path $destX64 "STAGE2.EFI")
+    Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
+    Copy-Item -Force $KernelX64OutFull  (Join-Path $destX64 "KERNEL.ELF")
+    Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
+
+    Write-Host "Copied outputs to DihOS VHDX at $VhdRoot successfully." -ForegroundColor Green
+  }
+  finally {
+    Write-Host "Dismounting DihOS VHDX..." -ForegroundColor Cyan
+    Dismount-VHD -Path $VhdPath -ErrorAction SilentlyContinue | Out-Null
+  }
+} else {
+  Write-Host "DihOS VHDX not found at $VhdPath. Skipping VHDX copy." -ForegroundColor Yellow
+}

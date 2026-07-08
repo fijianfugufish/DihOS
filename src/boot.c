@@ -540,12 +540,15 @@ static void register_dihos_boot_entry(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EF
 
 EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
+    println(st, L"DihOS reached");
+
     /* Make text visible & disable watchdog if possible */
     if (st && st->ConOut)
     {
         st->ConOut->Reset(st->ConOut, 1);
         st->ConOut->ClearScreen(st->ConOut);
     }
+
     println(st, DIHOS_BOOT_BANNER);
 
     void *BS = st ? st->BootServices : 0;
@@ -577,7 +580,8 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         {
         }
     }
-    register_dihos_boot_entry(st, image, li);
+
+    // register_dihos_boot_entry(st, image, li);
 
     /* 2) OpenProtocol(DeviceHandle, SIMPLE_FS) */
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfs = 0;
