@@ -3,6 +3,8 @@
 #include "kwrappers/ktext.h"
 #include "memory/pmem.h" // for pmem_alloc_pages
 #include "asm/asm.h"
+#include "system/kwork.h"
+#include "system/smp.h"
 
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
 #include <arm_neon.h>
@@ -226,11 +228,19 @@ const kfb *kgfx_info(void) { return &FB; }
 #define KGFX_ENABLE_PERF_COUNTERS 0
 #endif
 
+#ifndef KGFX_PARALLEL_MIN_PIXELS
+#define KGFX_PARALLEL_MIN_PIXELS (320u * 240u)
+#endif
+
+#ifndef KGFX_PARALLEL_MAX_JOBS
+#define KGFX_PARALLEL_MAX_JOBS 8u
+#endif
+
 #define KGFX_DIRTY_TILE_MAX_COLS 64u
 #define KGFX_DIRTY_TILE_MAX_ROWS 64u
 #define KGFX_DIRTY_TILE_MAX_COUNT (KGFX_DIRTY_TILE_MAX_COLS * KGFX_DIRTY_TILE_MAX_ROWS)
 
-typedef struct
+typedef struct __attribute__((aligned(64)))
 {
     uint64_t objects_visited;
     uint64_t objects_drawn;
@@ -255,6 +265,7 @@ static volatile kgfx_perf_counters g_perf;
 static kgfx_obj g_objs[KGFX_MAX_OBJS];
 static uint16_t g_obj_count = 0;
 static uint8_t g_obj_used[KGFX_MAX_OBJS];
+static uint16_t g_obj_generation[KGFX_MAX_OBJS];
 
 typedef struct
 {
@@ -410,6 +421,9 @@ static int kgfx_alloc_slot(uint16_t *out_idx)
         if (g_obj_used[i])
             continue;
         g_obj_used[i] = 1u;
+        ++g_obj_generation[i];
+        if (!g_obj_generation[i])
+            g_obj_generation[i] = 1u;
         *out_idx = i;
         return 1;
     }
@@ -418,6 +432,9 @@ static int kgfx_alloc_slot(uint16_t *out_idx)
         return 0;
 
     g_obj_used[g_obj_count] = 1u;
+    ++g_obj_generation[g_obj_count];
+    if (!g_obj_generation[g_obj_count])
+        g_obj_generation[g_obj_count] = 1u;
     *out_idx = g_obj_count;
     ++g_obj_count;
     return 1;
@@ -429,6 +446,7 @@ static void kgfx_clear_slot(uint16_t idx)
         return;
     g_objs[idx] = (kgfx_obj){0};
     g_objs[idx].parent_idx = -1;
+    g_objs[idx].parent_generation = 0u;
     g_objs[idx].clip_to_parent = 1u;
 }
 
@@ -448,6 +466,7 @@ kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t hei
     o->z = z;
     o->visible = visible ? 1 : 0;
     o->parent_idx = -1;
+    o->parent_generation = 0u;
     o->clip_to_parent = 1;
 
     o->fill = fill; // NEW
@@ -461,6 +480,7 @@ kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t hei
     o->u.rect.w = w;
     o->u.rect.h = height;
     handle.idx = (int)idx;
+    handle.generation = g_obj_generation[idx];
     return handle;
 }
 
@@ -478,6 +498,7 @@ kgfx_obj_handle kgfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r,
     o->z = z;
     o->visible = visible ? 1 : 0;
     o->parent_idx = -1;
+    o->parent_generation = 0u;
     o->clip_to_parent = 1;
 
     o->fill = fill; // NEW
@@ -490,6 +511,7 @@ kgfx_obj_handle kgfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r,
     o->u.circle.cy = cy;
     o->u.circle.r = r;
     handle.idx = (int)idx;
+    handle.generation = g_obj_generation[idx];
     return handle;
 }
 
@@ -513,6 +535,7 @@ kgfx_obj_handle kgfx_obj_add_text(const kfont *font, const char *text,
     o->z = z;
     o->visible = visible ? 1 : 0;
     o->parent_idx = -1;
+    o->parent_generation = 0u;
     o->clip_to_parent = 1;
 
     o->fill = color;
@@ -531,6 +554,7 @@ kgfx_obj_handle kgfx_obj_add_text(const kfont *font, const char *text,
     o->u.text.align = align;
 
     h.idx = (int)idx;
+    h.generation = g_obj_generation[idx];
     return h;
 }
 
@@ -561,6 +585,7 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
     o->visible = 1;
     o->z = 0;
     o->parent_idx = -1;
+    o->parent_generation = 0u;
     o->clip_to_parent = 1;
 
     // keep these consistent with your other objects
@@ -582,12 +607,15 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
     o->u.image.sample_mode = KGFX_IMAGE_SAMPLE_NEAREST;
 
     handle.idx = (int)idx;
+    handle.generation = g_obj_generation[idx];
     return handle;
 }
 
 kgfx_obj *kgfx_obj_ref(kgfx_obj_handle h)
 {
     if (h.idx < 0 || (uint16_t)h.idx >= g_obj_count || !g_obj_used[(uint16_t)h.idx])
+        return 0;
+    if (h.generation != g_obj_generation[(uint16_t)h.idx])
         return 0;
     return &g_objs[h.idx];
 }
@@ -1096,7 +1124,8 @@ static int resolve_obj(uint16_t idx, kgfx_resolved_obj *resolved)
 
     if (o->parent_idx >= 0 &&
         (uint16_t)o->parent_idx < g_obj_count &&
-        g_obj_used[(uint16_t)o->parent_idx])
+        g_obj_used[(uint16_t)o->parent_idx] &&
+        o->parent_generation == g_obj_generation[(uint16_t)o->parent_idx])
     {
         if (!g_objs[(uint16_t)o->parent_idx].visible)
         {
@@ -2039,6 +2068,176 @@ static inline uint32_t sample_argb32_bilinear(const uint32_t *src_argb,
            (uint32_t)lerp_u8(b0, b1, ty);
 }
 
+typedef struct
+{
+    const uint32_t *src_argb;
+    uint32_t src_w;
+    uint32_t src_h;
+    uint32_t src_stride_px;
+    uint32_t *dst_argb;
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t step_x;
+    uint32_t step_y;
+    uint32_t y0;
+    uint32_t y1;
+    uint8_t sample_mode;
+    uint8_t global_alpha;
+    uint8_t opaque;
+} kgfx_scale_job_ctx;
+
+static void kgfx_scale_rows(kgfx_scale_job_ctx *ctx)
+{
+    uint8_t opaque = 1u;
+
+    if (!ctx || !ctx->src_argb || !ctx->dst_argb || ctx->y0 >= ctx->y1 ||
+        !ctx->src_w || !ctx->src_h || !ctx->dst_w || !ctx->dst_h)
+        return;
+
+    for (uint32_t iy = ctx->y0; iy < ctx->y1; ++iy)
+    {
+        uint32_t fy16 = iy * ctx->step_y;
+        uint32_t *drow = ctx->dst_argb + (uint64_t)iy * ctx->dst_w;
+
+        for (uint32_t ix = 0; ix < ctx->dst_w; ++ix)
+        {
+            uint32_t fx16 = ix * ctx->step_x;
+            uint32_t sp = (ctx->sample_mode == KGFX_IMAGE_SAMPLE_BILINEAR)
+                              ? sample_argb32_bilinear(ctx->src_argb, ctx->src_w, ctx->src_h,
+                                                       ctx->src_stride_px, fx16, fy16)
+                              : sample_argb32_nearest(ctx->src_argb, ctx->src_w, ctx->src_h,
+                                                      ctx->src_stride_px, fx16, fy16);
+
+            if (ctx->global_alpha != 255u)
+            {
+                uint8_t sa = (uint8_t)(sp >> 24);
+                uint8_t a = (uint8_t)(((uint16_t)sa * (uint16_t)ctx->global_alpha + 127u) / 255u);
+                sp = (sp & 0x00FFFFFFu) | ((uint32_t)a << 24);
+            }
+
+            if ((uint8_t)(sp >> 24) != 255u)
+                opaque = 0u;
+            drow[ix] = sp;
+        }
+    }
+
+    ctx->opaque = opaque;
+    asm_dma_clean_range(ctx->dst_argb + (uint64_t)ctx->y0 * ctx->dst_w,
+                        (uint64_t)(ctx->y1 - ctx->y0) * ctx->dst_w * 4ull);
+    asm_dma_clean_range(ctx, sizeof(*ctx));
+}
+
+static void kgfx_scale_job_worker(void *arg)
+{
+    kgfx_scale_job_ctx *ctx = (kgfx_scale_job_ctx *)arg;
+    asm_dma_invalidate_range(ctx, sizeof(*ctx));
+    kgfx_scale_rows(ctx);
+}
+
+static uint8_t kgfx_scale_rows_parallel(const uint32_t *src_argb,
+                                        uint32_t src_w, uint32_t src_h,
+                                        uint32_t src_stride_px,
+                                        uint32_t *dst_argb,
+                                        uint32_t dst_w, uint32_t dst_h,
+                                        uint32_t step_x, uint32_t step_y,
+                                        uint8_t sample_mode,
+                                        uint8_t global_alpha)
+{
+    smp_snapshot smp;
+    kgfx_scale_job_ctx ctxs[KGFX_PARALLEL_MAX_JOBS];
+    uint32_t jobs[KGFX_PARALLEL_MAX_JOBS];
+    uint32_t job_count = 0u;
+    uint32_t worker_jobs = 0u;
+    uint32_t main_rows = 0u;
+    uint32_t submitted = 0u;
+    uint8_t opaque = 1u;
+
+    smp_get_snapshot(&smp);
+    if (!smp.worker_count || (uint64_t)dst_w * dst_h < KGFX_PARALLEL_MIN_PIXELS)
+    {
+        ctxs[0] = (kgfx_scale_job_ctx){src_argb, src_w, src_h, src_stride_px,
+                                       dst_argb, dst_w, dst_h, step_x, step_y,
+                                       0u, dst_h, sample_mode, global_alpha, 1u};
+        kgfx_scale_rows(&ctxs[0]);
+        return ctxs[0].opaque;
+    }
+
+    worker_jobs = smp.worker_count;
+    if (worker_jobs > KGFX_PARALLEL_MAX_JOBS - 1u)
+        worker_jobs = KGFX_PARALLEL_MAX_JOBS - 1u;
+    if (worker_jobs > dst_h / 32u)
+        worker_jobs = dst_h / 32u;
+    if (!worker_jobs)
+        worker_jobs = 1u;
+    job_count = worker_jobs + 1u;
+    main_rows = (dst_h + job_count - 1u) / job_count;
+    if (main_rows < 8u)
+        main_rows = 8u;
+    if (main_rows > dst_h)
+        main_rows = dst_h;
+
+    ctxs[0] = (kgfx_scale_job_ctx){src_argb, src_w, src_h, src_stride_px,
+                                   dst_argb, dst_w, dst_h, step_x, step_y,
+                                   0u, main_rows, sample_mode, global_alpha, 1u};
+
+    for (uint32_t i = 0u; i < worker_jobs; ++i)
+    {
+        uint32_t y0 = main_rows + (uint32_t)(((uint64_t)(dst_h - main_rows) * i) / worker_jobs);
+        uint32_t y1 = main_rows + (uint32_t)(((uint64_t)(dst_h - main_rows) * (i + 1u)) / worker_jobs);
+        jobs[i] = 0u;
+        ctxs[i + 1u] = (kgfx_scale_job_ctx){src_argb, src_w, src_h, src_stride_px,
+                                            dst_argb, dst_w, dst_h, step_x, step_y,
+                                            y0, y1, sample_mode, global_alpha, 1u};
+        if (y1 <= y0)
+            continue;
+        asm_dma_clean_range(&ctxs[i + 1u], sizeof(ctxs[i + 1u]));
+        if (kwork_submit(kgfx_scale_job_worker, &ctxs[i + 1u],
+                         KWORK_SUBMIT_REQUIRE_REMOTE | KWORK_SUBMIT_QUIET, &jobs[i]) == 0 && jobs[i])
+            ++submitted;
+        else
+        {
+            kgfx_scale_rows(&ctxs[i + 1u]);
+            jobs[i] = 0u;
+        }
+    }
+
+    kgfx_scale_rows(&ctxs[0]);
+
+    for (;;)
+    {
+        uint32_t pending = 0u;
+        for (uint32_t i = 0u; i < worker_jobs; ++i)
+        {
+            uint32_t status;
+            if (!jobs[i])
+                continue;
+            status = kwork_status(jobs[i]);
+            if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+                ++pending;
+        }
+        if (!pending)
+            break;
+        smp_signal_workers();
+        asm_relax();
+    }
+
+    (void)submitted;
+    if (!ctxs[0].opaque)
+        opaque = 0u;
+    for (uint32_t i = 0u; i < worker_jobs; ++i)
+    {
+        uint32_t status;
+        asm_dma_invalidate_range(&ctxs[i + 1u], sizeof(ctxs[i + 1u]));
+        status = jobs[i] ? kwork_status(jobs[i]) : KWORK_STATUS_DONE;
+        if (jobs[i] && status != KWORK_STATUS_DONE)
+            kgfx_scale_rows(&ctxs[i + 1u]);
+        if (!ctxs[i + 1u].opaque)
+            opaque = 0u;
+    }
+    asm_dma_invalidate_range(dst_argb, (uint64_t)dst_w * dst_h * 4ull);
+    return opaque;
+}
+
 static kgfx_image_cache *kgfx_image_cache_ensure_scaled(uint16_t obj_idx,
                                                         const uint32_t *src_argb,
                                                         uint32_t src_w, uint32_t src_h,
@@ -2104,30 +2303,9 @@ static kgfx_image_cache *kgfx_image_cache_ensure_scaled(uint16_t obj_idx,
     step_x = ((uint64_t)src_w << 16) / dst_w;
     step_y = ((uint64_t)src_h << 16) / dst_h;
 
-    for (uint32_t iy = 0; iy < dst_h; ++iy)
-    {
-        uint32_t fy16 = iy * step_y;
-        uint32_t *drow = cache->pixels + (uint64_t)iy * dst_w;
-
-        for (uint32_t ix = 0; ix < dst_w; ++ix)
-        {
-            uint32_t fx16 = ix * step_x;
-            uint32_t sp = (sample_mode == KGFX_IMAGE_SAMPLE_BILINEAR)
-                              ? sample_argb32_bilinear(src_argb, src_w, src_h, src_stride_px, fx16, fy16)
-                              : sample_argb32_nearest(src_argb, src_w, src_h, src_stride_px, fx16, fy16);
-
-            if (global_alpha != 255u)
-            {
-                uint8_t sa = (uint8_t)(sp >> 24);
-                uint8_t a = (uint8_t)(((uint16_t)sa * (uint16_t)global_alpha + 127u) / 255u);
-                sp = (sp & 0x00FFFFFFu) | ((uint32_t)a << 24);
-            }
-
-            if ((uint8_t)(sp >> 24) != 255u)
-                opaque = 0u;
-            drow[ix] = sp;
-        }
-    }
+    opaque = kgfx_scale_rows_parallel(src_argb, src_w, src_h, src_stride_px,
+                                      cache->pixels, dst_w, dst_h,
+                                      step_x, step_y, sample_mode, global_alpha);
 
     cache->valid = 1u;
     cache->opaque = opaque;
@@ -2754,6 +2932,8 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
         return -1;
     if (!g_obj_used[(uint16_t)h.idx])
         return -1;
+    if (h.generation != g_obj_generation[(uint16_t)h.idx])
+        return -1;
 
     uint16_t idx = (uint16_t)h.idx;
     kgfx_image_cache_invalidate(idx);
@@ -2763,8 +2943,12 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
     {
         if (!g_obj_used[i])
             continue;
-        if (g_objs[i].parent_idx == (int16_t)idx)
+        if (g_objs[i].parent_idx == (int16_t)idx &&
+            g_objs[i].parent_generation == h.generation)
+        {
             g_objs[i].parent_idx = -1;
+            g_objs[i].parent_generation = 0u;
+        }
     }
 
     kgfx_clear_slot(idx);
@@ -3157,6 +3341,7 @@ int kgfx_scene_init(void)
     for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
     {
         g_obj_used[i] = 0u;
+        g_obj_generation[i] = 0u;
         kgfx_clear_slot(i);
     }
     g_prev_snapshot_count = 0;

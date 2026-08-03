@@ -12,6 +12,11 @@ extern "C"
 {
 #endif
 
+    /*
+     * Legacy widget API.
+     * Kept for existing kernel apps and SACX compatibility; new UI work should
+     * prefer the SACX UI backend APIs as they are added.
+     */
     typedef struct
     {
         int idx;

@@ -12,13 +12,22 @@
 #include "kwrappers/kbutton.h"
 #include "kwrappers/ktextbox.h"
 #include "kwrappers/kwindow.h"
+#include "kwrappers/kui.h"
 #include "system/dihos_time.h"
+#include "system/task_accounting.h"
+#include "system/cpu_info.h"
+#include "system/smp.h"
+#include "system/kwork.h"
 #include "system/ksystem_font.h"
 #include "system/kearly_console.h"
+#include "system/boot_volume_blockdev.h"
+#include "hyperv/hyperv.h"
+#include "hyperv/hyperv_storage.h"
 #include "apps/desktop_shell_api.h"
 #include "apps/screenshot_service.h"
 #include "apps/file_explorer_api.h"
 #include "apps/sacx_runtime.h"
+#include "apps/task_manager_api.h"
 #include "apps/text_editor_api.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "hardware_probes/acpi_probe_xhci.h"
@@ -112,6 +121,7 @@ void kmain(boot_info *bi)
 
     g_fb32 = (volatile uint32_t *)(uintptr_t)bi->fb.fb_base;
     pmem_init(bi);
+    int image_decoder_reserved = (kimg_prepare_decoder() == 0);
 
     kfont fallback_font = (kfont){0};
     int have_fallback_font = (ksystem_font_init_fallback(&fallback_font) == 0);
@@ -123,12 +133,35 @@ void kmain(boot_info *bi)
     kbutton_init();
     ktextbox_init();
     kwindow_init();
+    kui_init(have_fallback_font ? &fallback_font : 0);
 
     crumb((kcolor){20, 20, 20});
     kearly_console_begin(have_fallback_font ? &fallback_font : 0);
     terminal_print("early console online");
+    if (image_decoder_reserved)
+        terminal_success("kimg: decoder arena reserved");
+    else
+        terminal_warn("kimg: decoder arena reserve failed");
     if (!have_fallback_font)
         terminal_warn("embedded psf fallback unavailable; using block debug font");
+
+    cpu_info_init(bi ? bi->acpi_rsdp : 0u);
+#if defined(DIHOS_ARCH_X64) || defined(KERNEL_ARCH_X64) || defined(__x86_64__) || defined(_M_X64)
+    terminal_print("kernel build: HYPERV-33 arch=x64");
+#elif defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    terminal_print("kernel build: HYPERV-33 arch=aa64");
+#else
+    terminal_print("kernel build: HYPERV-33 arch=unknown");
+#endif
+
+    hyperv_info hv = (hyperv_info){0};
+    int hyperv_present = (hyperv_detect(&hv, bi->acpi_rsdp) == 0);
+    if (hyperv_present)
+    {
+        hyperv_log_detection(&hv);
+        if (hyperv_core_init(&hv) != 0)
+            terminal_error("hyperv: core init failed");
+    }
 
     uint64_t xhci_mmio_order[BOOTINFO_XHCI_MMIO_MAX] = {0};
     uint32_t xhci_mmio_count =
@@ -174,8 +207,28 @@ void kmain(boot_info *bi)
     }
 
     int usb_ok = -1;
+    int mounted = 0;
+    blockdev_t hyperv_bd = (blockdev_t){0};
+    blockdev_t boot_volume_bd = (blockdev_t){0};
 
-    if (xhci_mmio_count || bi->acpi_rsdp)
+    if (hyperv_present)
+    {
+        terminal_print("storage: Hyper-V path selected");
+        if (hyperv_storage_try_bind(&hyperv_bd, bi->acpi_rsdp) == 0)
+        {
+            kfile_bind_blockdev(&hyperv_bd);
+            mounted = (kfile_mount0() == 0);
+            if (mounted)
+            {
+                terminal_success("storvsc: filesystem mounted");
+                terminal_success("storvsc: mounted read/write");
+            }
+            else
+                terminal_error("storvsc: filesystem mount failed");
+        }
+    }
+
+    if (!mounted && !hyperv_present && (xhci_mmio_count || bi->acpi_rsdp))
     {
         terminal_print("usb: probing xhci storage");
         usb_ok = usbdisk_bind_and_enumerate_multi(
@@ -183,14 +236,12 @@ void kmain(boot_info *bi)
             xhci_mmio_count,
             bi->acpi_rsdp);
     }
-    else
+    else if (!mounted && !hyperv_present)
     {
         terminal_warn("usb: no xhci hints or acpi rsdp");
     }
 
-    // Mount only when enumeration succeeded
-    int mounted = 0;
-    if (usb_ok == 0)
+    if (!mounted && usb_ok == 0)
     {
         terminal_print("usb: storage enumerated; mounting filesystem");
         kfile_bind_blockdev(&g_usb_bd);
@@ -204,10 +255,25 @@ void kmain(boot_info *bi)
                 asm_wait();
         }
     }
-    else
+    else if (!mounted && !hyperv_present)
     {
         terminal_error("usb: storage unavailable");
-        terminal_error("usb: fatal stop for debug");
+        terminal_warn("bootvol: trying UEFI boot-volume RAM fallback");
+        if (boot_volume_blockdev_init(bi, &boot_volume_bd) == 0)
+        {
+            kfile_bind_blockdev(&boot_volume_bd);
+            mounted = (kfile_mount0() == 0);
+            if (mounted)
+            {
+                terminal_warn("bootvol: mounted RAM snapshot; writes are not persistent");
+            }
+        }
+    }
+
+    if (!mounted)
+    {
+        terminal_error("storage: no mountable provider");
+        terminal_error("storage: fatal stop for debug");
         for (;;)
             asm_wait();
     }
@@ -233,15 +299,20 @@ void kmain(boot_info *bi)
         font = &disk_font;
         have_disk_font = 1;
     }
+    kui_set_font(font);
 
     sacx_runtime_init(font);
 
     terminal_initialize(font);
     terminal_print("terminal online");
+    smp_init(bi ? bi->acpi_rsdp : 0u);
+    kwork_init();
     if (!mounted)
         terminal_warn("storage offline; file-backed apps disabled");
+    else if (have_disk_font)
+        terminal_success("font: using disk system font");
     else if (!have_disk_font)
-        terminal_warn("disk font unavailable; using embedded fallback font");
+        terminal_warn("font: using embedded baked PSF fallback");
     terminal_success("sacx runtime online");
 
     terminal_print("[stage2_report] begin");
@@ -305,6 +376,8 @@ void kmain(boot_info *bi)
         terminal_success("file explorer online");
         text_editor_init(font);
         terminal_success("text editor online");
+        task_manager_init(font);
+        terminal_success("task manager online");
     }
     else
     {
@@ -330,21 +403,30 @@ void kmain(boot_info *bi)
     for (;;)
     {
         ++g_dihos_tick;
+        task_accounting_frame_begin();
 
+        task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
         kinput_poll();
         kmouse_update();
         if (!screenshot_service_update())
         {
+            task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
             kwindow_update_all();
             file_explorer_update();
             text_editor_update();
+            task_manager_update();
+            task_accounting_add(TASK_ACCOUNT_KERNEL_APPS, 1u);
             desktop_shell_update();
             kbutton_update_all();
+            kui_update_all();
             ktextbox_update_all();
+            task_accounting_add(TASK_ACCOUNT_TERMINAL, 1u);
             terminal_update_input();
         }
 
+        task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
         kgfx_render_all(black);
+        task_accounting_add(TASK_ACCOUNT_SACX, 1u);
         sacx_runtime_update();
         frame++;
     }

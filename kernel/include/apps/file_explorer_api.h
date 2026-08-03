@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kwrappers/kwindow.h"
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -21,12 +23,19 @@ extern "C"
     void file_explorer_init(const kfont *font);
     void file_explorer_update(void);
     void file_explorer_activate(void);
+    void file_explorer_hide(void);
     int file_explorer_visible(void);
     int file_explorer_begin_dialog(file_explorer_dialog_mode mode,
                                    const char *initial_dir,
                                    const char *suggested_name,
                                    file_explorer_dialog_callback on_result,
                                    void *user);
+    int file_explorer_begin_dialog_for_window(file_explorer_dialog_mode mode,
+                                              kwindow_handle owner,
+                                              const char *initial_dir,
+                                              const char *suggested_name,
+                                              file_explorer_dialog_callback on_result,
+                                              void *user);
     int file_explorer_dialog_active(void);
 
 #ifdef __cplusplus

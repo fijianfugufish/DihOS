@@ -217,9 +217,13 @@ namespace
         void Init(const kfont *font, uint8_t dialog_host);
         void Update();
         void Activate();
+        void Hide();
         int Visible() const;
         int BeginDialog(file_explorer_dialog_mode mode, const char *initial_dir, const char *suggested_name,
                         file_explorer_dialog_callback on_result, void *user);
+        int BeginDialogForWindow(file_explorer_dialog_mode mode, kwindow_handle owner,
+                                 const char *initial_dir, const char *suggested_name,
+                                 file_explorer_dialog_callback on_result, void *user);
         int DialogActive() const;
 
     private:
@@ -231,7 +235,7 @@ namespace
             MODAL_TEXT_CAP = 256,
             MODAL_TITLE_CAP = 64,
             MODAL_LABEL_CAP = 24,
-            DOUBLE_CLICK_FRAMES = 24,
+            DOUBLE_CLICK_FRAMES = 180,
             SCROLL_LINES_PER_WHEEL = 3
         };
 
@@ -296,6 +300,7 @@ namespace
         int RootVisible(void) const;
         kgfx_obj *RootObject(void);
         void SetStatus(const char *text, kcolor color);
+        void SetFsErrorStatus(const char *prefix);
         void ShowDefaultStatus(void);
         void RefreshStatusVisual(void);
         void ResetDoubleClick(void);
@@ -426,11 +431,13 @@ namespace
         uint8_t layout_dirty_;
         uint8_t actions_dirty_;
         uint8_t rows_dirty_;
+        uint8_t storage_writable_;
         int last_root_w_;
         int last_root_h_;
         file_explorer_dialog_mode dialog_mode_;
         file_explorer_dialog_callback dialog_callback_;
         void *dialog_user_;
+        kwindow_handle dialog_owner_;
         uint8_t dialog_restore_hidden_;
     };
 
@@ -462,6 +469,7 @@ namespace
         dialog_mode_ = FILE_EXPLORER_DIALOG_NONE;
         dialog_callback_ = 0;
         dialog_user_ = 0;
+        dialog_owner_.idx = -1;
         dialog_restore_hidden_ = 0u;
         selected_index_ = -1;
         scroll_top_ = 0;
@@ -489,6 +497,7 @@ namespace
         last_root_h_ = -1;
         copy_text(current_dir_, sizeof(current_dir_), "/");
         copy_text(current_raw_, sizeof(current_raw_), "0:/");
+        storage_writable_ = kfile_storage_writable() ? 1u : 0u;
         copy_text(status_buffer_, sizeof(status_buffer_), "loading explorer...");
         modal_title_buffer_[0] = 0;
         modal_body_buffer_[0] = 0;
@@ -547,7 +556,7 @@ namespace
         Layout();
 
         if (ReloadDirectory(0) != 0)
-            SetStatus("unable to read /", rgb(255, 140, 140));
+            SetFsErrorStatus("unable to read /");
         else
             ShowDefaultStatus();
 
@@ -589,6 +598,7 @@ namespace
     {
         ktextbox_style path_style = ktextbox_style_default();
         kgfx_obj_handle root = kwindow_root(window_);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
 
         path_style.fill = rgb(24, 29, 40);
         path_style.hover_fill = rgb(31, 38, 52);
@@ -596,8 +606,9 @@ namespace
         path_style.outline = rgb(102, 122, 158);
         path_style.focus_outline = rgb(144, 194, 255);
         path_style.text_color = rgb(236, 239, 245);
-        path_style.padding_x = 6u;
-        path_style.padding_y = 3u;
+        path_style.padding_x = (uint16_t)kwindow_ui_scale_u32(6u);
+        path_style.padding_y = (uint16_t)kwindow_ui_scale_u32(3u);
+        path_style.text_scale = text_scale;
 
         path_box_ = ktextbox_add_rect(0, 0, 100, 24, 2, font_, &path_style, PathSubmitThunk, this);
         kgfx_obj_set_parent(ktextbox_root(path_box_), root);
@@ -614,11 +625,11 @@ namespace
         kgfx_obj_ref(status_strip_)->outline = rgb(80, 98, 132);
         kgfx_obj_ref(status_strip_)->outline_width = 1u;
 
-        status_text_ = kgfx_obj_add_text(font_, status_buffer_, 8, 4, 1, status_color_, 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 1);
+        status_text_ = kgfx_obj_add_text(font_, status_buffer_, 8, 4, 1, status_color_, 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 1);
         kgfx_obj_set_parent(status_text_, status_strip_);
         kgfx_obj_set_clip_to_parent(status_text_, 1);
 
-        dialog_name_label_ = kgfx_obj_add_text(font_, "File Name", 0, 0, 1, rgb(222, 228, 238), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 0);
+        dialog_name_label_ = kgfx_obj_add_text(font_, "File Name", 0, 0, 1, rgb(222, 228, 238), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 0);
         kgfx_obj_set_parent(dialog_name_label_, root);
         kgfx_obj_set_clip_to_parent(dialog_name_label_, 1);
 
@@ -634,13 +645,13 @@ namespace
         rename_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, RenameClickThunk, this);
         delete_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, DeleteClickThunk, this);
 
-        up_button_.label = kgfx_obj_add_text(font_, "Up", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        refresh_button_.label = kgfx_obj_add_text(font_, "Refresh", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        new_folder_button_.label = kgfx_obj_add_text(font_, "New Folder", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        new_file_button_.label = kgfx_obj_add_text(font_, "New File", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        open_with_button_.label = kgfx_obj_add_text(font_, "Open With", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        rename_button_.label = kgfx_obj_add_text(font_, "Rename", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        delete_button_.label = kgfx_obj_add_text(font_, "Delete", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        up_button_.label = kgfx_obj_add_text(font_, "Up", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        refresh_button_.label = kgfx_obj_add_text(font_, "Refresh", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        new_folder_button_.label = kgfx_obj_add_text(font_, "New Folder", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        new_file_button_.label = kgfx_obj_add_text(font_, "New File", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        open_with_button_.label = kgfx_obj_add_text(font_, "Open With", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        rename_button_.label = kgfx_obj_add_text(font_, "Rename", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        delete_button_.label = kgfx_obj_add_text(font_, "Delete", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
         LabeledButton *buttons[] = {
             &up_button_,
@@ -667,11 +678,13 @@ namespace
 
     void FileExplorer::CreateRows(void)
     {
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
+
         for (int i = 0; i < MAX_VISIBLE_ROWS; ++i)
         {
             rows_[i].button = kbutton_add_rect(0, 0, 100, 24, 2, &row_style_, RowClickThunk, &rows_[i]);
-            rows_[i].icon = kgfx_obj_add_text(font_, kFolderIcon, 10, 4, 1, rgb(248, 205, 90), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 1);
-            rows_[i].name = kgfx_obj_add_text(font_, "", 36, 4, 1, rgb(236, 239, 245), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 1);
+            rows_[i].icon = kgfx_obj_add_text(font_, kFolderIcon, 10, 4, 1, rgb(248, 205, 90), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 1);
+            rows_[i].name = kgfx_obj_add_text(font_, "", 36, 4, 1, rgb(236, 239, 245), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 1);
             rows_[i].entry_index = -1;
 
             kgfx_obj_set_parent(kbutton_root(rows_[i].button), list_viewport_);
@@ -690,6 +703,7 @@ namespace
     {
         ktextbox_style modal_text_style = ktextbox_style_default();
         kgfx_obj_handle root = kwindow_root(window_);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
 
         modal_backdrop_ = kgfx_obj_add_rect(0, 0, 100, 100, 30, rgb(0, 0, 0), 0);
         kgfx_obj_ref(modal_backdrop_)->alpha = 140u;
@@ -702,9 +716,9 @@ namespace
         kgfx_obj_set_parent(modal_panel_, root);
         kgfx_obj_set_clip_to_parent(modal_panel_, 1);
 
-        modal_title_ = kgfx_obj_add_text(font_, modal_title_buffer_, 14, 12, 1, rgb(240, 244, 250), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 0);
-        modal_body_ = kgfx_obj_add_text(font_, modal_body_buffer_, 14, 40, 1, rgb(213, 220, 232), 255, 1u, 0, 4, KTEXT_ALIGN_LEFT, 0);
-        modal_error_ = kgfx_obj_add_text(font_, modal_error_buffer_, 14, 92, 1, rgb(255, 140, 140), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 0);
+        modal_title_ = kgfx_obj_add_text(font_, modal_title_buffer_, 14, 12, 1, rgb(240, 244, 250), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 0);
+        modal_body_ = kgfx_obj_add_text(font_, modal_body_buffer_, 14, 40, 1, rgb(213, 220, 232), 255, text_scale, 0, 4, KTEXT_ALIGN_LEFT, 0);
+        modal_error_ = kgfx_obj_add_text(font_, modal_error_buffer_, 14, 92, 1, rgb(255, 140, 140), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 0);
 
         kgfx_obj_set_parent(modal_title_, modal_panel_);
         kgfx_obj_set_parent(modal_body_, modal_panel_);
@@ -719,8 +733,9 @@ namespace
         modal_text_style.outline = rgb(112, 132, 171);
         modal_text_style.focus_outline = rgb(153, 204, 255);
         modal_text_style.text_color = rgb(240, 244, 248);
-        modal_text_style.padding_x = 6u;
-        modal_text_style.padding_y = 3u;
+        modal_text_style.padding_x = (uint16_t)kwindow_ui_scale_u32(6u);
+        modal_text_style.padding_y = (uint16_t)kwindow_ui_scale_u32(3u);
+        modal_text_style.text_scale = text_scale;
 
         modal_input_ = ktextbox_add_rect(0, 0, 160, 24, 32, font_, &modal_text_style, ModalSubmitThunk, this);
         kgfx_obj_set_parent(ktextbox_root(modal_input_), modal_panel_);
@@ -729,9 +744,9 @@ namespace
         modal_confirm_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &modal_confirm_style_, ModalConfirmClickThunk, this);
         modal_extra_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &action_style_, ModalExtraClickThunk, this);
         modal_cancel_button_.button = kbutton_add_rect(0, 0, 84, 28, 32, &action_style_, ModalCancelClickThunk, this);
-        modal_confirm_button_.label = kgfx_obj_add_text(font_, modal_confirm_label_, 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        modal_extra_button_.label = kgfx_obj_add_text(font_, "Edit", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        modal_cancel_button_.label = kgfx_obj_add_text(font_, "Cancel", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        modal_confirm_button_.label = kgfx_obj_add_text(font_, modal_confirm_label_, 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        modal_extra_button_.label = kgfx_obj_add_text(font_, "Edit", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        modal_cancel_button_.label = kgfx_obj_add_text(font_, "Cancel", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
         kgfx_obj_set_parent(kbutton_root(modal_confirm_button_.button), modal_panel_);
         kgfx_obj_set_parent(kbutton_root(modal_extra_button_.button), modal_panel_);
@@ -781,6 +796,14 @@ namespace
     int FileExplorer::BeginDialog(file_explorer_dialog_mode mode, const char *initial_dir, const char *suggested_name,
                                   file_explorer_dialog_callback on_result, void *user)
     {
+        kwindow_handle owner = {-1};
+        return BeginDialogForWindow(mode, owner, initial_dir, suggested_name, on_result, user);
+    }
+
+    int FileExplorer::BeginDialogForWindow(file_explorer_dialog_mode mode, kwindow_handle owner,
+                                           const char *initial_dir, const char *suggested_name,
+                                           file_explorer_dialog_callback on_result, void *user)
+    {
         if (!initialized_ || !on_result || !dialog_host_)
             return -1;
         if (mode != FILE_EXPLORER_DIALOG_OPEN_FILE && mode != FILE_EXPLORER_DIALOG_SAVE_FILE)
@@ -791,6 +814,7 @@ namespace
         dialog_mode_ = mode;
         dialog_callback_ = on_result;
         dialog_user_ = user;
+        dialog_owner_ = owner;
         dialog_restore_hidden_ = Visible() ? 0u : 1u;
         layout_dirty_ = 1u;
         actions_dirty_ = 1u;
@@ -813,6 +837,8 @@ namespace
         RefreshDialogTitle();
         ShowDefaultStatus();
         Activate();
+        if (dialog_owner_.idx >= 0)
+            (void)kwindow_set_modal_child(dialog_owner_, window_);
         return 0;
     }
 
@@ -938,7 +964,8 @@ namespace
         kgfx_obj *root = kgfx_obj_ref(kbutton_root(row.button));
         kgfx_obj *icon = kgfx_obj_ref(row.icon);
         kgfx_obj *name = kgfx_obj_ref(row.name);
-        uint32_t text_h = text_height_px(font_, 1u);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
+        uint32_t text_h = text_height_px(font_, text_scale);
         int32_t text_y = (int32_t)((h > text_h) ? (h - text_h) / 2u : 0u);
 
         if (!root || root->kind != KGFX_OBJ_RECT)
@@ -951,13 +978,15 @@ namespace
 
         if (icon && icon->kind == KGFX_OBJ_TEXT)
         {
-            icon->u.text.x = 10;
+            icon->u.text.scale = text_scale;
+            icon->u.text.x = kwindow_ui_scale_i32(10);
             icon->u.text.y = text_y;
         }
 
         if (name && name->kind == KGFX_OBJ_TEXT)
         {
-            name->u.text.x = 42;
+            name->u.text.scale = text_scale;
+            name->u.text.x = kwindow_ui_scale_i32(42);
             name->u.text.y = text_y;
         }
     }
@@ -965,12 +994,14 @@ namespace
     void FileExplorer::Layout(void)
     {
         kgfx_obj *root = RootObject();
-        int32_t pad = 12;
-        uint32_t text_h = text_height_px(font_, 1u);
-        uint32_t path_h = text_h + 12u;
-        uint32_t action_h = text_h + 14u;
-        uint32_t status_h = text_h + 12u;
-        uint32_t row_h = text_h + 10u;
+        int32_t pad = kwindow_ui_scale_i32(12);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
+        uint32_t text_h = text_height_px(font_, text_scale);
+        uint32_t path_h = text_h + kwindow_ui_scale_u32(12);
+        uint32_t action_h = text_h + kwindow_ui_scale_u32(14);
+        uint32_t status_h = text_h + kwindow_ui_scale_u32(12);
+        uint32_t row_h = text_h + kwindow_ui_scale_u32(10);
+        uint32_t titlebar_h = kwindow_ui_scale_u32(42);
         int32_t client_x = 0;
         int32_t path_y = 0;
         int32_t actions_y = 0;
@@ -979,16 +1010,25 @@ namespace
         int32_t name_y = 0;
         int32_t list_h = 0;
         uint32_t client_w = 0u;
-        uint32_t button_gap = 8u;
+        uint32_t button_gap = kwindow_ui_scale_u32(8);
+        int32_t gap8 = kwindow_ui_scale_i32(8);
+        int32_t gap10 = kwindow_ui_scale_i32(10);
         uint32_t button_count = dialog_mode_ == FILE_EXPLORER_DIALOG_NONE ? 7u : 4u;
         uint32_t button_w = 1u;
         uint32_t used_w = 0u;
+        uint32_t gap_total = 0u;
         uint32_t visible_rows = 0u;
         uint32_t name_h = path_h;
-        uint32_t name_label_w = 76u;
+        uint32_t name_label_w = kwindow_ui_scale_u32(76);
 
         if (!root || root->kind != KGFX_OBJ_RECT)
             return;
+        if (pad < 4)
+            pad = 4;
+        if (button_gap == 0u)
+            button_gap = 1u;
+        if (titlebar_h < 24u)
+            titlebar_h = 24u;
 
         last_root_w_ = (int)root->u.rect.w;
         last_root_h_ = (int)root->u.rect.h;
@@ -998,18 +1038,18 @@ namespace
 
         client_x = pad;
         client_w = root->u.rect.w - 2u * (uint32_t)pad;
-        path_y = (int32_t)42 + pad;
-        actions_y = path_y + (int32_t)path_h + 8;
+        path_y = (int32_t)titlebar_h + pad;
+        actions_y = path_y + (int32_t)path_h + gap8;
         status_y = (int32_t)root->u.rect.h - pad - (int32_t)status_h;
-        list_y = actions_y + (int32_t)action_h + 10;
+        list_y = actions_y + (int32_t)action_h + gap10;
         if (dialog_mode_ == FILE_EXPLORER_DIALOG_SAVE_FILE)
         {
-            name_y = status_y - 8 - (int32_t)name_h;
-            list_h = name_y - 8 - list_y;
+            name_y = status_y - gap8 - (int32_t)name_h;
+            list_h = name_y - gap8 - list_y;
         }
         else
         {
-            list_h = status_y - 8 - list_y;
+            list_h = status_y - gap8 - list_y;
         }
 
         if (list_h < (int32_t)row_h)
@@ -1017,20 +1057,21 @@ namespace
 
         ktextbox_set_bounds(path_box_, client_x, path_y, client_w, path_h);
 
-        used_w = client_w - button_gap * (button_count - 1u);
+        gap_total = button_gap * (button_count - 1u);
+        used_w = (client_w > gap_total) ? (client_w - gap_total) : client_w;
         button_w = (button_count > 0u) ? (used_w / button_count) : client_w;
         if (button_w == 0u)
             button_w = 1u;
 
-        LayoutButton(up_button_, client_x, actions_y, button_w, action_h, 1u);
-        LayoutButton(refresh_button_, client_x + (int32_t)(button_w + button_gap) * 1, actions_y, button_w, action_h, 1u);
-        LayoutButton(new_folder_button_, client_x + (int32_t)(button_w + button_gap) * 2, actions_y, button_w, action_h, 1u);
-        LayoutButton(new_file_button_, client_x + (int32_t)(button_w + button_gap) * 3, actions_y, button_w, action_h, 1u);
+        LayoutButton(up_button_, client_x, actions_y, button_w, action_h, text_scale);
+        LayoutButton(refresh_button_, client_x + (int32_t)(button_w + button_gap) * 1, actions_y, button_w, action_h, text_scale);
+        LayoutButton(new_folder_button_, client_x + (int32_t)(button_w + button_gap) * 2, actions_y, button_w, action_h, text_scale);
+        LayoutButton(new_file_button_, client_x + (int32_t)(button_w + button_gap) * 3, actions_y, button_w, action_h, text_scale);
         if (dialog_mode_ == FILE_EXPLORER_DIALOG_NONE)
         {
-            LayoutButton(open_with_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, 1u);
-            LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, 1u);
-            LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 6, actions_y, button_w, action_h, 1u);
+            LayoutButton(open_with_button_, client_x + (int32_t)(button_w + button_gap) * 4, actions_y, button_w, action_h, text_scale);
+            LayoutButton(rename_button_, client_x + (int32_t)(button_w + button_gap) * 5, actions_y, button_w, action_h, text_scale);
+            LayoutButton(delete_button_, client_x + (int32_t)(button_w + button_gap) * 6, actions_y, button_w, action_h, text_scale);
         }
 
         if (kgfx_obj_ref(list_viewport_) && kgfx_obj_ref(list_viewport_)->kind == KGFX_OBJ_RECT)
@@ -1051,7 +1092,8 @@ namespace
 
         if (kgfx_obj_ref(status_text_) && kgfx_obj_ref(status_text_)->kind == KGFX_OBJ_TEXT)
         {
-            kgfx_obj_ref(status_text_)->u.text.x = 8;
+            kgfx_obj_ref(status_text_)->u.text.scale = text_scale;
+            kgfx_obj_ref(status_text_)->u.text.x = gap8;
             kgfx_obj_ref(status_text_)->u.text.y = (int32_t)((status_h > text_h) ? (status_h - text_h) / 2u : 0u);
         }
 
@@ -1059,15 +1101,16 @@ namespace
         {
             if (kgfx_obj_ref(dialog_name_label_) && kgfx_obj_ref(dialog_name_label_)->kind == KGFX_OBJ_TEXT)
             {
+                kgfx_obj_ref(dialog_name_label_)->u.text.scale = text_scale;
                 kgfx_obj_ref(dialog_name_label_)->u.text.x = client_x;
                 kgfx_obj_ref(dialog_name_label_)->u.text.y = name_y + (int32_t)((name_h > text_h) ? (name_h - text_h) / 2u : 0u);
             }
 
-            if (client_w > name_label_w + 8u)
+            if (client_w > name_label_w + button_gap)
                 ktextbox_set_bounds(dialog_name_box_,
-                                    client_x + (int32_t)name_label_w + 8,
+                                    client_x + (int32_t)name_label_w + (int32_t)button_gap,
                                     name_y,
-                                    client_w - name_label_w - 8u,
+                                    client_w - name_label_w - button_gap,
                                     name_h);
             else
                 ktextbox_set_bounds(dialog_name_box_, client_x, name_y, client_w, name_h);
@@ -1085,12 +1128,26 @@ namespace
 
         if (modal_mode_ != MODAL_NONE)
         {
-            uint32_t modal_w = client_w > 460u ? 460u : client_w;
+            uint32_t modal_margin = kwindow_ui_scale_u32(14);
+            uint32_t modal_button_w = kwindow_ui_scale_u32(92);
+            uint32_t modal_input_y = kwindow_ui_scale_u32(92);
+            uint32_t modal_title_y = kwindow_ui_scale_u32(12);
+            uint32_t modal_body_y = kwindow_ui_scale_u32(40);
+            uint32_t modal_error_choice_y = kwindow_ui_scale_u32(94);
+            uint32_t modal_error_input_y = kwindow_ui_scale_u32(128);
+            uint32_t modal_w_limit = kwindow_ui_scale_u32(460);
             uint8_t choice_modal = (modal_mode_ == MODAL_DELETE_CONFIRM || modal_mode_ == MODAL_OPEN_WITH) ? 1u : 0u;
             uint8_t three_buttons = (modal_mode_ == MODAL_OPEN_WITH && (SelectedIsSacScript() || SelectedIsImage())) ? 1u : 0u;
-            uint32_t modal_h = choice_modal ? 162u : 198u;
+            uint32_t modal_w = client_w > modal_w_limit ? modal_w_limit : client_w;
+            uint32_t modal_h = choice_modal ? kwindow_ui_scale_u32(162) : kwindow_ui_scale_u32(198);
             int32_t modal_x = ((int32_t)root->u.rect.w - (int32_t)modal_w) / 2;
             int32_t modal_y = ((int32_t)root->u.rect.h - (int32_t)modal_h) / 2;
+            if (modal_margin < 6u)
+                modal_margin = 6u;
+            if (modal_button_w < 54u)
+                modal_button_w = 54u;
+            if (modal_h < action_h + modal_margin * 2u)
+                modal_h = action_h + modal_margin * 2u;
 
             if (kgfx_obj_ref(modal_backdrop_) && kgfx_obj_ref(modal_backdrop_)->kind == KGFX_OBJ_RECT)
             {
@@ -1110,35 +1167,38 @@ namespace
 
             if (kgfx_obj_ref(modal_title_) && kgfx_obj_ref(modal_title_)->kind == KGFX_OBJ_TEXT)
             {
-                kgfx_obj_ref(modal_title_)->u.text.x = 14;
-                kgfx_obj_ref(modal_title_)->u.text.y = 12;
+                kgfx_obj_ref(modal_title_)->u.text.scale = text_scale;
+                kgfx_obj_ref(modal_title_)->u.text.x = (int32_t)modal_margin;
+                kgfx_obj_ref(modal_title_)->u.text.y = (int32_t)modal_title_y;
             }
 
             if (kgfx_obj_ref(modal_body_) && kgfx_obj_ref(modal_body_)->kind == KGFX_OBJ_TEXT)
             {
-                kgfx_obj_ref(modal_body_)->u.text.x = 14;
-                kgfx_obj_ref(modal_body_)->u.text.y = 40;
+                kgfx_obj_ref(modal_body_)->u.text.scale = text_scale;
+                kgfx_obj_ref(modal_body_)->u.text.x = (int32_t)modal_margin;
+                kgfx_obj_ref(modal_body_)->u.text.y = (int32_t)modal_body_y;
             }
 
             if (!choice_modal)
-                ktextbox_set_bounds(modal_input_, 14, 92, modal_w - 28u, text_h + 12u);
+                ktextbox_set_bounds(modal_input_, (int32_t)modal_margin, (int32_t)modal_input_y, modal_w - modal_margin * 2u, text_h + kwindow_ui_scale_u32(12));
 
             if (kgfx_obj_ref(modal_error_) && kgfx_obj_ref(modal_error_)->kind == KGFX_OBJ_TEXT)
             {
-                kgfx_obj_ref(modal_error_)->u.text.x = 14;
-                kgfx_obj_ref(modal_error_)->u.text.y = choice_modal ? 94 : 128;
+                kgfx_obj_ref(modal_error_)->u.text.scale = text_scale;
+                kgfx_obj_ref(modal_error_)->u.text.x = (int32_t)modal_margin;
+                kgfx_obj_ref(modal_error_)->u.text.y = (int32_t)(choice_modal ? modal_error_choice_y : modal_error_input_y);
             }
 
             if (three_buttons)
             {
-                LayoutButton(modal_confirm_button_, (int32_t)modal_w - 14 - 92 - 8 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
-                LayoutButton(modal_extra_button_, (int32_t)modal_w - 14 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
-                LayoutButton(modal_cancel_button_, (int32_t)modal_w - 14 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+                LayoutButton(modal_confirm_button_, (int32_t)modal_w - (int32_t)modal_margin - (int32_t)modal_button_w * 3 - (int32_t)button_gap * 2, (int32_t)modal_h - (int32_t)modal_margin - (int32_t)action_h, modal_button_w, action_h, text_scale);
+                LayoutButton(modal_extra_button_, (int32_t)modal_w - (int32_t)modal_margin - (int32_t)modal_button_w * 2 - (int32_t)button_gap, (int32_t)modal_h - (int32_t)modal_margin - (int32_t)action_h, modal_button_w, action_h, text_scale);
+                LayoutButton(modal_cancel_button_, (int32_t)modal_w - (int32_t)modal_margin - (int32_t)modal_button_w, (int32_t)modal_h - (int32_t)modal_margin - (int32_t)action_h, modal_button_w, action_h, text_scale);
             }
             else
             {
-                LayoutButton(modal_confirm_button_, (int32_t)modal_w - 14 - 92 - 8 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
-                LayoutButton(modal_cancel_button_, (int32_t)modal_w - 14 - 92, (int32_t)modal_h - 14 - (int32_t)action_h, 92u, action_h, 1u);
+                LayoutButton(modal_confirm_button_, (int32_t)modal_w - (int32_t)modal_margin - (int32_t)modal_button_w * 2 - (int32_t)button_gap, (int32_t)modal_h - (int32_t)modal_margin - (int32_t)action_h, modal_button_w, action_h, text_scale);
+                LayoutButton(modal_cancel_button_, (int32_t)modal_w - (int32_t)modal_margin - (int32_t)modal_button_w, (int32_t)modal_h - (int32_t)modal_margin - (int32_t)action_h, modal_button_w, action_h, text_scale);
             }
         }
 
@@ -1192,6 +1252,17 @@ namespace
         copy_text(status_buffer_, sizeof(status_buffer_), text);
         status_color_ = color;
         RefreshStatusVisual();
+    }
+
+    void FileExplorer::SetFsErrorStatus(const char *prefix)
+    {
+        char message[STATUS_CAP];
+
+        message[0] = 0;
+        append_text(message, sizeof(message), prefix ? prefix : "filesystem error");
+        append_text(message, sizeof(message), " rc=");
+        append_uint(message, sizeof(message), (uint32_t)kfile_last_result());
+        SetStatus(message, rgb(255, 140, 140));
     }
 
     int FileExplorer::BuildSelectedRawPath(char *out, uint32_t cap) const
@@ -1285,6 +1356,16 @@ namespace
             }
 
             SetStatus(message, rgb(222, 228, 238));
+            return;
+        }
+
+        if (!storage_writable_ && dialog_mode_ == FILE_EXPLORER_DIALOG_NONE)
+        {
+            append_text(message, sizeof(message), current_dir_);
+            append_text(message, sizeof(message), " (read-only, ");
+            append_uint(message, sizeof(message), (uint32_t)entry_count_);
+            append_text(message, sizeof(message), entry_count_ == 1 ? " item)" : " items)");
+            SetStatus(message, rgb(255, 214, 120));
             return;
         }
 
@@ -1593,7 +1674,12 @@ namespace
             rows_dirty_ = 1u;
             if (kdir_open(&busy_dir_, current_raw_) != 0)
             {
-                FinishBusy(busy_failure_, rgb(255, 140, 140));
+                char message[STATUS_CAP];
+                message[0] = 0;
+                append_text(message, sizeof(message), busy_failure_);
+                append_text(message, sizeof(message), " rc=");
+                append_uint(message, sizeof(message), (uint32_t)kfile_last_result());
+                FinishBusy(message, rgb(255, 140, 140));
                 return;
             }
             busy_phase_ = 1u;
@@ -1607,7 +1693,12 @@ namespace
             if (rc < 0)
             {
                 kdir_close(&busy_dir_);
-                FinishBusy(busy_failure_, rgb(255, 140, 140));
+                char message[STATUS_CAP];
+                message[0] = 0;
+                append_text(message, sizeof(message), busy_failure_);
+                append_text(message, sizeof(message), " rc=");
+                append_uint(message, sizeof(message), (uint32_t)kfile_last_result());
+                FinishBusy(message, rgb(255, 140, 140));
                 return;
             }
             if (rc == 0 || entry_count_ >= MAX_ENTRIES)
@@ -1778,11 +1869,13 @@ namespace
         ktextbox_set_enabled(path_box_, input_blocked ? 0u : 1u);
         kbutton_set_enabled(up_button_.button, (!input_blocked && !is_root) ? 1u : 0u);
         kbutton_set_enabled(refresh_button_.button, input_blocked ? 0u : 1u);
-        kbutton_set_enabled(new_folder_button_.button, input_blocked ? 0u : 1u);
-        kbutton_set_enabled(new_file_button_.button, input_blocked ? 0u : 1u);
+        kbutton_set_enabled(new_folder_button_.button,
+                            (!input_blocked && (dialog_active || storage_writable_)) ? 1u : 0u);
+        kbutton_set_enabled(new_file_button_.button,
+                            (!input_blocked && (dialog_active || storage_writable_)) ? 1u : 0u);
         kbutton_set_enabled(open_with_button_.button, (!dialog_active && !input_blocked && selected_file) ? 1u : 0u);
-        kbutton_set_enabled(rename_button_.button, (!dialog_active && !input_blocked && has_selection) ? 1u : 0u);
-        kbutton_set_enabled(delete_button_.button, (!dialog_active && !input_blocked && has_selection) ? 1u : 0u);
+        kbutton_set_enabled(rename_button_.button, (!dialog_active && !input_blocked && storage_writable_ && has_selection) ? 1u : 0u);
+        kbutton_set_enabled(delete_button_.button, (!dialog_active && !input_blocked && storage_writable_ && has_selection) ? 1u : 0u);
 
         SetButtonVisible(open_with_button_, dialog_active ? 0u : 1u);
         SetButtonVisible(rename_button_, dialog_active ? 0u : 1u);
@@ -1910,15 +2003,15 @@ namespace
         if (mouse.wheel == 0)
             return;
 
-        if (!kwindow_point_can_receive_input(window_, mouse.x, mouse.y))
-            return;
-
         left = root->u.rect.x + viewport->u.rect.x;
         top = root->u.rect.y + viewport->u.rect.y;
         right = left + (int32_t)viewport->u.rect.w;
         bottom = top + (int32_t)viewport->u.rect.h;
 
         if (mouse.x < left || mouse.y < top || mouse.x >= right || mouse.y >= bottom)
+            return;
+
+        if (!kwindow_point_can_receive_input(window_, mouse.x, mouse.y) && !kwindow_focused(window_))
             return;
 
         scroll_top_ -= mouse.wheel * SCROLL_LINES_PER_WHEEL;
@@ -2109,6 +2202,11 @@ namespace
     {
         if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
             return;
+        if (!storage_writable_)
+        {
+            SetStatus("storage is read-only", rgb(255, 214, 120));
+            return;
+        }
 
         OpenModal(MODAL_CREATE_FOLDER,
                   "Create Folder",
@@ -2121,6 +2219,11 @@ namespace
     {
         if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
             return;
+        if (!storage_writable_)
+        {
+            SetStatus("storage is read-only", rgb(255, 214, 120));
+            return;
+        }
 
         OpenModal(MODAL_CREATE_FILE,
                   "Create File",
@@ -2133,6 +2236,11 @@ namespace
     {
         if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
             return;
+        if (!storage_writable_)
+        {
+            SetStatus("storage is read-only", rgb(255, 214, 120));
+            return;
+        }
         if (selected_index_ < 0 || selected_index_ >= entry_count_)
             return;
 
@@ -2149,6 +2257,11 @@ namespace
 
         if (dialog_mode_ != FILE_EXPLORER_DIALOG_NONE)
             return;
+        if (!storage_writable_)
+        {
+            SetStatus("storage is read-only", rgb(255, 214, 120));
+            return;
+        }
         if (selected_index_ < 0 || selected_index_ >= entry_count_)
             return;
 
@@ -2451,11 +2564,13 @@ namespace
     {
         file_explorer_dialog_callback callback = dialog_callback_;
         void *callback_user = dialog_user_;
+        kwindow_handle owner = dialog_owner_;
         uint8_t hide_after = dialog_restore_hidden_;
 
         dialog_mode_ = FILE_EXPLORER_DIALOG_NONE;
         dialog_callback_ = 0;
         dialog_user_ = 0;
+        dialog_owner_.idx = -1;
         dialog_restore_hidden_ = 0u;
         layout_dirty_ = 1u;
         actions_dirty_ = 1u;
@@ -2464,6 +2579,9 @@ namespace
         RefreshActionLabels();
         RefreshDialogTitle();
         ShowDefaultStatus();
+
+        if (owner.idx >= 0)
+            (void)kwindow_clear_modal_child(owner);
 
         if (hide_after)
         {
@@ -2556,6 +2674,13 @@ namespace
             ktextbox_set_focus(path_box_, 1u);
     }
 
+    void FileExplorer::Hide()
+    {
+        if (!initialized_ || window_.idx < 0)
+            return;
+        kwindow_set_visible(window_, 0u);
+    }
+
     void FileExplorer::PathSubmitThunk(ktextbox_handle textbox, const char *text, void *user)
     {
         char input[DIHOS_PATH_CAP];
@@ -2597,22 +2722,18 @@ namespace
     {
         RowSlot *row = (RowSlot *)user;
         FileExplorer *self = row ? row->owner : 0;
-        uint32_t delta = 0u;
         (void)button;
 
         if (!self || !row || row->entry_index < 0 || row->entry_index >= self->entry_count_)
             return;
 
-        if (self->selected_index_ == row->entry_index &&
-            self->last_click_index_ == row->entry_index)
+        if (self->last_click_index_ == row->entry_index &&
+            self->frame_counter_ - self->last_click_frame_ <= DOUBLE_CLICK_FRAMES)
         {
-            delta = self->frame_counter_ - self->last_click_frame_;
-            if (delta <= DOUBLE_CLICK_FRAMES)
-            {
-                self->ResetDoubleClick();
-                self->ActivateSelection();
-                return;
-            }
+            self->SelectEntry(row->entry_index);
+            self->ResetDoubleClick();
+            self->ActivateSelection();
+            return;
         }
 
         self->SelectEntry(row->entry_index);
@@ -2622,6 +2743,7 @@ namespace
             ktextbox_set_text(self->dialog_name_box_, self->entries_[row->entry_index].name);
             self->ShowDefaultStatus();
         }
+
         self->last_click_index_ = row->entry_index;
         self->last_click_frame_ = self->frame_counter_;
     }
@@ -2737,6 +2859,11 @@ extern "C" void file_explorer_activate(void)
     g_main_explorer.Activate();
 }
 
+extern "C" void file_explorer_hide(void)
+{
+    g_main_explorer.Hide();
+}
+
 extern "C" int file_explorer_visible(void)
 {
     return g_main_explorer.Visible();
@@ -2749,6 +2876,16 @@ extern "C" int file_explorer_begin_dialog(file_explorer_dialog_mode mode,
                                           void *user)
 {
     return g_dialog_explorer.BeginDialog(mode, initial_dir, suggested_name, on_result, user);
+}
+
+extern "C" int file_explorer_begin_dialog_for_window(file_explorer_dialog_mode mode,
+                                                     kwindow_handle owner,
+                                                     const char *initial_dir,
+                                                     const char *suggested_name,
+                                                     file_explorer_dialog_callback on_result,
+                                                     void *user)
+{
+    return g_dialog_explorer.BeginDialogForWindow(mode, owner, initial_dir, suggested_name, on_result, user);
 }
 
 extern "C" int file_explorer_dialog_active(void)

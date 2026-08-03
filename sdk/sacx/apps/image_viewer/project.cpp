@@ -78,6 +78,7 @@ enum async_export_phase
     ASYNC_EXPORT_RENDER,
     ASYNC_EXPORT_FLATTEN_BEGIN,
     ASYNC_EXPORT_FLATTEN,
+    ASYNC_EXPORT_FLATTEN_WORKER,
     ASYNC_EXPORT_ENCODE_WAIT,
     ASYNC_EXPORT_ENCODE,
 };
@@ -88,9 +89,17 @@ typedef struct async_export_job
     uint32_t image;
     uint32_t width;
     uint32_t height;
-    uint32_t next_row;
+    volatile uint32_t next_row;
     uint32_t format;
     uint32_t quality;
+    uint32_t worker_job_id;
+    uint32_t worker_tried;
+    uint64_t worker_start_tick;
+    uint32_t save_id;
+    uint32_t save_status_hint;
+    volatile int worker_rc;
+    uint32_t *worker_pixels;
+    uint32_t worker_stride;
     char raw_path[EDITOR_PATH_CAP];
     char temp_path[EDITOR_PATH_CAP];
 } async_export_job;
@@ -141,6 +150,61 @@ static int replace_file(const char *temporary, const char *destination)
     if (had_destination)
         (void)g_api->file_unlink(backup);
     return 0;
+}
+
+static void export_flatten_worker(void *user)
+{
+    async_export_job *job = (async_export_job *)user;
+    uint32_t transformed_w;
+    uint32_t transformed_h;
+    uint32_t output_w;
+    uint32_t output_h;
+
+    if (!job || !job->worker_pixels || !job->worker_stride)
+        return;
+
+    transformed_w = (g_doc.rotation == 90u || g_doc.rotation == 270u) ? g_doc.crop_h : g_doc.crop_w;
+    transformed_h = (g_doc.rotation == 90u || g_doc.rotation == 270u) ? g_doc.crop_w : g_doc.crop_h;
+    output_w = g_doc.resize_w ? g_doc.resize_w : transformed_w;
+    output_h = g_doc.resize_h ? g_doc.resize_h : transformed_h;
+    if (!transformed_w || !transformed_h || !output_w || !output_h || !g_doc.preview_pixels)
+    {
+        job->worker_rc = -1;
+        return;
+    }
+
+    for (uint32_t y = 0u; y < output_h; ++y)
+    {
+        for (uint32_t x = 0u; x < output_w; ++x)
+        {
+            uint32_t scaled_x = (uint32_t)((uint64_t)x * transformed_w / output_w);
+            uint32_t scaled_y = (uint32_t)((uint64_t)y * transformed_h / output_h);
+            uint32_t tx = g_doc.flip_x ? transformed_w - 1u - scaled_x : scaled_x;
+            uint32_t ty = g_doc.flip_y ? transformed_h - 1u - scaled_y : scaled_y;
+            uint32_t sx = tx;
+            uint32_t sy = ty;
+            if (g_doc.rotation == 90u)
+            {
+                sx = ty;
+                sy = g_doc.crop_h - 1u - tx;
+            }
+            else if (g_doc.rotation == 180u)
+            {
+                sx = g_doc.crop_w - 1u - tx;
+                sy = g_doc.crop_h - 1u - ty;
+            }
+            else if (g_doc.rotation == 270u)
+            {
+                sx = g_doc.crop_w - 1u - ty;
+                sy = tx;
+            }
+            job->worker_pixels[(uint64_t)y * job->worker_stride + x] =
+                g_doc.preview_pixels[(uint64_t)(g_doc.crop_y + (int32_t)sy) * g_doc.preview_stride +
+                                     (uint32_t)(g_doc.crop_x + (int32_t)sx)];
+        }
+        job->next_row = y + 1u;
+    }
+    job->worker_rc = 0;
 }
 
 static int file_write_all(uint32_t file, const void *data, uint32_t size)
@@ -278,6 +342,11 @@ static void temporary_png_path(char *path, uint32_t cap, uint32_t layer_index)
     editor_append_text(path, cap, ".png");
 }
 
+static int image_save_async_wait(uint32_t image, const char *path, uint32_t format, uint32_t quality)
+{
+    return g_api->img_save(image, path, format, quality);
+}
+
 static int write_png_chunk(uint32_t project_file, uint32_t layer_index, uint32_t image)
 {
     char png_path[EDITOR_PATH_CAP];
@@ -288,7 +357,7 @@ static int write_png_chunk(uint32_t project_file, uint32_t layer_index, uint32_t
 
     temporary_png_path(png_path, sizeof(png_path), layer_index);
     (void)g_api->file_unlink(png_path);
-    if (g_api->img_save(image, png_path, SACX_IMG_FORMAT_PNG, 100u) != 0 ||
+    if (image_save_async_wait(image, png_path, SACX_IMG_FORMAT_PNG, 100u) != 0 ||
         g_api->file_open(png_path, SACX_FILE_READ, &png_file) != 0)
         return -1;
     png_size = g_api->file_size(png_file);
@@ -736,6 +805,28 @@ int project_export_step_async(uint32_t row_budget, uint32_t *out_progress)
     else if (G_export_job.phase == ASYNC_EXPORT_FLATTEN)
     {
         uint32_t rows = G_export_job.height - G_export_job.next_row;
+        if (G_export_job.next_row == 0u && !G_export_job.worker_tried &&
+            SACX_API_HAS(g_api, work_submit) &&
+            SACX_API_HAS(g_api, img_pixels) &&
+            g_api->img_pixels(G_export_job.image, &G_export_job.worker_pixels,
+                              &G_export_job.worker_stride) == 0)
+        {
+            G_export_job.worker_rc = -1;
+            G_export_job.worker_tried = 1u;
+            if (g_api->work_submit(export_flatten_worker, &G_export_job, &G_export_job.worker_job_id) == 0)
+            {
+                G_export_job.worker_start_tick = SACX_API_HAS(g_api, time_ticks)
+                                                    ? g_api->time_ticks()
+                                                    : 0u;
+                G_export_job.phase = ASYNC_EXPORT_FLATTEN_WORKER;
+                if (out_progress)
+                    *out_progress = 15u;
+                return 1;
+            }
+            G_export_job.worker_pixels = 0;
+            G_export_job.worker_stride = 0u;
+        }
+
         if (rows > row_budget)
             rows = row_budget;
         if (document_export_step(G_export_job.image, G_export_job.next_row, rows) != 0)
@@ -750,19 +841,97 @@ int project_export_step_async(uint32_t row_budget, uint32_t *out_progress)
         G_export_job.phase = ASYNC_EXPORT_ENCODE_WAIT;
         return 1;
     }
+    else if (G_export_job.phase == ASYNC_EXPORT_FLATTEN_WORKER)
+    {
+        uint32_t status = SACX_API_HAS(g_api, work_status)
+                              ? g_api->work_status(G_export_job.worker_job_id)
+                              : SACX_WORK_STATUS_FAILED;
+        if (out_progress)
+        {
+            *out_progress = 15u + (uint32_t)((uint64_t)G_export_job.next_row * 65u /
+                                             G_export_job.height);
+            if (*out_progress == 15u &&
+                (status == SACX_WORK_STATUS_QUEUED || status == SACX_WORK_STATUS_RUNNING))
+                *out_progress = status == SACX_WORK_STATUS_QUEUED ? 16u : 17u;
+        }
+        if (status == SACX_WORK_STATUS_QUEUED && SACX_API_HAS(g_api, work_cancel) &&
+            SACX_API_HAS(g_api, time_ticks) && G_export_job.worker_start_tick &&
+            g_api->time_ticks() - G_export_job.worker_start_tick > 600u &&
+            g_api->work_cancel(G_export_job.worker_job_id) == 0)
+        {
+            G_export_job.worker_job_id = 0u;
+            G_export_job.worker_pixels = 0;
+            G_export_job.worker_stride = 0u;
+            G_export_job.worker_rc = -1;
+            G_export_job.phase = ASYNC_EXPORT_FLATTEN;
+            if (out_progress)
+                *out_progress = 16u;
+            return 1;
+        }
+        if (status == SACX_WORK_STATUS_QUEUED || status == SACX_WORK_STATUS_RUNNING)
+            return 1;
+        if (status != SACX_WORK_STATUS_DONE || G_export_job.worker_rc != 0)
+            goto fail;
+        (void)g_api->img_touch(G_export_job.image);
+        G_export_job.phase = ASYNC_EXPORT_ENCODE_WAIT;
+        if (out_progress)
+            *out_progress = 80u;
+        return 1;
+    }
     else if (G_export_job.phase == ASYNC_EXPORT_ENCODE_WAIT)
     {
-        G_export_job.phase = ASYNC_EXPORT_ENCODE;
+        rc = g_api->img_save(G_export_job.image, G_export_job.temp_path,
+                             G_export_job.format, G_export_job.quality);
+        if (rc != 0)
+            goto fail;
+        rc = replace_file(G_export_job.temp_path, G_export_job.raw_path);
+        if (rc != 0)
+            goto fail;
+        g_api->img_destroy(G_export_job.image);
+        editor_zero_memory(&G_export_job, sizeof(G_export_job));
         if (out_progress)
-            *out_progress = 85u;
-        return 1;
+            *out_progress = 100u;
+        return 0;
     }
     else if (G_export_job.phase == ASYNC_EXPORT_ENCODE)
     {
         if (out_progress)
-            *out_progress = 90u;
-        rc = g_api->img_save(G_export_job.image, G_export_job.temp_path,
-                             G_export_job.format, G_export_job.quality);
+            *out_progress = G_export_job.save_status_hint ? G_export_job.save_status_hint : 90u;
+        if (G_export_job.save_id)
+        {
+            uint32_t status = SACX_WORK_STATUS_FAILED;
+            int save_result = -1;
+            status = g_api->img_save_status(G_export_job.save_id, &save_result);
+            if (status == SACX_WORK_STATUS_QUEUED)
+                G_export_job.save_status_hint = 90u;
+            else if (status == SACX_WORK_STATUS_RUNNING)
+            {
+                if (save_result == -2)
+                    G_export_job.save_status_hint = 94u;
+                else if (save_result <= -10)
+                {
+                    uint32_t stage = (uint32_t)(-save_result - 10);
+                    if (stage <= 1u)
+                        G_export_job.save_status_hint = 91u;
+                    else if (stage == 2u)
+                        G_export_job.save_status_hint = 92u;
+                    else
+                        G_export_job.save_status_hint = 93u;
+                }
+                else
+                    G_export_job.save_status_hint = 92u;
+            }
+            if (status == SACX_WORK_STATUS_QUEUED || status == SACX_WORK_STATUS_RUNNING)
+                return 1;
+            (void)g_api->img_save_release(G_export_job.save_id);
+            G_export_job.save_id = 0u;
+            rc = status == SACX_WORK_STATUS_DONE ? save_result : -1;
+        }
+        else
+        {
+            rc = g_api->img_save(G_export_job.image, G_export_job.temp_path,
+                                 G_export_job.format, G_export_job.quality);
+        }
         if (rc == 0)
             rc = replace_file(G_export_job.temp_path, G_export_job.raw_path);
         if (rc != 0)
@@ -777,6 +946,8 @@ int project_export_step_async(uint32_t row_budget, uint32_t *out_progress)
     return 1;
 
 fail:
+    if (G_export_job.save_id && SACX_API_HAS(g_api, img_save_release))
+        (void)g_api->img_save_release(G_export_job.save_id);
     if (G_export_job.image)
         g_api->img_destroy(G_export_job.image);
     (void)g_api->file_unlink(G_export_job.temp_path);

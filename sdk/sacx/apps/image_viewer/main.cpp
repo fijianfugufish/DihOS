@@ -84,6 +84,11 @@ static uint32_t g_window = 0u;
 static uint32_t g_root = 0u;
 static uint32_t g_canvas = 0u;
 static uint32_t g_image_obj = 0u;
+static uint32_t g_view_image = 0u;
+static uint32_t *g_view_pixels = 0;
+static uint32_t g_view_stride = 0u;
+static uint32_t g_view_alloc_w = 0u;
+static uint32_t g_view_alloc_h = 0u;
 static uint32_t g_checker_image = 0u;
 static uint32_t g_checker_obj = 0u;
 static uint32_t g_selection = 0u;
@@ -291,9 +296,103 @@ static void clamp_pan(void)
     }
 }
 
+static uint32_t sample_preview_nearest(uint32_t sx, uint32_t sy)
+{
+    if (!g_doc.preview_pixels || !g_doc.canvas_w || !g_doc.canvas_h)
+        return 0u;
+    if (sx >= g_doc.canvas_w)
+        sx = g_doc.canvas_w - 1u;
+    if (sy >= g_doc.canvas_h)
+        sy = g_doc.canvas_h - 1u;
+    return g_doc.preview_pixels[(uint64_t)sy * g_doc.preview_stride + sx];
+}
+
+static int ensure_view_image(void)
+{
+    if (!g_api || !g_view_w || !g_view_h)
+        return -1;
+
+    if (g_view_image && g_view_alloc_w == g_view_w && g_view_alloc_h == g_view_h && g_view_pixels)
+        return 0;
+
+    if (g_image_obj)
+    {
+        (void)g_api->gfx_obj_destroy(g_image_obj);
+        g_image_obj = 0u;
+    }
+    if (g_view_image)
+    {
+        (void)g_api->img_destroy(g_view_image);
+        g_view_image = 0u;
+    }
+    g_view_pixels = 0;
+    g_view_stride = 0u;
+    g_view_alloc_w = 0u;
+    g_view_alloc_h = 0u;
+
+    if (g_api->img_create(g_view_w, g_view_h, 0xFF1F2226u, &g_view_image) != 0 ||
+        g_api->img_pixels(g_view_image, &g_view_pixels, &g_view_stride) != 0 ||
+        g_api->gfx_obj_add_image_from_img(g_view_image, 0, 0, &g_image_obj) != 0)
+        return -1;
+
+    g_view_alloc_w = g_view_w;
+    g_view_alloc_h = g_view_h;
+    (void)g_api->gfx_obj_set_parent(g_image_obj, g_canvas);
+    (void)g_api->gfx_obj_set_clip_to_parent(g_image_obj, 1u);
+    (void)g_api->gfx_obj_set_z(g_image_obj, 1);
+    (void)g_api->gfx_image_set_sample_mode(g_image_obj, SACX_GFX_IMAGE_SAMPLE_NEAREST);
+    return 0;
+}
+
+static void redraw_view_image(void)
+{
+    const uint32_t bg_a = 0xFF252B30u;
+    const uint32_t bg_b = 0xFF394047u;
+
+    if (ensure_view_image() != 0 || !g_view_pixels || !g_view_stride)
+        return;
+
+    for (uint32_t y = 0u; y < g_view_h; ++y)
+    {
+        uint32_t *dst = g_view_pixels + (uint64_t)y * g_view_stride;
+        for (uint32_t x = 0u; x < g_view_w; ++x)
+            dst[x] = (((x / 16u) + (y / 16u)) & 1u) ? bg_b : bg_a;
+    }
+
+    if (g_doc.preview_pixels && g_doc.canvas_w && g_doc.canvas_h && g_scaled_w && g_scaled_h)
+    {
+        int32_t dst_x0 = g_image_x;
+        int32_t dst_y0 = g_image_y;
+        int32_t dst_x1 = g_image_x + (int32_t)g_scaled_w;
+        int32_t dst_y1 = g_image_y + (int32_t)g_scaled_h;
+        if (dst_x0 < 0)
+            dst_x0 = 0;
+        if (dst_y0 < 0)
+            dst_y0 = 0;
+        if (dst_x1 > (int32_t)g_view_w)
+            dst_x1 = (int32_t)g_view_w;
+        if (dst_y1 > (int32_t)g_view_h)
+            dst_y1 = (int32_t)g_view_h;
+
+        for (int32_t y = dst_y0; y < dst_y1; ++y)
+        {
+            uint32_t sy = (uint32_t)(((int64_t)(y - g_image_y) * g_doc.canvas_h) / g_scaled_h);
+            uint32_t *dst = g_view_pixels + (uint64_t)(uint32_t)y * g_view_stride;
+            for (int32_t x = dst_x0; x < dst_x1; ++x)
+            {
+                uint32_t sx = (uint32_t)(((int64_t)(x - g_image_x) * g_doc.canvas_w) / g_scaled_w);
+                dst[(uint32_t)x] = sample_preview_nearest(sx, sy);
+            }
+        }
+    }
+
+    (void)g_api->img_touch(g_view_image);
+    (void)g_api->gfx_image_set_pos(g_image_obj, 0, 0);
+}
+
 static void sync_image_layout(void)
 {
-    if (!g_image_obj || !g_doc.canvas_w || !g_doc.canvas_h)
+    if (!g_doc.canvas_w || !g_doc.canvas_h)
         return;
     if (g_fit_mode)
         g_zoom_pct = fit_zoom();
@@ -309,8 +408,7 @@ static void sync_image_layout(void)
         g_image_y = g_scaled_h < g_view_h ? (int32_t)((g_view_h - g_scaled_h) / 2u) : 0;
     }
     clamp_pan();
-    (void)g_api->gfx_image_set_size(g_image_obj, g_scaled_w, g_scaled_h);
-    (void)g_api->gfx_image_set_pos(g_image_obj, g_image_x, g_image_y);
+    redraw_view_image();
     g_zoom_text[0] = 0;
     editor_append_uint(g_zoom_text, sizeof(g_zoom_text), g_zoom_pct);
     editor_append_text(g_zoom_text, sizeof(g_zoom_text), "%");
@@ -429,12 +527,12 @@ static void layout(void)
     int32_t root_y = 0;
     uint32_t root_w = 0u;
     uint32_t root_h = 0u;
-    const uint32_t top_y = 44u;
-    const uint32_t top_h = 30u;
-    const uint32_t left_w = 118u;
-    const uint32_t right_w = 276u;
+    const uint32_t top_y = 48u;
+    const uint32_t top_h = 34u;
+    uint32_t left_w = 112u;
+    uint32_t right_w = 276u;
     const uint32_t status_h = 26u;
-    uint32_t canvas_y = 84u;
+    uint32_t canvas_y = 96u;
     uint32_t canvas_h = 1u;
     int32_t x = 12;
 
@@ -445,11 +543,31 @@ static void layout(void)
     if (root_h < 480u)
         root_h = 480u;
 
+    if (root_w < 1040u)
+        right_w = 240u;
+    if (root_w < 900u)
+        right_w = 212u;
+    if (root_w < 820u)
+        left_w = 104u;
+
     const uint32_t top_widths[15] = {68, 64, 72, 58, 56, 52, 36, 36, 48, 58, 60, 60, 62, 68, 56};
+    uint32_t top_total = 0u;
+    uint32_t top_gap = 4u;
+    uint32_t top_avail = root_w > 24u ? root_w - 24u : 1u;
+    for (uint32_t i = 0u; i < 15u; ++i)
+        top_total += top_widths[i];
+    top_total += top_gap * 14u;
     for (uint32_t i = 0u; i < 15u; ++i)
     {
-        layout_button(&g_top[i], x, (int32_t)top_y, top_widths[i], top_h);
-        x += (int32_t)top_widths[i] + 4;
+        uint32_t w = top_widths[i];
+        if (top_total > top_avail)
+        {
+            w = (uint32_t)(((uint64_t)w * (top_avail - top_gap * 14u)) / (top_total - top_gap * 14u));
+            if (w < 32u)
+                w = 32u;
+        }
+        layout_button(&g_top[i], x, (int32_t)top_y, w, top_h);
+        x += (int32_t)w + (int32_t)top_gap;
     }
 
     canvas_h = root_h > canvas_y + status_h + 14u ? root_h - canvas_y - status_h - 14u : 1u;
@@ -463,59 +581,76 @@ static void layout(void)
     (void)g_api->gfx_obj_set_visible(g_checker_obj, 1u);
 
     for (uint32_t i = 0u; i < EDITOR_TOOL_COUNT; ++i)
-        layout_button(&g_tools[i], 10, (int32_t)canvas_y + (int32_t)i * 34, left_w - 20u, 29u);
+        layout_button(&g_tools[i], 10, (int32_t)canvas_y + (int32_t)i * 36, left_w - 20u, 32u);
 
     int32_t panel_x = (int32_t)root_w - (int32_t)right_w + 8;
     (void)g_api->gfx_text_set_pos(g_layer_title, panel_x, (int32_t)canvas_y);
-    uint32_t visible_layer_rows = g_doc.layer_count < 8u ? g_doc.layer_count : 8u;
+    uint32_t max_layer_rows = 8u;
+    if (root_h > canvas_y + status_h + 270u)
+    {
+        max_layer_rows = (root_h - canvas_y - status_h - 270u) / 34u;
+        if (max_layer_rows > 8u)
+            max_layer_rows = 8u;
+        if (max_layer_rows < 3u)
+            max_layer_rows = 3u;
+    }
+    else
+    {
+        max_layer_rows = 3u;
+    }
+    uint32_t visible_layer_rows = g_doc.layer_count < max_layer_rows ? g_doc.layer_count : max_layer_rows;
     int32_t layer_rows_y = (int32_t)canvas_y + 38;
     for (uint32_t i = 0u; i < 8u; ++i)
-        layout_button(&g_layer_rows[i], panel_x, layer_rows_y + (int32_t)i * 31, right_w - 18u, 27u);
+    {
+        layout_button(&g_layer_rows[i], panel_x, layer_rows_y + (int32_t)i * 34, right_w - 18u, 30u);
+        if (i >= max_layer_rows)
+            show_button(&g_layer_rows[i], 0u);
+    }
 
-    int32_t prop_y = layer_rows_y + (int32_t)visible_layer_rows * 31 + 18;
+    int32_t prop_y = layer_rows_y + (int32_t)visible_layer_rows * 34 + 18;
     (void)g_api->gfx_text_set_pos(g_property_text, panel_x, prop_y);
-    prop_y += 70;
+    prop_y += 76;
     uint32_t control_w = right_w - 18u;
     uint32_t half_w = (control_w - 6u) / 2u;
-    layout_button(&g_properties[0], panel_x, prop_y, half_w, 27u);
-    layout_button(&g_properties[1], panel_x + (int32_t)half_w + 6, prop_y, half_w, 27u);
-    prop_y += 31;
-    layout_button(&g_properties[2], panel_x, prop_y, half_w, 27u);
-    layout_button(&g_properties[3], panel_x + (int32_t)half_w + 6, prop_y, half_w, 27u);
-    prop_y += 31;
-    layout_button(&g_properties[4], panel_x, prop_y, control_w, 27u);
-    prop_y += 31;
-    layout_button(&g_properties[5], panel_x, prop_y, half_w, 27u);
-    layout_button(&g_properties[6], panel_x + (int32_t)half_w + 6, prop_y, half_w, 27u);
-    prop_y += 31;
+    layout_button(&g_properties[0], panel_x, prop_y, half_w, 30u);
+    layout_button(&g_properties[1], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
+    prop_y += 34;
+    layout_button(&g_properties[2], panel_x, prop_y, half_w, 30u);
+    layout_button(&g_properties[3], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
+    prop_y += 34;
+    layout_button(&g_properties[4], panel_x, prop_y, control_w, 30u);
+    prop_y += 34;
+    layout_button(&g_properties[5], panel_x, prop_y, half_w, 30u);
+    layout_button(&g_properties[6], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
+    prop_y += 34;
 
     uint32_t selected_type = 0u;
     if (g_doc.selected_layer >= 0 && (uint32_t)g_doc.selected_layer < g_doc.layer_count)
         selected_type = g_doc.layers[g_doc.selected_layer].type;
     if (layer_uses_size(selected_type))
     {
-        layout_button(&g_properties[7], panel_x, prop_y, half_w, 27u);
-        layout_button(&g_properties[8], panel_x + (int32_t)half_w + 6, prop_y, half_w, 27u);
-        prop_y += 31;
+        layout_button(&g_properties[7], panel_x, prop_y, half_w, 30u);
+        layout_button(&g_properties[8], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
+        prop_y += 34;
     }
     if (layer_uses_color(selected_type))
     {
         uint32_t color_w = (control_w - 16u) / 5u;
         for (uint32_t i = 0u; i < 5u; ++i)
             layout_button(&g_colors[i], panel_x + (int32_t)i * ((int32_t)color_w + 4),
-                          prop_y, color_w, 27u);
-        prop_y += 31;
+                          prop_y, color_w, 30u);
+        prop_y += 34;
     }
     if (selected_type == EDITOR_LAYER_ADJUSTMENT)
     {
         for (uint32_t i = 9u; i <= 14u; i += 2u)
         {
-            layout_button(&g_properties[i], panel_x, prop_y, half_w, 27u);
-            layout_button(&g_properties[i + 1u], panel_x + (int32_t)half_w + 6, prop_y, half_w, 27u);
-            prop_y += 31;
+            layout_button(&g_properties[i], panel_x, prop_y, half_w, 30u);
+            layout_button(&g_properties[i + 1u], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
+            prop_y += 34;
         }
-        layout_button(&g_properties[15], panel_x, prop_y, control_w, 27u);
-        prop_y += 31;
+        layout_button(&g_properties[15], panel_x, prop_y, control_w, 30u);
+        prop_y += 34;
     }
 
     if (g_textbox_root && g_modal_mode != MODAL_RESIZE)
@@ -542,18 +677,8 @@ static void layout(void)
 
 static int attach_preview(void)
 {
-    if (g_image_obj)
-    {
-        (void)g_api->gfx_obj_destroy(g_image_obj);
-        g_image_obj = 0u;
-    }
-    if (!g_doc.preview ||
-        g_api->gfx_obj_add_image_from_img(g_doc.preview, 0, 0, &g_image_obj) != 0)
+    if (!g_doc.preview || !g_doc.preview_pixels)
         return -1;
-    (void)g_api->gfx_obj_set_parent(g_image_obj, g_canvas);
-    (void)g_api->gfx_obj_set_clip_to_parent(g_image_obj, 1u);
-    (void)g_api->gfx_obj_set_z(g_image_obj, 1);
-    (void)g_api->gfx_image_set_sample_mode(g_image_obj, SACX_GFX_IMAGE_SAMPLE_BILINEAR);
     g_fit_mode = 1u;
     sync_image_layout();
     return 0;
@@ -1168,16 +1293,11 @@ static void execute_export(const char *raw)
 
 static void update_export_job(void)
 {
-    sacx_mouse_state mouse;
     uint32_t progress = g_export_progress;
     int rc = project_export_step_async(16u, &progress);
 
     g_pending_action = 0u;
-    if (g_api->mouse_get_state(&mouse) == 0 &&
-        g_api->window_point_can_receive_input(g_window, mouse.x, mouse.y))
-        (void)g_api->mouse_set_cursor(SACX_MOUSE_CURSOR_WAIT);
-    else if (g_api->mouse_current_cursor() == SACX_MOUSE_CURSOR_WAIT)
-        (void)g_api->mouse_set_cursor(g_busy_saved_cursor);
+    (void)g_api->mouse_set_cursor(SACX_MOUSE_CURSOR_WAIT);
 
     if (progress != g_export_progress)
     {

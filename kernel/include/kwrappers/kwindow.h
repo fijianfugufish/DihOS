@@ -14,9 +14,15 @@ extern "C"
 {
 #endif
 
+    /*
+     * Legacy window API.
+     * Kept for existing kernel apps and SACX compatibility; modal ownership was
+     * added here so old and new controls share the same input blocking rules.
+     */
     typedef struct
     {
         int idx;
+        uint16_t generation;
     } kwindow_handle;
 
     typedef struct kwindow_style
@@ -74,6 +80,10 @@ extern "C"
     }
 
     void kwindow_init(void);
+    uint32_t kwindow_ui_scale_fp(void);
+    uint32_t kwindow_ui_scale_u32(uint32_t px);
+    int32_t kwindow_ui_scale_i32(int32_t px);
+    uint32_t kwindow_ui_text_scale(uint32_t base_scale);
     kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
                                   int32_t z, const kfont *font, const char *title,
                                   const kwindow_style *style);
@@ -89,6 +99,12 @@ extern "C"
     kgfx_obj_handle kwindow_root(kwindow_handle h);
     int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y);
     int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y);
+    int kwindow_set_modal_child(kwindow_handle parent, kwindow_handle child);
+    int kwindow_clear_modal_child(kwindow_handle parent);
+    int kwindow_has_active_modal(kwindow_handle parent);
+    kwindow_handle kwindow_modal_parent(kwindow_handle child);
+    kwindow_handle kwindow_modal_child(kwindow_handle parent);
+    int kwindow_center_on_parent(kwindow_handle child, kwindow_handle parent);
     int kwindow_set_close_deferred(kwindow_handle h, uint8_t deferred);
     int kwindow_close_requested(kwindow_handle h);
     int kwindow_close_accept(kwindow_handle h);

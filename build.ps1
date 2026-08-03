@@ -384,8 +384,16 @@ if (Test-Path $UsbRoot) {
 
 # ---- Hyper-V VHDX copy ----
 $VhdPath = "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\DihOS.vhdx"
+$VhdAccessible = $false
+try {
+  $VhdAccessible = Test-Path -LiteralPath $VhdPath -ErrorAction Stop
+}
+catch {
+  Write-Host "Cannot access the Hyper-V VHDX. Re-run this build from an Administrator PowerShell." -ForegroundColor Red
+  Write-Host "Hyper-V will continue booting its previous kernel until the VHDX copy succeeds." -ForegroundColor Red
+}
 
-if (Test-Path $VhdPath) {
+if ($VhdAccessible) {
   Write-Host "Mounting DihOS VHDX..." -ForegroundColor Cyan
 
   Mount-VHD -Path $VhdPath -ErrorAction Stop | Out-Null

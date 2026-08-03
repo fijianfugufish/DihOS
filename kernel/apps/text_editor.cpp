@@ -903,6 +903,7 @@ namespace
         void Init(const kfont *font);
         void Update();
         void Activate();
+        void Hide();
         int Visible() const;
         int Initialized() const;
         void NewDocument();
@@ -1104,6 +1105,7 @@ namespace
         void Init(const kfont *font);
         void Update();
         void Activate();
+        void HideAll();
         int Visible() const;
         int OpenPath(const char *raw_path, const char *friendly_path);
 
@@ -1252,12 +1254,13 @@ namespace
     void TextEditor::CreateChrome()
     {
         kgfx_obj_handle root = kwindow_root(window_);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
 
         path_strip_ = kgfx_obj_add_rect(0, 0, 10, 10, 1, rgb(18, 24, 34), 1);
         viewport_ = kgfx_obj_add_rect(0, 0, 10, 10, 1, rgb(18, 21, 28), 1);
         status_strip_ = kgfx_obj_add_rect(0, 0, 10, 10, 1, rgb(18, 24, 34), 1);
-        path_text_ = kgfx_obj_add_text(font_, "", 8, 4, 1, rgb(220, 228, 240), 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 1);
-        status_text_ = kgfx_obj_add_text(font_, status_buffer_, 8, 4, 1, status_color_, 255, 1u, 0, 0, KTEXT_ALIGN_LEFT, 1);
+        path_text_ = kgfx_obj_add_text(font_, "", 8, 4, 1, rgb(220, 228, 240), 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 1);
+        status_text_ = kgfx_obj_add_text(font_, status_buffer_, 8, 4, 1, status_color_, 255, text_scale, 0, 0, KTEXT_ALIGN_LEFT, 1);
 
         kgfx_obj_set_parent(path_strip_, root);
         kgfx_obj_set_parent(viewport_, root);
@@ -1292,6 +1295,7 @@ namespace
     void TextEditor::CreateButtons()
     {
         kgfx_obj_handle root = kwindow_root(window_);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
 
         new_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, NewClickThunk, this);
         open_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, OpenClickThunk, this);
@@ -1299,11 +1303,11 @@ namespace
         save_as_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, SaveAsClickThunk, this);
         wrap_button_.button = kbutton_add_rect(0, 0, 80, 28, 2, &action_style_, WrapClickThunk, this);
 
-        new_button_.label = kgfx_obj_add_text(font_, "New", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        open_button_.label = kgfx_obj_add_text(font_, "Open", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        save_button_.label = kgfx_obj_add_text(font_, "Save", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        save_as_button_.label = kgfx_obj_add_text(font_, "Save As", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-        wrap_button_.label = kgfx_obj_add_text(font_, "Wrap Off", 0, 0, 1, white, 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        new_button_.label = kgfx_obj_add_text(font_, "New", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        open_button_.label = kgfx_obj_add_text(font_, "Open", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        save_button_.label = kgfx_obj_add_text(font_, "Save", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        save_as_button_.label = kgfx_obj_add_text(font_, "Save As", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
+        wrap_button_.label = kgfx_obj_add_text(font_, "Wrap Off", 0, 0, 1, white, 255, text_scale, 0, 0, KTEXT_ALIGN_CENTER, 1);
 
         LabeledButton *buttons[] = {&new_button_, &open_button_, &save_button_, &save_as_button_, &wrap_button_};
         for (uint32_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); ++i)
@@ -1360,7 +1364,8 @@ namespace
     {
         kgfx_obj *root = kgfx_obj_ref(kbutton_root(button.button));
         kgfx_obj *label = kgfx_obj_ref(button.label);
-        uint32_t text_h = text_height_px(font_, 1u);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
+        uint32_t text_h = text_height_px(font_, text_scale);
 
         if (!root || root->kind != KGFX_OBJ_RECT)
             return;
@@ -1373,7 +1378,7 @@ namespace
         if (!label || label->kind != KGFX_OBJ_TEXT)
             return;
 
-        label->u.text.scale = 1u;
+        label->u.text.scale = text_scale;
         label->u.text.x = (int32_t)w / 2;
         label->u.text.y = (int32_t)((h > text_h) ? (h - text_h) / 2u : 0u);
     }
@@ -1381,23 +1386,34 @@ namespace
     void TextEditor::Layout()
     {
         kgfx_obj *root = RootObject();
-        int32_t pad = 12;
-        uint32_t text_h = text_height_px(font_, 1u);
-        uint32_t action_h = text_h + 14u;
-        uint32_t strip_h = text_h + 12u;
+        int32_t pad = kwindow_ui_scale_i32(12);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
+        uint32_t text_h = text_height_px(font_, text_scale);
+        uint32_t action_h = text_h + kwindow_ui_scale_u32(14);
+        uint32_t strip_h = text_h + kwindow_ui_scale_u32(12);
+        uint32_t titlebar_h = kwindow_ui_scale_u32(42);
         int32_t buttons_y = 0;
         int32_t path_y = 0;
         int32_t viewport_y = 0;
         int32_t status_y = 0;
         int32_t viewport_h = 0;
         uint32_t client_w = 0u;
-        uint32_t button_gap = 8u;
+        uint32_t button_gap = kwindow_ui_scale_u32(8);
+        int32_t gap8 = kwindow_ui_scale_i32(8);
+        int32_t gap10 = kwindow_ui_scale_i32(10);
         uint32_t button_w = 1u;
+        uint32_t button_gap_total = 0u;
         uint32_t inner_h = 0u;
         uint32_t inner_w = 0u;
 
         if (!root || root->kind != KGFX_OBJ_RECT)
             return;
+        if (pad < 4)
+            pad = 4;
+        if (button_gap == 0u)
+            button_gap = 1u;
+        if (titlebar_h < 24u)
+            titlebar_h = 24u;
 
         last_root_w_ = (int)root->u.rect.w;
         last_root_h_ = (int)root->u.rect.h;
@@ -1406,15 +1422,16 @@ namespace
             return;
 
         client_w = root->u.rect.w - 2u * (uint32_t)pad;
-        buttons_y = (int32_t)42 + pad;
-        path_y = buttons_y + (int32_t)action_h + 10;
+        buttons_y = (int32_t)titlebar_h + pad;
+        path_y = buttons_y + (int32_t)action_h + gap10;
         status_y = (int32_t)root->u.rect.h - pad - (int32_t)strip_h;
-        viewport_y = path_y + (int32_t)strip_h + 10;
-        viewport_h = status_y - 8 - viewport_y;
+        viewport_y = path_y + (int32_t)strip_h + gap10;
+        viewport_h = status_y - gap8 - viewport_y;
         if (viewport_h < 24)
             viewport_h = 24;
 
-        button_w = (client_w > button_gap * 4u) ? (client_w - button_gap * 4u) / 5u : client_w;
+        button_gap_total = button_gap * 4u;
+        button_w = (client_w > button_gap_total) ? (client_w - button_gap_total) / 5u : client_w;
         if (button_w == 0u)
             button_w = 1u;
 
@@ -1450,17 +1467,19 @@ namespace
 
         if (kgfx_obj_ref(path_text_) && kgfx_obj_ref(path_text_)->kind == KGFX_OBJ_TEXT)
         {
-            kgfx_obj_ref(path_text_)->u.text.x = 8;
+            kgfx_obj_ref(path_text_)->u.text.scale = text_scale;
+            kgfx_obj_ref(path_text_)->u.text.x = gap8;
             kgfx_obj_ref(path_text_)->u.text.y = (int32_t)((strip_h > text_h) ? (strip_h - text_h) / 2u : 0u);
         }
 
         if (kgfx_obj_ref(status_text_) && kgfx_obj_ref(status_text_)->kind == KGFX_OBJ_TEXT)
         {
-            kgfx_obj_ref(status_text_)->u.text.x = 8;
+            kgfx_obj_ref(status_text_)->u.text.scale = text_scale;
+            kgfx_obj_ref(status_text_)->u.text.x = gap8;
             kgfx_obj_ref(status_text_)->u.text.y = (int32_t)((strip_h > text_h) ? (strip_h - text_h) / 2u : 0u);
         }
 
-        line_height_px_ = ktext_line_height(font_, 1u, 0);
+        line_height_px_ = ktext_line_height(font_, text_scale, 0);
         if (line_height_px_ == 0u)
             line_height_px_ = text_h ? text_h : 1u;
 
@@ -1841,13 +1860,13 @@ namespace
 
         text[0] = ch;
         text[1] = 0;
-        return ktext_measure_line_px(font_, text, 1u, 1);
+        return ktext_measure_line_px(font_, text, kwindow_ui_text_scale(1u), kwindow_ui_scale_i32(1));
     }
 
     uint32_t TextEditor::TextAreaAvailablePx() const
     {
         kgfx_obj *viewport = kgfx_obj_ref(viewport_);
-        uint32_t pad_x = 6u;
+        uint32_t pad_x = kwindow_ui_scale_u32(6u);
 
         if (!viewport || viewport->kind != KGFX_OBJ_RECT)
             return 0u;
@@ -2402,8 +2421,9 @@ namespace
         uint8_t has_selection = HasSelection();
         uint32_t selection_start = SelectionStart();
         uint32_t selection_end = SelectionEnd();
-        uint32_t pad_x = 6u;
-        uint32_t pad_y = 4u;
+        uint32_t pad_x = kwindow_ui_scale_u32(6u);
+        uint32_t pad_y = kwindow_ui_scale_u32(4u);
+        uint32_t text_scale = kwindow_ui_text_scale(1u);
         uint32_t available_px = 0u;
 
         if (!font_ || !viewport || viewport->kind != KGFX_OBJ_RECT)
@@ -2444,7 +2464,7 @@ namespace
             if (line_objs_[i].idx < 0)
             {
                 line_objs_[i] = kgfx_obj_add_text(font_, line_buffers_[i], 6, 4, 1,
-                                                  rgb(228, 233, 241), 255, 1u, 1, 0,
+                                                  rgb(228, 233, 241), 255, text_scale, kwindow_ui_scale_i32(1), 0,
                                                   KTEXT_ALIGN_LEFT, 0);
                 if (line_objs_[i].idx >= 0)
                 {
@@ -2563,8 +2583,8 @@ namespace
             obj->u.text.text = line_buffers_[i];
             obj->u.text.x = (int32_t)pad_x;
             obj->u.text.y = (int32_t)pad_y + (int32_t)(i * line_height_px_);
-            obj->u.text.scale = 1u;
-            obj->u.text.char_spacing = 1;
+            obj->u.text.scale = text_scale;
+            obj->u.text.char_spacing = kwindow_ui_scale_i32(1);
             obj->u.text.line_spacing = 0;
             obj->u.text.align = KTEXT_ALIGN_LEFT;
             obj->fill = (visual_idx == cursor_visual) ? rgb(240, 244, 250) : rgb(224, 229, 238);
@@ -2812,7 +2832,7 @@ namespace
         view_top = root_top + viewport->u.rect.y;
         view_right = view_left + (int32_t)viewport->u.rect.w;
         view_bottom = view_top + (int32_t)viewport->u.rect.h;
-        accepts_pointer = kwindow_point_can_receive_input(window_, mouse.x, mouse.y);
+        accepts_pointer = kwindow_point_can_receive_input(window_, mouse.x, mouse.y) || kwindow_focused(window_);
 
         in_root = accepts_pointer &&
                   mouse.x >= root_left && mouse.y >= root_top &&
@@ -3578,6 +3598,15 @@ namespace
         SyncVisibleLines();
     }
 
+    void TextEditor::Hide()
+    {
+        if (window_.idx < 0)
+            return;
+
+        kwindow_set_visible(window_, 0u);
+        focused_ = 0u;
+    }
+
     int TextEditor::OpenPath(const char *raw_path, const char *friendly_path)
     {
         int rc = LoadFromPath(raw_path, friendly_path);
@@ -3688,6 +3717,16 @@ namespace
         return 0;
     }
 
+    void TextEditorApp::HideAll()
+    {
+        if (!initialized_)
+            return;
+
+        for (uint32_t i = 0u; i < MAX_INSTANCES; ++i)
+            if (editors_[i].Initialized())
+                editors_[i].Hide();
+    }
+
     int TextEditorApp::OpenPath(const char *raw_path, const char *friendly_path)
     {
         TextEditor *editor = AcquireEditor();
@@ -3713,6 +3752,11 @@ extern "C" void text_editor_update(void)
 extern "C" void text_editor_activate(void)
 {
     g_editor_app.Activate();
+}
+
+extern "C" void text_editor_hide(void)
+{
+    g_editor_app.HideAll();
 }
 
 extern "C" int text_editor_visible(void)

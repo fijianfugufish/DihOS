@@ -5,8 +5,11 @@
 
 #define KEARLY_MAX_ROWS 64u
 #define KEARLY_MAX_COLS 160u
-#define KEARLY_GLYPH_W 18u
-#define KEARLY_GLYPH_SCALE 3u
+#define KEARLY_GLYPH_SCALE 1u
+#define KEARLY_CELL_W 7u
+#define KEARLY_LINE_H 10u
+#define KEARLY_COLUMN_COUNT 3u
+#define KEARLY_COLUMN_GAP 12u
 
 typedef struct
 {
@@ -20,6 +23,8 @@ typedef struct
     uint32_t max_y;
     uint32_t cols;
     uint32_t rows;
+    uint32_t column_width;
+    uint32_t cursor_column;
     uint32_t cursor_col;
     uint32_t cursor_row;
     char text[KEARLY_MAX_ROWS][KEARLY_MAX_COLS];
@@ -129,53 +134,39 @@ static void kearly_console_reset_region(void)
               black);
 }
 
-static void kearly_console_redraw(void)
+static int kearly_console_column_x(void)
 {
-    kearly_console_reset_region();
-
-    for (uint32_t row = 0; row < G_early_console.rows; ++row)
-    {
-        int y = G_early_console.start_y + (int)(row * G_early_console.line_h);
-        for (uint32_t col = 0; col < G_early_console.cols; ++col)
-        {
-            char ch = G_early_console.text[row][col];
-            if (!ch)
-                break;
-            if (ch != ' ')
-                kearly_draw_builtin(ch,
-                                    G_early_console.start_x + (int)(col * (KEARLY_GLYPH_W + 1u)),
-                                    y,
-                                    KEARLY_GLYPH_SCALE);
-        }
-    }
-    kgfx_flush();
+    return G_early_console.start_x +
+           (int)(G_early_console.cursor_column *
+                 (G_early_console.column_width + KEARLY_COLUMN_GAP));
 }
 
-static void kearly_console_scroll_one(void)
+static void kearly_console_advance_column(void)
 {
-    for (uint32_t row = 1; row < G_early_console.rows; ++row)
+    ++G_early_console.cursor_column;
+    if (G_early_console.cursor_column >= KEARLY_COLUMN_COUNT)
     {
-        for (uint32_t col = 0; col < G_early_console.cols; ++col)
-            G_early_console.text[row - 1u][col] = G_early_console.text[row][col];
+        G_early_console.cursor_column = 0u;
+        kearly_console_reset_region();
     }
-
-    for (uint32_t col = 0; col < G_early_console.cols; ++col)
-        G_early_console.text[G_early_console.rows - 1u][col] = 0;
-
-    G_early_console.cursor_row = G_early_console.rows - 1u;
-    G_early_console.cursor_col = 0;
-    kearly_console_redraw();
+    G_early_console.cursor_row = 0u;
+    G_early_console.cursor_col = 0u;
+    G_early_console.x = kearly_console_column_x();
+    G_early_console.y = G_early_console.start_y;
 }
 
 static void kearly_console_newline(void)
 {
     G_early_console.cursor_col = 0;
     if (G_early_console.cursor_row + 1u >= G_early_console.rows)
-        kearly_console_scroll_one();
+    {
+        kearly_console_advance_column();
+        return;
+    }
     else
         ++G_early_console.cursor_row;
 
-    G_early_console.x = G_early_console.start_x;
+    G_early_console.x = kearly_console_column_x();
     G_early_console.y = G_early_console.start_y + (int)(G_early_console.cursor_row * G_early_console.line_h);
 }
 
@@ -207,7 +198,7 @@ static void kearly_console_sink(const char *text, uint32_t len, void *user)
         ++G_early_console.cursor_col;
         if (G_early_console.cursor_col < G_early_console.cols)
             G_early_console.text[G_early_console.cursor_row][G_early_console.cursor_col] = 0;
-        G_early_console.x += (int)(KEARLY_GLYPH_W + 1u);
+        G_early_console.x += (int)KEARLY_CELL_W;
     }
 
     kgfx_flush();
@@ -224,12 +215,18 @@ void kearly_console_begin(const kfont *font)
     G_early_console.start_y = 16;
     G_early_console.x = G_early_console.start_x;
     G_early_console.y = G_early_console.start_y;
-    G_early_console.line_h = 24u;
+    G_early_console.line_h = KEARLY_LINE_H;
     G_early_console.max_x = fb->width > 8u ? fb->width - 8u : fb->width;
     G_early_console.max_y = fb->height > 8u ? fb->height - 8u : fb->height;
-    G_early_console.cols = (G_early_console.max_x > (uint32_t)G_early_console.start_x)
-                               ? ((G_early_console.max_x - (uint32_t)G_early_console.start_x) / (KEARLY_GLYPH_W + 1u))
-                               : 1u;
+    G_early_console.column_width =
+        (G_early_console.max_x > (uint32_t)G_early_console.start_x +
+                                     (KEARLY_COLUMN_COUNT - 1u) * KEARLY_COLUMN_GAP)
+            ? ((G_early_console.max_x -
+                (uint32_t)G_early_console.start_x -
+                (KEARLY_COLUMN_COUNT - 1u) * KEARLY_COLUMN_GAP) /
+               KEARLY_COLUMN_COUNT)
+            : KEARLY_CELL_W;
+    G_early_console.cols = G_early_console.column_width / KEARLY_CELL_W;
     G_early_console.rows = (G_early_console.max_y > (uint32_t)G_early_console.start_y)
                                ? ((G_early_console.max_y - (uint32_t)G_early_console.start_y) / G_early_console.line_h)
                                : 1u;
@@ -243,6 +240,7 @@ void kearly_console_begin(const kfont *font)
         --G_early_console.cols;
     if (G_early_console.rows > KEARLY_MAX_ROWS)
         G_early_console.rows = KEARLY_MAX_ROWS;
+    G_early_console.cursor_column = 0u;
     G_early_console.cursor_col = 0;
     G_early_console.cursor_row = 0;
     for (uint32_t row = 0; row < KEARLY_MAX_ROWS; ++row)

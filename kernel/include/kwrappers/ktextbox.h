@@ -13,6 +13,11 @@ extern "C"
 {
 #endif
 
+    /*
+     * Legacy widget API.
+     * Kept for existing kernel apps and SACX compatibility; the implementation
+     * now has native selection, clipboard shortcuts, and undo/redo.
+     */
     typedef struct
     {
         int idx;
@@ -74,6 +79,15 @@ extern "C"
     void ktextbox_set_text(ktextbox_handle h, const char *text);
     void ktextbox_clear(ktextbox_handle h);
     const char *ktextbox_text(ktextbox_handle h);
+    void ktextbox_select(ktextbox_handle h, uint32_t start, uint32_t end);
+    int ktextbox_selection(ktextbox_handle h, uint32_t *out_start, uint32_t *out_end);
+    uint32_t ktextbox_copy_selection(ktextbox_handle h);
+    uint32_t ktextbox_cut_selection(ktextbox_handle h);
+    uint32_t ktextbox_paste(ktextbox_handle h);
+    int ktextbox_undo(ktextbox_handle h);
+    int ktextbox_redo(ktextbox_handle h);
+    void ktextbox_set_max_len(ktextbox_handle h, uint32_t max_len);
+    uint32_t ktextbox_max_len(ktextbox_handle h);
 
 #ifdef __cplusplus
 }

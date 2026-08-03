@@ -77,8 +77,49 @@ typedef struct
 {
     KFile file;
     uint8_t failed;
+    uint8_t no_busy;
+    uint8_t memory;
+    uint8_t fixed_memory;
+    uint8_t *mem;
+    uint32_t mem_size;
+    uint32_t mem_capacity;
+    uint64_t mem_pages;
     uint32_t bytes_since_pump;
 } kimg_writer;
+
+static int writer_grow_memory(kimg_writer *writer, uint32_t required)
+{
+    uint32_t new_capacity = 0u;
+    uint64_t new_pages = 0u;
+    uint8_t *new_mem = 0;
+
+    if (!writer || !required)
+        return -1;
+    if (required <= writer->mem_capacity)
+        return 0;
+
+    new_capacity = writer->mem_capacity ? writer->mem_capacity : 4096u;
+    while (new_capacity < required)
+    {
+        if (new_capacity >= 0x80000000u)
+            return -1;
+        new_capacity <<= 1;
+    }
+
+    new_pages = ((uint64_t)new_capacity + 4095ull) >> 12;
+    new_mem = (uint8_t *)pmem_alloc_pages(new_pages);
+    if (!new_mem)
+        return -1;
+    if (writer->mem && writer->mem_size)
+        memcpy(new_mem, writer->mem, writer->mem_size);
+    if (writer->mem && writer->mem_pages)
+        pmem_free_pages(writer->mem, writer->mem_pages);
+
+    writer->mem = new_mem;
+    writer->mem_capacity = new_capacity;
+    writer->mem_pages = new_pages;
+    return 0;
+}
 
 static int writer_write(kimg_writer *writer, const void *data, uint32_t size)
 {
@@ -87,6 +128,29 @@ static int writer_write(kimg_writer *writer, const void *data, uint32_t size)
 
     if (!writer || writer->failed || (!data && size))
         return -1;
+
+    if (writer->memory)
+    {
+        if (size && writer->mem_size > 0xFFFFFFFFu - size)
+        {
+            writer->failed = 1u;
+            return -1;
+        }
+        if (writer->fixed_memory && writer->mem_size + size > writer->mem_capacity)
+        {
+            writer->failed = 1u;
+            return -1;
+        }
+        if (!writer->fixed_memory && writer_grow_memory(writer, writer->mem_size + size) != 0)
+        {
+            writer->failed = 1u;
+            return -1;
+        }
+        if (size)
+            memcpy(writer->mem + writer->mem_size, data, size);
+        writer->mem_size += size;
+        return 0;
+    }
 
     while (total < size)
     {
@@ -101,7 +165,8 @@ static int writer_write(kimg_writer *writer, const void *data, uint32_t size)
         if (writer->bytes_since_pump >= 16384u)
         {
             writer->bytes_since_pump = 0u;
-            kbusy_pump();
+            if (!writer->no_busy)
+                kbusy_pump();
         }
     }
     return 0;
@@ -352,7 +417,7 @@ static int kimg_write_jpeg(const kimg *img, kimg_writer *writer, uint32_t qualit
             rgb[i * 3ull + 1ull] = (uint8_t)((((pixel >> 8) & 0xFFu) * alpha + 255u * inv + 127u) / 255u);
             rgb[i * 3ull + 2ull] = (uint8_t)(((pixel & 0xFFu) * alpha + 255u * inv + 127u) / 255u);
         }
-        if ((y & 7u) == 7u)
+        if (!writer->no_busy && (y & 7u) == 7u)
             kbusy_pump();
     }
 
@@ -368,7 +433,150 @@ static int kimg_write_jpeg(const kimg *img, kimg_writer *writer, uint32_t qualit
     return writer->failed ? -1 : 0;
 }
 
-int kimg_save(const kimg *img, const char *path, uint32_t format, uint32_t quality)
+static int kimg_encode_with_writer(const kimg *img, uint32_t format, uint32_t quality, kimg_writer *writer)
+{
+    if (format == KIMG_FORMAT_PNG)
+        return kimg_write_png(img, writer);
+    if (format == KIMG_FORMAT_JPEG)
+        return kimg_write_jpeg(img, writer, quality);
+    if (format == KIMG_FORMAT_BMP)
+        return kimg_write_bmp(img, writer);
+    return -1;
+}
+
+uint32_t kimg_encode_bound(const kimg *img, uint32_t format)
+{
+    uint64_t pixels = 0u;
+    uint64_t bound = 0u;
+
+    if (!img || !img->px || !img->w || !img->h || img->w > 8192u || img->h > 8192u)
+        return 0u;
+    pixels = (uint64_t)img->w * (uint64_t)img->h;
+    if (!pixels || pixels > 0x10000000ull)
+        return 0u;
+    if (format == KIMG_FORMAT_BMP)
+        bound = 54ull + pixels * 4ull;
+    else if (format == KIMG_FORMAT_PNG)
+        bound = 8ull + 25ull + 12ull + 2ull +
+                (uint64_t)img->h * (5ull + (uint64_t)img->w * 4ull + 1ull) +
+                4ull + 12ull;
+    else if (format == KIMG_FORMAT_JPEG)
+        bound = pixels * 4ull + 1024ull * 1024ull;
+    else
+        return 0u;
+    bound += 4095ull;
+    if (bound > 0xFFFFFFFFull)
+        return 0u;
+    return (uint32_t)bound;
+}
+
+int kimg_encode_to_buffer(const kimg *img, uint32_t format, uint32_t quality,
+                          uint8_t *out_data, uint32_t out_capacity, uint32_t *out_size)
+{
+    kimg_writer writer;
+    int rc = -1;
+
+    if (out_size)
+        *out_size = 0u;
+    if (!img || !img->px || !img->w || !img->h || !out_data || !out_capacity || !out_size)
+        return -1;
+    if (img->w > 8192u || img->h > 8192u)
+        return -1;
+
+    memset(&writer, 0, sizeof(writer));
+    writer.no_busy = 1u;
+    writer.memory = 1u;
+    writer.fixed_memory = 1u;
+    writer.mem = out_data;
+    writer.mem_capacity = out_capacity;
+    rc = kimg_encode_with_writer(img, format, quality, &writer);
+    if (writer.failed)
+        rc = -1;
+    if (rc != 0 || !writer.mem_size)
+        return -1;
+    *out_size = writer.mem_size;
+    return 0;
+}
+
+int kimg_encode_alloc(const kimg *img, uint32_t format, uint32_t quality,
+                      uint8_t **out_data, uint32_t *out_size, uint64_t *out_pages)
+{
+    kimg_writer writer;
+    int rc = -1;
+
+    if (out_data)
+        *out_data = 0;
+    if (out_size)
+        *out_size = 0u;
+    if (out_pages)
+        *out_pages = 0u;
+    if (!img || !img->px || !img->w || !img->h || !out_data || !out_size || !out_pages)
+        return -1;
+    if (img->w > 8192u || img->h > 8192u)
+        return -1;
+
+    memset(&writer, 0, sizeof(writer));
+    writer.no_busy = 1u;
+    writer.memory = 1u;
+    rc = kimg_encode_with_writer(img, format, quality, &writer);
+    if (writer.failed)
+        rc = -1;
+    if (rc != 0 || !writer.mem || !writer.mem_size)
+    {
+        if (writer.mem && writer.mem_pages)
+            pmem_free_pages(writer.mem, writer.mem_pages);
+        return -1;
+    }
+
+    *out_data = writer.mem;
+    *out_size = writer.mem_size;
+    *out_pages = writer.mem_pages;
+    return 0;
+}
+
+void kimg_encode_free(uint8_t *data, uint64_t pages)
+{
+    if (data && pages)
+        pmem_free_pages(data, pages);
+}
+
+int kimg_save_encoded(const char *path, const uint8_t *data, uint32_t size, uint32_t flags)
+{
+    KFile file;
+    uint32_t total = 0u;
+
+    if (!path || !path[0] || !data || !size)
+        return -1;
+    if (kfile_open(&file, path, KFILE_WRITE | KFILE_CREATE | KFILE_TRUNC) != 0)
+        return -1;
+
+    if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+        kbusy_begin();
+    while (total < size)
+    {
+        uint32_t written = 0u;
+        uint32_t chunk = size - total;
+        if (chunk > 65536u)
+            chunk = 65536u;
+        if (kfile_write(&file, data + total, chunk, &written) != 0 || written == 0u)
+        {
+            kfile_close(&file);
+            if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+                kbusy_end();
+            return -1;
+        }
+        total += written;
+        if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+            kbusy_pump();
+    }
+
+    kfile_close(&file);
+    if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+        kbusy_end();
+    return 0;
+}
+
+int kimg_save_ex(const kimg *img, const char *path, uint32_t format, uint32_t quality, uint32_t flags)
 {
     kimg_writer writer;
     int rc = -1;
@@ -379,20 +587,23 @@ int kimg_save(const kimg *img, const char *path, uint32_t format, uint32_t quali
         return -1;
 
     memset(&writer, 0, sizeof(writer));
+    writer.no_busy = (flags & KIMG_SAVE_FLAG_NO_BUSY) ? 1u : 0u;
     if (kfile_open(&writer.file, path, KFILE_WRITE | KFILE_CREATE | KFILE_TRUNC) != 0)
         return -1;
 
-    kbusy_begin();
-    if (format == KIMG_FORMAT_PNG)
-        rc = kimg_write_png(img, &writer);
-    else if (format == KIMG_FORMAT_JPEG)
-        rc = kimg_write_jpeg(img, &writer, quality);
-    else if (format == KIMG_FORMAT_BMP)
-        rc = kimg_write_bmp(img, &writer);
+    if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+        kbusy_begin();
+    rc = kimg_encode_with_writer(img, format, quality, &writer);
 
     kfile_close(&writer.file);
-    kbusy_end();
+    if (!(flags & KIMG_SAVE_FLAG_NO_BUSY))
+        kbusy_end();
     if (writer.failed)
         rc = -1;
     return rc;
+}
+
+int kimg_save(const kimg *img, const char *path, uint32_t format, uint32_t quality)
+{
+    return kimg_save_ex(img, path, format, quality, KIMG_SAVE_FLAG_NONE);
 }

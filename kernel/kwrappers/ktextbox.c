@@ -14,6 +14,7 @@
 #define KTEXTBOX_CARET_BLINK_FRAMES 30u
 #define KTEXTBOX_KEY_REPEAT_DELAY 30u
 #define KTEXTBOX_KEY_REPEAT_INTERVAL 3u
+#define KTEXTBOX_UNDO_DEPTH 8u
 
 typedef struct
 {
@@ -32,26 +33,46 @@ typedef struct
 
 typedef struct
 {
+    uint16_t len;
+    uint16_t caret;
+    uint16_t sel_start;
+    uint16_t sel_end;
+    char text[KTEXTBOX_TEXT_CAP];
+} ktextbox_snapshot;
+
+typedef struct
+{
     uint8_t used;
     uint8_t enabled;
     uint8_t hovered;
     uint8_t focused;
+    uint8_t selecting;
     kgfx_obj_handle root;
+    kgfx_obj_handle selection_obj;
     kgfx_obj_handle text_obj;
     const kfont *font;
     ktextbox_style style;
     ktextbox_on_submit_fn on_submit;
     void *user;
+    uint16_t max_len;
     uint16_t len;
     uint16_t caret;
+    uint16_t selection_anchor;
+    uint16_t sel_start;
+    uint16_t sel_end;
     uint16_t view_start;
     char text[KTEXTBOX_TEXT_CAP];
     char display[KTEXTBOX_DISPLAY_CAP];
+    ktextbox_snapshot undo[KTEXTBOX_UNDO_DEPTH];
+    ktextbox_snapshot redo[KTEXTBOX_UNDO_DEPTH];
+    uint8_t undo_count;
+    uint8_t redo_count;
 } ktextbox_slot;
 
 static ktextbox_slot G_boxes[KTEXTBOX_MAX];
 static uint8_t G_prev_buttons = 0;
 static int G_focused_idx = -1;
+static int G_selecting_idx = -1;
 static uint8_t G_caps_lock = 0;
 static uint32_t G_caret_blink_tick = 0;
 static uint8_t G_repeat_usage = 0;
@@ -75,6 +96,110 @@ static inline int32_t ktextbox_max_i32(int32_t a, int32_t b)
 static inline int32_t ktextbox_min_i32(int32_t a, int32_t b)
 {
     return (a < b) ? a : b;
+}
+
+static inline uint16_t ktextbox_min_u16(uint16_t a, uint16_t b)
+{
+    return (a < b) ? a : b;
+}
+
+static inline uint16_t ktextbox_max_u16(uint16_t a, uint16_t b)
+{
+    return (a > b) ? a : b;
+}
+
+static inline uint16_t ktextbox_clamp_pos(const ktextbox_slot *slot, uint32_t pos)
+{
+    uint16_t len = slot ? slot->len : 0u;
+    return pos > len ? len : (uint16_t)pos;
+}
+
+static uint8_t ktextbox_has_selection(const ktextbox_slot *slot)
+{
+    return (slot && slot->sel_start < slot->sel_end) ? 1u : 0u;
+}
+
+static void ktextbox_update_selection_from_anchor(ktextbox_slot *slot)
+{
+    if (!slot)
+        return;
+
+    slot->sel_start = ktextbox_min_u16(slot->selection_anchor, slot->caret);
+    slot->sel_end = ktextbox_max_u16(slot->selection_anchor, slot->caret);
+}
+
+static void ktextbox_clear_selection(ktextbox_slot *slot)
+{
+    if (!slot)
+        return;
+
+    slot->selection_anchor = slot->caret;
+    slot->sel_start = slot->caret;
+    slot->sel_end = slot->caret;
+}
+
+static void ktextbox_take_snapshot(const ktextbox_slot *slot, ktextbox_snapshot *out)
+{
+    if (!slot || !out)
+        return;
+
+    out->len = slot->len;
+    out->caret = slot->caret;
+    out->sel_start = slot->sel_start;
+    out->sel_end = slot->sel_end;
+    for (uint32_t i = 0u; i < KTEXTBOX_TEXT_CAP; ++i)
+        out->text[i] = slot->text[i];
+}
+
+static void ktextbox_restore_snapshot(ktextbox_slot *slot, const ktextbox_snapshot *snap)
+{
+    if (!slot || !snap)
+        return;
+
+    slot->len = snap->len;
+    if (slot->len >= KTEXTBOX_TEXT_CAP)
+        slot->len = KTEXTBOX_TEXT_CAP - 1u;
+
+    for (uint32_t i = 0u; i < KTEXTBOX_TEXT_CAP; ++i)
+        slot->text[i] = snap->text[i];
+    slot->text[slot->len] = 0;
+
+    slot->caret = snap->caret > slot->len ? slot->len : snap->caret;
+    slot->sel_start = snap->sel_start > slot->len ? slot->len : snap->sel_start;
+    slot->sel_end = snap->sel_end > slot->len ? slot->len : snap->sel_end;
+    if (slot->sel_start > slot->sel_end)
+    {
+        uint16_t tmp = slot->sel_start;
+        slot->sel_start = slot->sel_end;
+        slot->sel_end = tmp;
+    }
+    slot->selection_anchor = slot->sel_start == slot->caret ? slot->sel_end : slot->sel_start;
+    slot->view_start = 0;
+}
+
+static void ktextbox_push_snapshot(ktextbox_snapshot *stack, uint8_t *count, const ktextbox_slot *slot)
+{
+    if (!stack || !count || !slot)
+        return;
+
+    if (*count >= KTEXTBOX_UNDO_DEPTH)
+    {
+        for (uint32_t i = 1u; i < KTEXTBOX_UNDO_DEPTH; ++i)
+            stack[i - 1u] = stack[i];
+        *count = KTEXTBOX_UNDO_DEPTH - 1u;
+    }
+
+    ktextbox_take_snapshot(slot, &stack[*count]);
+    (*count)++;
+}
+
+static void ktextbox_record_undo(ktextbox_slot *slot)
+{
+    if (!slot)
+        return;
+
+    ktextbox_push_snapshot(slot->undo, &slot->undo_count, slot);
+    slot->redo_count = 0u;
 }
 
 static inline int ktextbox_clip_intersect(ktextbox_clip_rect *dst, const ktextbox_clip_rect *other)
@@ -185,6 +310,7 @@ static int ktextbox_resolve_obj(kgfx_obj_handle h, ktextbox_resolved_rect *out, 
         return 1;
 
     parent_handle.idx = (int)o->parent_idx;
+    parent_handle.generation = o->parent_generation;
     if (!kgfx_obj_ref(parent_handle) || !kgfx_obj_ref(parent_handle)->visible)
         return 0;
     if (!ktextbox_resolve_obj(parent_handle, &parent, depth + 1u))
@@ -226,9 +352,34 @@ static int ktextbox_resolve_root_bounds(const ktextbox_slot *slot, ktextbox_reso
     return out->clip.x0 < out->clip.x1 && out->clip.y0 < out->clip.y1;
 }
 
-static void ktextbox_insert_char(ktextbox_slot *slot, char ch)
+static void ktextbox_delete_range(ktextbox_slot *slot, uint16_t start, uint16_t end)
 {
-    if (!slot || slot->len >= KTEXTBOX_TEXT_CAP - 1 || slot->caret > slot->len)
+    if (!slot || start >= end || start >= slot->len)
+        return;
+
+    if (end > slot->len)
+        end = slot->len;
+
+    for (uint16_t i = start; i <= slot->len - (end - start); ++i)
+        slot->text[i] = slot->text[i + (end - start)];
+
+    slot->len = (uint16_t)(slot->len - (end - start));
+    slot->text[slot->len] = 0;
+    slot->caret = start;
+    ktextbox_clear_selection(slot);
+}
+
+static void ktextbox_insert_char_raw(ktextbox_slot *slot, char ch)
+{
+    uint16_t limit = 0;
+
+    if (!slot || slot->caret > slot->len)
+        return;
+
+    limit = slot->max_len;
+    if (limit == 0u || limit >= KTEXTBOX_TEXT_CAP)
+        limit = KTEXTBOX_TEXT_CAP - 1u;
+    if (slot->len >= limit)
         return;
 
     for (uint16_t i = slot->len; i > slot->caret; --i)
@@ -238,31 +389,69 @@ static void ktextbox_insert_char(ktextbox_slot *slot, char ch)
     slot->len++;
     slot->caret++;
     slot->text[slot->len] = 0;
+    ktextbox_clear_selection(slot);
+}
+
+static void ktextbox_insert_char(ktextbox_slot *slot, char ch)
+{
+    if (!slot)
+        return;
+
+    ktextbox_record_undo(slot);
+    if (ktextbox_has_selection(slot))
+        ktextbox_delete_range(slot, slot->sel_start, slot->sel_end);
+    ktextbox_insert_char_raw(slot, ch);
+}
+
+static void ktextbox_insert_text(ktextbox_slot *slot, const char *text, uint32_t len)
+{
+    if (!slot || !text || len == 0u)
+        return;
+
+    ktextbox_record_undo(slot);
+    if (ktextbox_has_selection(slot))
+        ktextbox_delete_range(slot, slot->sel_start, slot->sel_end);
+
+    for (uint32_t i = 0u; i < len; ++i)
+        ktextbox_insert_char_raw(slot, text[i]);
 }
 
 static void ktextbox_backspace(ktextbox_slot *slot)
 {
-    if (!slot || slot->len == 0 || slot->caret == 0 || slot->caret > slot->len)
+    if (!slot)
         return;
 
-    for (uint16_t i = slot->caret - 1; i < slot->len; ++i)
-        slot->text[i] = slot->text[i + 1];
+    if (ktextbox_has_selection(slot))
+    {
+        ktextbox_record_undo(slot);
+        ktextbox_delete_range(slot, slot->sel_start, slot->sel_end);
+        return;
+    }
 
-    slot->text[slot->len] = 0;
-    slot->len--;
-    slot->caret--;
+    if (slot->len == 0 || slot->caret == 0 || slot->caret > slot->len)
+        return;
+
+    ktextbox_record_undo(slot);
+    ktextbox_delete_range(slot, (uint16_t)(slot->caret - 1u), slot->caret);
 }
 
 static void ktextbox_delete(ktextbox_slot *slot)
 {
-    if (!slot || slot->caret >= slot->len)
+    if (!slot)
         return;
 
-    for (uint16_t i = slot->caret; i < slot->len; ++i)
-        slot->text[i] = slot->text[i + 1];
+    if (ktextbox_has_selection(slot))
+    {
+        ktextbox_record_undo(slot);
+        ktextbox_delete_range(slot, slot->sel_start, slot->sel_end);
+        return;
+    }
 
-    slot->text[slot->len] = 0;
-    slot->len--;
+    if (slot->caret >= slot->len)
+        return;
+
+    ktextbox_record_undo(slot);
+    ktextbox_delete_range(slot, slot->caret, (uint16_t)(slot->caret + 1u));
 }
 
 static uint32_t ktextbox_char_width(const ktextbox_slot *slot, char ch)
@@ -279,6 +468,20 @@ static uint32_t ktextbox_char_width(const ktextbox_slot *slot, char ch)
     return ktext_measure_line_px(slot->font, glyph, scale, 0);
 }
 
+static uint32_t ktextbox_text_width_range(const ktextbox_slot *slot, uint16_t start, uint16_t end)
+{
+    uint32_t width = 0u;
+
+    if (!slot || start >= end)
+        return 0u;
+    if (end > slot->len)
+        end = slot->len;
+
+    for (uint16_t i = start; i < end; ++i)
+        width += ktextbox_char_width(slot, slot->text[i]) + 1u;
+    return width;
+}
+
 static uint32_t ktextbox_caret_width(const ktextbox_slot *slot)
 {
     uint32_t scale = 1u;
@@ -293,6 +496,8 @@ static uint32_t ktextbox_caret_width(const ktextbox_slot *slot)
 static uint8_t ktextbox_caret_visible(const ktextbox_slot *slot)
 {
     if (!slot || !slot->focused)
+        return 0u;
+    if (ktextbox_has_selection(slot))
         return 0u;
 
     return ((G_caret_blink_tick / KTEXTBOX_CARET_BLINK_FRAMES) & 1u) == 0u ? 1u : 0u;
@@ -401,6 +606,7 @@ static char ktextbox_usage_to_char(uint8_t usage, uint8_t shift, uint8_t caps_lo
 static void ktextbox_apply_visual(ktextbox_slot *slot)
 {
     kgfx_obj *root = 0;
+    kgfx_obj *selection = 0;
     kgfx_obj *text = 0;
     kcolor fill = black;
     kcolor outline = white;
@@ -441,8 +647,13 @@ static void ktextbox_apply_visual(ktextbox_slot *slot)
     root->outline_alpha = slot->style.outline_alpha;
     root->outline_width = slot->style.outline_width;
 
+    selection = kgfx_obj_ref(slot->selection_obj);
     if (!text || text->kind != KGFX_OBJ_TEXT)
+    {
+        if (selection)
+            selection->visible = 0u;
         return;
+    }
 
     text->u.text.font = slot->font;
     text->u.text.text = slot->display;
@@ -461,6 +672,61 @@ static void ktextbox_apply_visual(ktextbox_slot *slot)
     text->u.text.y = (int32_t)((root->u.rect.h > text_h)
                                    ? (root->u.rect.h - text_h) / 2u
                                    : 0u);
+
+    if (selection && selection->kind == KGFX_OBJ_RECT)
+    {
+        uint32_t available_px = 0u;
+        uint32_t prefix_px = 0u;
+        uint32_t selected_px = 0u;
+        uint16_t start = 0u;
+        uint16_t end = 0u;
+        int32_t inner = (int32_t)root->u.rect.w - ((int32_t)slot->style.padding_x * 2);
+
+        selection->fill = steel_blue;
+        selection->alpha = 150u;
+        selection->outline_width = 0u;
+        selection->outline_alpha = 0u;
+        selection->clip_to_parent = 1u;
+
+        if (inner > 0)
+            available_px = (uint32_t)inner;
+
+        if (!root->visible || !slot->focused || !ktextbox_has_selection(slot) || available_px == 0u)
+        {
+            selection->visible = 0u;
+            return;
+        }
+
+        start = slot->sel_start < slot->view_start ? slot->view_start : slot->sel_start;
+        end = slot->sel_end;
+        if (start >= end)
+        {
+            selection->visible = 0u;
+            return;
+        }
+
+        prefix_px = ktextbox_text_width_range(slot, slot->view_start, start);
+        if (prefix_px >= available_px)
+        {
+            selection->visible = 0u;
+            return;
+        }
+
+        selected_px = ktextbox_text_width_range(slot, start, end);
+        if (prefix_px + selected_px > available_px)
+            selected_px = available_px - prefix_px;
+        if (selected_px == 0u)
+        {
+            selection->visible = 0u;
+            return;
+        }
+
+        selection->u.rect.x = (int32_t)slot->style.padding_x + (int32_t)prefix_px;
+        selection->u.rect.y = text->u.text.y;
+        selection->u.rect.w = selected_px;
+        selection->u.rect.h = text_h ? text_h : root->u.rect.h;
+        selection->visible = 1u;
+    }
 }
 
 static void ktextbox_sync_display(ktextbox_slot *slot)
@@ -549,7 +815,8 @@ static void ktextbox_sync_display(ktextbox_slot *slot)
     ktextbox_apply_visual(slot);
 }
 
-static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_resolved_rect *resolved, int32_t mouse_x)
+static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_resolved_rect *resolved,
+                                            int32_t mouse_x, uint8_t extend_selection)
 {
     kgfx_obj *root = 0;
     int32_t local_x = 0;
@@ -568,6 +835,10 @@ static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_
     if (local_x <= 0)
     {
         slot->caret = slot->view_start;
+        if (extend_selection)
+            ktextbox_update_selection_from_anchor(slot);
+        else
+            ktextbox_clear_selection(slot);
         ktextbox_reset_caret_blink();
         ktextbox_sync_display(slot);
         return;
@@ -584,6 +855,10 @@ static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_
             if (local_x < caret_boundary)
             {
                 slot->caret = idx;
+                if (extend_selection)
+                    ktextbox_update_selection_from_anchor(slot);
+                else
+                    ktextbox_clear_selection(slot);
                 ktextbox_reset_caret_blink();
                 ktextbox_sync_display(slot);
                 return;
@@ -601,6 +876,10 @@ static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_
         if (local_x < boundary)
         {
             slot->caret = idx;
+            if (extend_selection)
+                ktextbox_update_selection_from_anchor(slot);
+            else
+                ktextbox_clear_selection(slot);
             ktextbox_reset_caret_blink();
             ktextbox_sync_display(slot);
             return;
@@ -611,6 +890,10 @@ static void ktextbox_place_caret_from_mouse(ktextbox_slot *slot, const ktextbox_
     }
 
     slot->caret = slot->len;
+    if (extend_selection)
+        ktextbox_update_selection_from_anchor(slot);
+    else
+        ktextbox_clear_selection(slot);
     ktextbox_reset_caret_blink();
     ktextbox_sync_display(slot);
 }
@@ -620,11 +903,13 @@ static void ktextbox_focus_slot(int idx)
     if (G_focused_idx >= 0 && G_focused_idx < KTEXTBOX_MAX && G_boxes[G_focused_idx].used)
     {
         G_boxes[G_focused_idx].focused = 0;
+        G_boxes[G_focused_idx].selecting = 0u;
         ktextbox_clear_repeat_state();
         ktextbox_sync_display(&G_boxes[G_focused_idx]);
     }
 
     G_focused_idx = -1;
+    G_selecting_idx = -1;
 
     if (idx >= 0 && idx < KTEXTBOX_MAX && G_boxes[idx].used && G_boxes[idx].enabled)
     {
@@ -636,6 +921,102 @@ static void ktextbox_focus_slot(int idx)
     }
 }
 
+static void ktextbox_move_caret(ktextbox_slot *slot, uint16_t caret, uint8_t extend_selection)
+{
+    if (!slot)
+        return;
+
+    slot->caret = ktextbox_clamp_pos(slot, caret);
+    if (extend_selection)
+        ktextbox_update_selection_from_anchor(slot);
+    else
+        ktextbox_clear_selection(slot);
+    ktextbox_reset_caret_blink();
+}
+
+static void ktextbox_select_all(ktextbox_slot *slot)
+{
+    if (!slot)
+        return;
+
+    slot->selection_anchor = 0u;
+    slot->caret = slot->len;
+    slot->sel_start = 0u;
+    slot->sel_end = slot->len;
+    ktextbox_reset_caret_blink();
+}
+
+static uint32_t ktextbox_copy_selection_slot(const ktextbox_slot *slot)
+{
+    if (!slot || !ktextbox_has_selection(slot))
+        return 0u;
+
+    return kclipboard_set_text(slot->text + slot->sel_start, (uint32_t)(slot->sel_end - slot->sel_start));
+}
+
+static uint32_t ktextbox_cut_selection_slot(ktextbox_slot *slot)
+{
+    uint32_t copied = 0u;
+
+    if (!slot || !ktextbox_has_selection(slot))
+        return 0u;
+
+    copied = ktextbox_copy_selection_slot(slot);
+    ktextbox_record_undo(slot);
+    ktextbox_delete_range(slot, slot->sel_start, slot->sel_end);
+    ktextbox_reset_caret_blink();
+    return copied;
+}
+
+static uint32_t ktextbox_paste_slot(ktextbox_slot *slot)
+{
+    char clip[KTEXTBOX_TEXT_CAP];
+    uint32_t clip_len = 0u;
+
+    if (!slot)
+        return 0u;
+
+    clip_len = kclipboard_copy_text(clip, sizeof(clip));
+    if (clip_len == 0u)
+        return 0u;
+
+    ktextbox_insert_text(slot, clip, clip_len);
+    ktextbox_reset_caret_blink();
+    return clip_len;
+}
+
+static int ktextbox_undo_slot(ktextbox_slot *slot)
+{
+    ktextbox_snapshot snap;
+
+    if (!slot || slot->undo_count == 0u)
+        return -1;
+
+    ktextbox_take_snapshot(slot, &snap);
+    ktextbox_push_snapshot(slot->redo, &slot->redo_count, slot);
+    slot->undo_count--;
+    ktextbox_restore_snapshot(slot, &slot->undo[slot->undo_count]);
+    slot->redo[slot->redo_count - 1u] = snap;
+    ktextbox_reset_caret_blink();
+    return 0;
+}
+
+static int ktextbox_redo_slot(ktextbox_slot *slot)
+{
+    ktextbox_snapshot snap;
+
+    if (!slot || slot->redo_count == 0u)
+        return -1;
+
+    ktextbox_take_snapshot(slot, &snap);
+    ktextbox_push_snapshot(slot->undo, &slot->undo_count, slot);
+    slot->redo_count--;
+    ktextbox_restore_snapshot(slot, &slot->redo[slot->redo_count]);
+    slot->undo[slot->undo_count - 1u] = snap;
+    ktextbox_reset_caret_blink();
+    return 0;
+}
+
 void ktextbox_init(void)
 {
     for (uint32_t i = 0; i < KTEXTBOX_MAX; ++i)
@@ -643,6 +1024,7 @@ void ktextbox_init(void)
 
     G_prev_buttons = 0;
     G_focused_idx = -1;
+    G_selecting_idx = -1;
     G_caps_lock = 0;
     G_caret_blink_tick = 0;
     ktextbox_clear_repeat_state();
@@ -656,6 +1038,7 @@ ktextbox_handle ktextbox_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h,
     ktextbox_handle hnd = {-1};
     ktextbox_style resolved_style = ktextbox_style_default();
     kgfx_obj_handle root = {-1};
+    kgfx_obj_handle selection = {-1};
     kgfx_obj_handle text = {-1};
 
     if (!font)
@@ -675,6 +1058,15 @@ ktextbox_handle ktextbox_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h,
         if (root.idx < 0)
             return hnd;
 
+        selection = kgfx_obj_add_rect((int32_t)resolved_style.padding_x,
+                                      (int32_t)resolved_style.padding_y,
+                                      1, 1, 0, steel_blue, 0);
+        if (selection.idx < 0)
+        {
+            kgfx_obj_destroy(root);
+            return hnd;
+        }
+
         text = kgfx_obj_add_text(font, "",
                                  (int32_t)resolved_style.padding_x,
                                  (int32_t)resolved_style.padding_y,
@@ -688,22 +1080,30 @@ ktextbox_handle ktextbox_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h,
                                  1);
         if (text.idx < 0)
         {
+            kgfx_obj_destroy(selection);
             kgfx_obj_destroy(root);
             return hnd;
         }
 
+        kgfx_obj_set_parent(selection, root);
+        kgfx_obj_set_clip_to_parent(selection, 1);
         kgfx_obj_set_parent(text, root);
 
         G_boxes[i] = (ktextbox_slot){0};
         G_boxes[i].used = 1;
         G_boxes[i].enabled = 1;
         G_boxes[i].root = root;
+        G_boxes[i].selection_obj = selection;
         G_boxes[i].text_obj = text;
         G_boxes[i].font = font;
         G_boxes[i].style = resolved_style;
         G_boxes[i].on_submit = on_submit;
         G_boxes[i].user = user;
+        G_boxes[i].max_len = KTEXTBOX_TEXT_CAP - 1u;
         G_boxes[i].caret = 0;
+        G_boxes[i].selection_anchor = 0;
+        G_boxes[i].sel_start = 0;
+        G_boxes[i].sel_end = 0;
         G_boxes[i].view_start = 0;
         G_boxes[i].text[0] = 0;
         G_boxes[i].display[0] = 0;
@@ -723,9 +1123,13 @@ int ktextbox_destroy(ktextbox_handle h)
 
     if (G_focused_idx == h.idx)
         G_focused_idx = -1;
+    if (G_selecting_idx == h.idx)
+        G_selecting_idx = -1;
 
     if (G_boxes[h.idx].text_obj.idx >= 0)
         kgfx_obj_destroy(G_boxes[h.idx].text_obj);
+    if (G_boxes[h.idx].selection_obj.idx >= 0)
+        kgfx_obj_destroy(G_boxes[h.idx].selection_obj);
     if (G_boxes[h.idx].root.idx >= 0)
         kgfx_obj_destroy(G_boxes[h.idx].root);
 
@@ -738,6 +1142,7 @@ void ktextbox_update_all(void)
     kmouse_state mouse = {0};
     uint8_t left_now = 0;
     uint8_t left_pressed = 0;
+    uint8_t left_released = 0;
     uint8_t needs_blink_refresh = 0;
     int hovered_idx = -1;
     int32_t hovered_z = 0;
@@ -753,6 +1158,7 @@ void ktextbox_update_all(void)
 
     left_now = (mouse.buttons & KTEXTBOX_MOUSE_LEFT) ? 1u : 0u;
     left_pressed = left_now && !(G_prev_buttons & KTEXTBOX_MOUSE_LEFT);
+    left_released = !left_now && (G_prev_buttons & KTEXTBOX_MOUSE_LEFT);
 
     for (uint32_t i = 0; i < KTEXTBOX_MAX; ++i)
     {
@@ -786,7 +1192,25 @@ void ktextbox_update_all(void)
     {
         ktextbox_focus_slot(hovered_idx);
         if (hovered_idx >= 0)
-            ktextbox_place_caret_from_mouse(&G_boxes[hovered_idx], &resolved[hovered_idx], mouse.x);
+        {
+            uint8_t extend = ktextbox_shift_down();
+            ktextbox_place_caret_from_mouse(&G_boxes[hovered_idx], &resolved[hovered_idx], mouse.x, extend);
+            G_boxes[hovered_idx].selecting = 1u;
+            G_selecting_idx = hovered_idx;
+        }
+    }
+    else if (left_now && G_selecting_idx >= 0 && G_selecting_idx < KTEXTBOX_MAX &&
+             G_boxes[G_selecting_idx].used && G_boxes[G_selecting_idx].enabled &&
+             G_boxes[G_selecting_idx].selecting)
+    {
+        ktextbox_place_caret_from_mouse(&G_boxes[G_selecting_idx], &resolved[G_selecting_idx], mouse.x, 1u);
+    }
+
+    if (left_released || !left_now)
+    {
+        if (G_selecting_idx >= 0 && G_selecting_idx < KTEXTBOX_MAX)
+            G_boxes[G_selecting_idx].selecting = 0u;
+        G_selecting_idx = -1;
     }
 
     if (G_focused_idx >= 0 && G_focused_idx < KTEXTBOX_MAX && G_boxes[G_focused_idx].used && G_boxes[G_focused_idx].enabled)
@@ -801,36 +1225,53 @@ void ktextbox_update_all(void)
         }
         else
         {
-            if (ktextbox_key_repeat_trigger(KEY_BACKSPACE))
+            if (ctrl)
             {
-                ktextbox_backspace(slot);
-                ktextbox_reset_caret_blink();
-            }
-            if (ktextbox_key_repeat_trigger(KEY_DELETE))
-            {
-                ktextbox_delete(slot);
-                ktextbox_reset_caret_blink();
+                if (kinput_key_pressed(KEY_A))
+                    ktextbox_select_all(slot);
+                if (kinput_key_pressed(KEY_C))
+                    (void)ktextbox_copy_selection_slot(slot);
+                if (kinput_key_pressed(KEY_X))
+                    (void)ktextbox_cut_selection_slot(slot);
+                if (kinput_key_pressed(KEY_V))
+                    (void)ktextbox_paste_slot(slot);
+                if (kinput_key_pressed(KEY_Z))
+                    (void)ktextbox_undo_slot(slot);
+                if (kinput_key_pressed(KEY_Y))
+                    (void)ktextbox_redo_slot(slot);
             }
 
-            if (ktextbox_key_repeat_trigger(KEY_LEFT) && slot->caret > 0)
+            if (!ctrl)
             {
-                slot->caret--;
-                ktextbox_reset_caret_blink();
-            }
-            if (ktextbox_key_repeat_trigger(KEY_RIGHT) && slot->caret < slot->len)
-            {
-                slot->caret++;
-                ktextbox_reset_caret_blink();
-            }
-            if (ktextbox_key_repeat_trigger(KEY_HOME))
-            {
-                slot->caret = 0;
-                ktextbox_reset_caret_blink();
-            }
-            if (ktextbox_key_repeat_trigger(KEY_END))
-            {
-                slot->caret = slot->len;
-                ktextbox_reset_caret_blink();
+                if (ktextbox_key_repeat_trigger(KEY_BACKSPACE))
+                {
+                    ktextbox_backspace(slot);
+                    ktextbox_reset_caret_blink();
+                }
+                if (ktextbox_key_repeat_trigger(KEY_DELETE))
+                {
+                    ktextbox_delete(slot);
+                    ktextbox_reset_caret_blink();
+                }
+
+                if (ktextbox_key_repeat_trigger(KEY_LEFT))
+                {
+                    if (!shift && ktextbox_has_selection(slot))
+                        ktextbox_move_caret(slot, slot->sel_start, 0u);
+                    else if (slot->caret > 0)
+                        ktextbox_move_caret(slot, (uint16_t)(slot->caret - 1u), shift);
+                }
+                if (ktextbox_key_repeat_trigger(KEY_RIGHT))
+                {
+                    if (!shift && ktextbox_has_selection(slot))
+                        ktextbox_move_caret(slot, slot->sel_end, 0u);
+                    else if (slot->caret < slot->len)
+                        ktextbox_move_caret(slot, (uint16_t)(slot->caret + 1u), shift);
+                }
+                if (ktextbox_key_repeat_trigger(KEY_HOME))
+                    ktextbox_move_caret(slot, 0u, shift);
+                if (ktextbox_key_repeat_trigger(KEY_END))
+                    ktextbox_move_caret(slot, slot->len, shift);
             }
 
             if (kinput_key_pressed(KEY_ENTER) || kinput_key_pressed(KEY_KP_ENTER))
@@ -846,17 +1287,6 @@ void ktextbox_update_all(void)
 
             if (slot)
             {
-                if (ctrl && kinput_key_pressed(KEY_V))
-                {
-                    char clip[KTEXTBOX_TEXT_CAP];
-                    uint32_t clip_len = kclipboard_copy_text(clip, sizeof(clip));
-
-                    for (uint32_t i = 0u; i < clip_len; ++i)
-                        ktextbox_insert_char(slot, clip[i]);
-                    if (clip_len > 0u)
-                        ktextbox_reset_caret_blink();
-                }
-
                 if (!ctrl)
                 {
                     for (uint32_t i = 0; i < (uint32_t)(sizeof(G_printable_usages) / sizeof(G_printable_usages[0])); ++i)
@@ -924,8 +1354,12 @@ void ktextbox_set_enabled(ktextbox_handle h, uint8_t enabled)
     G_boxes[h.idx].enabled = enabled;
     if (!G_boxes[h.idx].enabled && G_focused_idx == h.idx)
         G_focused_idx = -1;
+    if (!G_boxes[h.idx].enabled && G_selecting_idx == h.idx)
+        G_selecting_idx = -1;
     G_boxes[h.idx].hovered = 0;
     G_boxes[h.idx].focused = 0;
+    G_boxes[h.idx].selecting = 0u;
+    ktextbox_clear_selection(&G_boxes[h.idx]);
     ktextbox_sync_display(&G_boxes[h.idx]);
 }
 
@@ -1005,7 +1439,12 @@ void ktextbox_set_text(ktextbox_handle h, const char *text)
     G_boxes[h.idx].text[len] = 0;
     G_boxes[h.idx].len = len;
     G_boxes[h.idx].caret = len;
+    G_boxes[h.idx].selection_anchor = len;
+    G_boxes[h.idx].sel_start = len;
+    G_boxes[h.idx].sel_end = len;
     G_boxes[h.idx].view_start = 0;
+    G_boxes[h.idx].undo_count = 0u;
+    G_boxes[h.idx].redo_count = 0u;
     ktextbox_clear_repeat_state();
     ktextbox_reset_caret_blink();
     ktextbox_sync_display(&G_boxes[h.idx]);
@@ -1018,8 +1457,13 @@ void ktextbox_clear(ktextbox_handle h)
 
     G_boxes[h.idx].len = 0;
     G_boxes[h.idx].caret = 0;
+    G_boxes[h.idx].selection_anchor = 0;
+    G_boxes[h.idx].sel_start = 0;
+    G_boxes[h.idx].sel_end = 0;
     G_boxes[h.idx].view_start = 0;
     G_boxes[h.idx].text[0] = 0;
+    G_boxes[h.idx].undo_count = 0u;
+    G_boxes[h.idx].redo_count = 0u;
     ktextbox_sync_display(&G_boxes[h.idx]);
 }
 
@@ -1028,4 +1472,119 @@ const char *ktextbox_text(ktextbox_handle h)
     if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
         return "";
     return G_boxes[h.idx].text;
+}
+
+void ktextbox_select(ktextbox_handle h, uint32_t start, uint32_t end)
+{
+    ktextbox_slot *slot = 0;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return;
+
+    slot = &G_boxes[h.idx];
+    slot->sel_start = ktextbox_clamp_pos(slot, start);
+    slot->sel_end = ktextbox_clamp_pos(slot, end);
+    if (slot->sel_start > slot->sel_end)
+    {
+        uint16_t tmp = slot->sel_start;
+        slot->sel_start = slot->sel_end;
+        slot->sel_end = tmp;
+    }
+    slot->selection_anchor = slot->sel_start;
+    slot->caret = slot->sel_end;
+    ktextbox_reset_caret_blink();
+    ktextbox_sync_display(slot);
+}
+
+int ktextbox_selection(ktextbox_handle h, uint32_t *out_start, uint32_t *out_end)
+{
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used || !out_start || !out_end)
+        return -1;
+
+    *out_start = G_boxes[h.idx].sel_start;
+    *out_end = G_boxes[h.idx].sel_end;
+    return 0;
+}
+
+uint32_t ktextbox_copy_selection(ktextbox_handle h)
+{
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return 0u;
+    return ktextbox_copy_selection_slot(&G_boxes[h.idx]);
+}
+
+uint32_t ktextbox_cut_selection(ktextbox_handle h)
+{
+    uint32_t copied = 0u;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return 0u;
+
+    copied = ktextbox_cut_selection_slot(&G_boxes[h.idx]);
+    ktextbox_sync_display(&G_boxes[h.idx]);
+    return copied;
+}
+
+uint32_t ktextbox_paste(ktextbox_handle h)
+{
+    uint32_t pasted = 0u;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return 0u;
+
+    pasted = ktextbox_paste_slot(&G_boxes[h.idx]);
+    ktextbox_sync_display(&G_boxes[h.idx]);
+    return pasted;
+}
+
+int ktextbox_undo(ktextbox_handle h)
+{
+    int rc = 0;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return -1;
+
+    rc = ktextbox_undo_slot(&G_boxes[h.idx]);
+    ktextbox_sync_display(&G_boxes[h.idx]);
+    return rc;
+}
+
+int ktextbox_redo(ktextbox_handle h)
+{
+    int rc = 0;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return -1;
+
+    rc = ktextbox_redo_slot(&G_boxes[h.idx]);
+    ktextbox_sync_display(&G_boxes[h.idx]);
+    return rc;
+}
+
+void ktextbox_set_max_len(ktextbox_handle h, uint32_t max_len)
+{
+    ktextbox_slot *slot = 0;
+
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return;
+
+    slot = &G_boxes[h.idx];
+    if (max_len == 0u || max_len >= KTEXTBOX_TEXT_CAP)
+        max_len = KTEXTBOX_TEXT_CAP - 1u;
+    slot->max_len = (uint16_t)max_len;
+    if (slot->len > slot->max_len)
+    {
+        slot->len = slot->max_len;
+        slot->text[slot->len] = 0;
+        slot->caret = slot->len;
+        ktextbox_clear_selection(slot);
+    }
+    ktextbox_sync_display(slot);
+}
+
+uint32_t ktextbox_max_len(ktextbox_handle h)
+{
+    if (h.idx < 0 || h.idx >= KTEXTBOX_MAX || !G_boxes[h.idx].used)
+        return 0u;
+    return G_boxes[h.idx].max_len;
 }

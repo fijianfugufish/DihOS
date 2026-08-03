@@ -1,4 +1,5 @@
 #include "kwrappers/kinput.h"
+#include "hyperv/hyperv_input.h"
 #include "i2c/i2c1_hidi2c.h"
 #include "terminal/terminal_api.h"
 #include "usb/usb_hid.h"
@@ -11,6 +12,7 @@ static uint8_t g_usb_kbd_keys[256];
 static kinput_mouse_state g_mouse;
 static uint8_t g_tpd_buttons = 0;
 static uint8_t g_usb_mouse_buttons = 0;
+static uint8_t g_hv_mouse_buttons = 0;
 static int32_t g_tpd_last_x = 0;
 static int32_t g_tpd_last_y = 0;
 static uint8_t g_tpd_have_last = 0;
@@ -1708,9 +1710,13 @@ void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
+    g_mouse.x = 0;
+    g_mouse.y = 0;
+    g_mouse.absolute = 0;
     g_mouse.buttons = 0;
     g_tpd_buttons = 0;
     g_usb_mouse_buttons = 0;
+    g_hv_mouse_buttons = 0;
     g_tpd_synth_buttons = 0u;
     g_tpd_motion_accum_x = 0;
     g_tpd_motion_accum_y = 0;
@@ -1730,6 +1736,9 @@ void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count
     terminal_set_loud();
 
     terminal_flush_log();
+
+    if (hyperv_input_init() != 0)
+        terminal_warn("hypervinput: keyboard unavailable");
 
     /* Also try USB HID.*/
     /* disable for now
@@ -1753,8 +1762,43 @@ void kinput_poll(void)
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
+    g_mouse.absolute = 0;
 
     /* Poll ACPI/I2C HID devices */
+    hyperv_input_poll();
+    merge_key_bitmap(hyperv_input_keyboard_bitmap());
+    {
+        int32_t hv_x = 0;
+        int32_t hv_y = 0;
+        int32_t hv_dx = 0;
+        int32_t hv_dy = 0;
+        int32_t hv_wheel = 0;
+        uint8_t hv_buttons = 0u;
+        uint8_t hv_absolute = 0u;
+
+        if (hyperv_input_mouse_state(&hv_x, &hv_y, &hv_dx, &hv_dy,
+                                     &hv_wheel, &hv_buttons, &hv_absolute) == 0)
+        {
+            if (hv_absolute)
+            {
+                g_mouse.absolute = 1u;
+                g_mouse.x = hv_x;
+                g_mouse.y = hv_y;
+            }
+            else
+            {
+                g_mouse.dx += hv_dx;
+                g_mouse.dy += hv_dy;
+            }
+            g_mouse.wheel += hv_wheel;
+            g_hv_mouse_buttons = hv_buttons;
+        }
+        else
+        {
+            g_hv_mouse_buttons = 0u;
+        }
+    }
+
     i2c1_hidi2c_poll();
 
     kbd = i2c1_hidi2c_keyboard();
@@ -1794,7 +1838,7 @@ void kinput_poll(void)
             parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
     }
 
-    g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_tpd_synth_buttons | g_usb_mouse_buttons);
+    g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_tpd_synth_buttons | g_usb_mouse_buttons | g_hv_mouse_buttons);
     g_tpd_synth_buttons = 0u;
 
     /* debug stuff
@@ -1849,4 +1893,22 @@ void kinput_mouse_consume(kinput_mouse_state *out)
     g_mouse.dx = 0;
     g_mouse.dy = 0;
     g_mouse.wheel = 0;
+}
+
+void kinput_get_device_status(kinput_device_status *out_status)
+{
+    const hidi2c_device *kbd = 0;
+    const hidi2c_device *tpd = 0;
+
+    if (!out_status)
+        return;
+
+    out_status->usb_hid_online = g_usb_ok ? 1u : 0u;
+    out_status->usb_keyboard_present = (g_usb_ok && g_usb.has_keyboard) ? 1u : 0u;
+    out_status->usb_mouse_present = (g_usb_ok && g_usb.has_mouse) ? 1u : 0u;
+
+    kbd = i2c1_hidi2c_keyboard();
+    tpd = i2c1_hidi2c_touchpad();
+    out_status->i2c_keyboard_online = (kbd && kbd->online) ? 1u : 0u;
+    out_status->i2c_touchpad_online = (tpd && tpd->online) ? 1u : 0u;
 }

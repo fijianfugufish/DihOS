@@ -38,6 +38,24 @@ extern "C"
         char message[128];
     } sacx_task_status;
 
+    typedef struct sacx_task_info
+    {
+        uint32_t task_id;
+        uint32_t state;
+        uint32_t state_age;
+        int32_t exit_status;
+        uint64_t wake_tick;
+        uint32_t arena_size;
+        uint32_t image_size;
+        uint32_t loaded_arch;
+        uint32_t window_count;
+        uint32_t gfx_count;
+        uint32_t image_count;
+        uint32_t preemptions;
+        char friendly_path[128];
+        char message[128];
+    } sacx_task_info;
+
     int sacx_runtime_init(const struct kfont *font);
     void sacx_runtime_set_font(const struct kfont *font);
     void sacx_runtime_update(void);
@@ -59,6 +77,7 @@ extern "C"
                                   uint32_t *out_task_id);
 
     int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_status);
+    uint32_t sacx_runtime_task_snapshot(sacx_task_info *out_items, uint32_t max_items);
     int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message);
     int sacx_runtime_task_release(uint32_t task_id);
 

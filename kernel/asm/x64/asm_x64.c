@@ -79,4 +79,38 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
     return -1;
 }
 
+int asm_aa64_try_hvc(uint32_t immediate,
+                     uint64_t *x0,
+                     uint64_t *x1,
+                     uint64_t *x2,
+                     uint64_t *x3,
+                     uint64_t *out_esr)
+{
+    (void)immediate;
+    (void)x0;
+    (void)x1;
+    (void)x2;
+    (void)x3;
+    if (out_esr)
+        *out_esr = 0u;
+    return -1;
+}
+
+int asm_aa64_try_smc(uint32_t immediate,
+                     uint64_t *x0,
+                     uint64_t *x1,
+                     uint64_t *x2,
+                     uint64_t *x3,
+                     uint64_t *out_esr)
+{
+    (void)immediate;
+    (void)x0;
+    (void)x1;
+    (void)x2;
+    (void)x3;
+    if (out_esr)
+        *out_esr = 0u;
+    return -1;
+}
+
 #endif

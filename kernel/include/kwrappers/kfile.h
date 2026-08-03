@@ -37,6 +37,8 @@ typedef struct
 int kfile_bind_blockdev(void *blockdev_ptr);
 int kfile_mount0(void);
 int kfile_umount0(void);
+int kfile_storage_writable(void);
+int kfile_last_result(void);
 
 int kfile_open(KFile *f, const char *path, uint32_t flags);
 int kfile_read(KFile *f, void *buf, uint32_t n, uint32_t *out_read);

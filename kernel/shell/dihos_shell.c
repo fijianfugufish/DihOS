@@ -91,7 +91,7 @@ typedef struct
     char prompt[DIHOS_SHELL_PROMPT_CAP];
     char history[DIHOS_SHELL_HISTORY_MAX][DIHOS_SHELL_HISTORY_ENTRY_CAP];
     char history_draft[DIHOS_SHELL_HISTORY_ENTRY_CAP];
-    uint8_t history_count;
+    uint16_t history_count;
     int history_browse_index;
 } dihos_shell_state;
 
@@ -196,6 +196,7 @@ static int dihos_cmd_file_strings(dihos_shell_stage *stage);
 static int dihos_cmd_test_assert(dihos_shell_stage *stage);
 static int dihos_cmd_test_assert_eq(dihos_shell_stage *stage);
 static int dihos_cmd_test_fail(dihos_shell_stage *stage);
+static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
 static int dihos_shell_fallback_available(const char *name, char *friendly, char *raw);
 
@@ -283,6 +284,8 @@ static const dihos_shell_command G_commands[] = {
     {"assert", "assert exists|isfile|isdir PATH", "Fail if a simple condition is false.", 0u, dihos_cmd_test_assert},
     {"assert_eq", "assert_eq [lhs] [rhs]", "Fail if two values differ.", 0u, dihos_cmd_test_assert_eq},
     {"fail", "fail [message...]", "Return failure for tests.", 0u, dihos_cmd_test_fail},
+    {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
+    {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
     {"hw", "hw acpi|touchpad|gpio ...", "Hardware command group.", 0u, dihos_cmd_hw_group},
 };
@@ -4431,6 +4434,24 @@ static int dihos_cmd_test_fail(dihos_shell_stage *stage)
     else
         terminal_error("fail");
     return -1;
+}
+
+static int dihos_cmd_demo_installfx(dihos_shell_stage *stage)
+{
+    uint32_t flags = 0u;
+
+    if (dihos_is_yes(dihos_stage_named(stage, "fullscreen")) ||
+        (stage->positional_count > 0u && strcmp(stage->positional[0], "fullscreen") == 0))
+    {
+        flags |= TERMINAL_VISUAL_FLAG_FULLSCREEN;
+    }
+
+    if (terminal_demo_installfx_start(flags) != 0)
+    {
+        terminal_error("installfx demo could not start");
+        return -1;
+    }
+    return 0;
 }
 
 static dihos_shell_session *dihos_shell_enter(dihos_shell_session *session)

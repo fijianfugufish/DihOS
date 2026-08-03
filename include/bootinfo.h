@@ -76,6 +76,11 @@ typedef struct
         uint64_t size_bytes;
     } wifi_fw[BOOTINFO_WIFI_FW_MAX];
 
+    uint64_t boot_volume_base_phys;  /* optional UEFI boot block device snapshot */
+    uint64_t boot_volume_size_bytes;
+    uint32_t boot_volume_sector_size;
+    uint32_t boot_volume_source; /* 1 = UEFI Block I/O snapshot */
+
     uint32_t stage2_report_len; /* bytes used in stage2_report[] (ASCII, NUL-terminated when possible) */
     char stage2_report[BOOTINFO_STAGE2_REPORT_MAX];
 } boot_info;

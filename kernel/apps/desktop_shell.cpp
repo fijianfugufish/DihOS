@@ -1,5 +1,6 @@
 #include "apps/desktop_shell_api.h"
 #include "apps/file_explorer_api.h"
+#include "apps/task_manager_api.h"
 #include "apps/text_editor_api.h"
 #include "terminal/terminal_api.h"
 
@@ -7,6 +8,7 @@ extern "C"
 {
 #include "kwrappers/colors.h"
 #include "kwrappers/kbutton.h"
+#include "kwrappers/kfile.h"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/kimg.h"
 #include "kwrappers/ktext.h"
@@ -17,6 +19,8 @@ extern "C"
 namespace
 {
     static const char *kWallpaperPath = "0:/OS/System/Images/bgpaper.jpg";
+    static const char *kWallpaperFallbackA = "0:/OS/System/Images/wallpaper.jpg";
+    static const char *kWallpaperFallbackB = "0:/OS/System/Images/bgpaper.bmp";
 
     static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
     {
@@ -54,6 +58,44 @@ namespace
         return -1;
     }
 
+    static int try_load_wallpaper(kimg *out, const char *path)
+    {
+        KFile probe;
+
+        if (!out || !path)
+            return -1;
+
+        terminal_print_inline("desktop: wallpaper try ");
+        terminal_print(path);
+
+        if (kfile_open(&probe, path, KFILE_READ) == 0)
+        {
+            terminal_print_inline("desktop: wallpaper file size=");
+            terminal_print_inline_hex64(kfile_size(&probe));
+            terminal_print("");
+            kfile_close(&probe);
+        }
+        else
+        {
+            terminal_print_inline("desktop: wallpaper open failed rc=");
+            terminal_print_inline_hex32((uint32_t)kfile_last_result());
+            terminal_print("");
+        }
+
+        if (kimg_load(out, path) == 0)
+        {
+            terminal_print_inline("desktop: wallpaper loaded w=");
+            terminal_print_inline_hex32(out->w);
+            terminal_print_inline(" h=");
+            terminal_print_inline_hex32(out->h);
+            terminal_print("");
+            return 0;
+        }
+
+        terminal_warn("desktop: wallpaper path failed");
+        return -1;
+    }
+
     class DesktopShell
     {
     public:
@@ -82,6 +124,7 @@ namespace
         static void TerminalClickThunk(kbutton_handle button, void *user);
         static void ExplorerClickThunk(kbutton_handle button, void *user);
         static void EditorClickThunk(kbutton_handle button, void *user);
+        static void TaskManagerClickThunk(kbutton_handle button, void *user);
 
     private:
         uint8_t initialized_;
@@ -96,9 +139,11 @@ namespace
         AppButton terminal_button_;
         AppButton explorer_button_;
         AppButton editor_button_;
+        AppButton task_manager_button_;
         uint8_t terminal_active_;
         uint8_t explorer_active_;
         uint8_t editor_active_;
+        uint8_t task_manager_active_;
         kbutton_style button_style_;
         kbutton_style active_style_;
     };
@@ -137,9 +182,16 @@ namespace
         editor_button_.label.idx = -1;
         editor_button_.icon_loaded = 0u;
         kimg_zero(&editor_button_.icon);
+        task_manager_button_.button.idx = -1;
+        task_manager_button_.icon_image.idx = -1;
+        task_manager_button_.icon_fallback.idx = -1;
+        task_manager_button_.label.idx = -1;
+        task_manager_button_.icon_loaded = 0u;
+        kimg_zero(&task_manager_button_.icon);
         terminal_active_ = 0xFFu;
         explorer_active_ = 0xFFu;
         editor_active_ = 0xFFu;
+        task_manager_active_ = 0xFFu;
 
         button_style_ = kbutton_style_default();
         button_style_.fill = rgb(28, 33, 45);
@@ -169,9 +221,16 @@ namespace
         kgfx_obj_ref(wallpaper_frame_)->outline_width = 0u;
         kgfx_obj_ref(wallpaper_frame_)->alpha = 255u;
 
-        if (kimg_load(&wallpaper_, kWallpaperPath) == 0)
+        if (try_load_wallpaper(&wallpaper_, kWallpaperPath) != 0 &&
+            try_load_wallpaper(&wallpaper_, kWallpaperFallbackA) != 0 &&
+            try_load_wallpaper(&wallpaper_, kWallpaperFallbackB) != 0)
+        {
+            terminal_warn("desktop: wallpaper load failed");
+        }
+        else
         {
             wallpaper_loaded_ = 1u;
+            terminal_success("desktop: wallpaper ready");
             wallpaper_image_ = kgfx_obj_add_image(wallpaper_.px, wallpaper_.w, wallpaper_.h, 0, 0, wallpaper_.w);
             kgfx_obj_set_parent(wallpaper_image_, wallpaper_frame_);
             kgfx_obj_set_clip_to_parent(wallpaper_image_, 1u);
@@ -190,22 +249,27 @@ namespace
         terminal_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, TerminalClickThunk, this);
         explorer_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, ExplorerClickThunk, this);
         editor_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, EditorClickThunk, this);
+        task_manager_button_.button = kbutton_add_rect(0, 0, 72, 48, 181, &button_style_, TaskManagerClickThunk, this);
 
         kgfx_obj_set_parent(kbutton_root(terminal_button_.button), taskbar_);
         kgfx_obj_set_parent(kbutton_root(explorer_button_.button), taskbar_);
         kgfx_obj_set_parent(kbutton_root(editor_button_.button), taskbar_);
+        kgfx_obj_set_parent(kbutton_root(task_manager_button_.button), taskbar_);
         kgfx_obj_set_clip_to_parent(kbutton_root(terminal_button_.button), 1u);
         kgfx_obj_set_clip_to_parent(kbutton_root(explorer_button_.button), 1u);
         kgfx_obj_set_clip_to_parent(kbutton_root(editor_button_.button), 1u);
+        kgfx_obj_set_clip_to_parent(kbutton_root(task_manager_button_.button), 1u);
 
         if (font_)
         {
-            terminal_button_.icon_fallback = kgfx_obj_add_text(font_, ">", 0, 0, 1, rgb(224, 238, 248), 255, 2u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-            terminal_button_.label = kgfx_obj_add_text(font_, "Terminal", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-            explorer_button_.icon_fallback = kgfx_obj_add_text(font_, "F", 0, 0, 1, rgb(224, 238, 248), 255, 2u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-            explorer_button_.label = kgfx_obj_add_text(font_, "Files", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-            editor_button_.icon_fallback = kgfx_obj_add_text(font_, "N", 0, 0, 1, rgb(224, 238, 248), 255, 2u, 0, 0, KTEXT_ALIGN_CENTER, 1);
-            editor_button_.label = kgfx_obj_add_text(font_, "Notes", 0, 0, 1, rgb(228, 236, 245), 255, 1u, 0, 0, KTEXT_ALIGN_CENTER, 1);
+            terminal_button_.icon_fallback = kgfx_obj_add_text(font_, ">", 0, 0, 1, rgb(224, 238, 248), 255, kwindow_ui_text_scale(2u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            terminal_button_.label = kgfx_obj_add_text(font_, "Terminal", 0, 0, 1, rgb(228, 236, 245), 255, kwindow_ui_text_scale(1u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            explorer_button_.icon_fallback = kgfx_obj_add_text(font_, "F", 0, 0, 1, rgb(224, 238, 248), 255, kwindow_ui_text_scale(2u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            explorer_button_.label = kgfx_obj_add_text(font_, "Files", 0, 0, 1, rgb(228, 236, 245), 255, kwindow_ui_text_scale(1u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            editor_button_.icon_fallback = kgfx_obj_add_text(font_, "N", 0, 0, 1, rgb(224, 238, 248), 255, kwindow_ui_text_scale(2u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            editor_button_.label = kgfx_obj_add_text(font_, "Notes", 0, 0, 1, rgb(228, 236, 245), 255, kwindow_ui_text_scale(1u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            task_manager_button_.icon_fallback = kgfx_obj_add_text(font_, "T", 0, 0, 1, rgb(224, 238, 248), 255, kwindow_ui_text_scale(2u), 0, 0, KTEXT_ALIGN_CENTER, 1);
+            task_manager_button_.label = kgfx_obj_add_text(font_, "Tasks", 0, 0, 1, rgb(228, 236, 245), 255, kwindow_ui_text_scale(1u), 0, 0, KTEXT_ALIGN_CENTER, 1);
 
             kgfx_obj_set_parent(terminal_button_.icon_fallback, kbutton_root(terminal_button_.button));
             kgfx_obj_set_parent(terminal_button_.label, kbutton_root(terminal_button_.button));
@@ -213,12 +277,16 @@ namespace
             kgfx_obj_set_parent(explorer_button_.label, kbutton_root(explorer_button_.button));
             kgfx_obj_set_parent(editor_button_.icon_fallback, kbutton_root(editor_button_.button));
             kgfx_obj_set_parent(editor_button_.label, kbutton_root(editor_button_.button));
+            kgfx_obj_set_parent(task_manager_button_.icon_fallback, kbutton_root(task_manager_button_.button));
+            kgfx_obj_set_parent(task_manager_button_.label, kbutton_root(task_manager_button_.button));
             kgfx_obj_set_clip_to_parent(terminal_button_.icon_fallback, 1u);
             kgfx_obj_set_clip_to_parent(terminal_button_.label, 1u);
             kgfx_obj_set_clip_to_parent(explorer_button_.icon_fallback, 1u);
             kgfx_obj_set_clip_to_parent(explorer_button_.label, 1u);
             kgfx_obj_set_clip_to_parent(editor_button_.icon_fallback, 1u);
             kgfx_obj_set_clip_to_parent(editor_button_.label, 1u);
+            kgfx_obj_set_clip_to_parent(task_manager_button_.icon_fallback, 1u);
+            kgfx_obj_set_clip_to_parent(task_manager_button_.label, 1u);
         }
 
         if (load_first_bmp(&terminal_button_.icon,
@@ -259,6 +327,19 @@ namespace
             kgfx_image_set_sample_mode(editor_button_.icon_image, KGFX_IMAGE_SAMPLE_NEAREST);
             kgfx_obj_ref(editor_button_.icon_image)->z = 1;
         }
+
+        if (load_first_bmp(&task_manager_button_.icon,
+                           "0:/OS/System/Images/Taskbar/task_manager.bmp",
+                           "0:/OS/System/Images/Apps/task_manager.bmp",
+                           0) == 0)
+        {
+            task_manager_button_.icon_loaded = 1u;
+            task_manager_button_.icon_image = kgfx_obj_add_image(task_manager_button_.icon.px, task_manager_button_.icon.w, task_manager_button_.icon.h, 0, 0, task_manager_button_.icon.w);
+            kgfx_obj_set_parent(task_manager_button_.icon_image, kbutton_root(task_manager_button_.button));
+            kgfx_obj_set_clip_to_parent(task_manager_button_.icon_image, 1u);
+            kgfx_image_set_sample_mode(task_manager_button_.icon_image, KGFX_IMAGE_SAMPLE_NEAREST);
+            kgfx_obj_ref(task_manager_button_.icon_image)->z = 1;
+        }
     }
 
     void DesktopShell::SetObjectVisible(kgfx_obj_handle handle, uint8_t visible)
@@ -272,11 +353,15 @@ namespace
                                     const char *label_text, const char *fallback_text)
     {
         kgfx_obj *root = kgfx_obj_ref(kbutton_root(button.button));
-        uint32_t label_h = (font_ && button.label.idx >= 0) ? ktext_scale_mul_px(font_->h, 1u) : 0u;
-        uint32_t fallback_h = (font_ && button.icon_fallback.idx >= 0) ? ktext_scale_mul_px(font_->h, 2u) : 0u;
-        int32_t icon_area_top = 6;
-        int32_t icon_area_bottom = (int32_t)h - 6 - (int32_t)label_h;
+        uint32_t label_scale = kwindow_ui_text_scale(1u);
+        uint32_t fallback_scale = kwindow_ui_text_scale(2u);
+        uint32_t label_h = (font_ && button.label.idx >= 0) ? ktext_scale_mul_px(font_->h, label_scale) : 0u;
+        uint32_t fallback_h = (font_ && button.icon_fallback.idx >= 0) ? ktext_scale_mul_px(font_->h, fallback_scale) : 0u;
+        int32_t inset = kwindow_ui_scale_i32(6);
+        int32_t icon_area_top = inset;
+        int32_t icon_area_bottom = (int32_t)h - inset - (int32_t)label_h;
         int32_t icon_area_h = icon_area_bottom - icon_area_top;
+        uint8_t show_icon = 1u;
 
         (void)label_text;
         (void)fallback_text;
@@ -289,17 +374,25 @@ namespace
         root->u.rect.w = w;
         root->u.rect.h = h;
 
+        if (inset < 2)
+            inset = 2;
+        if (icon_area_h < (int32_t)(fallback_h + inset))
+            show_icon = 0u;
+
         if (button.label.idx >= 0 && font_)
         {
             kgfx_obj *label = kgfx_obj_ref(button.label);
             if (label && label->kind == KGFX_OBJ_TEXT)
             {
+                label->u.text.scale = label_scale;
                 label->u.text.x = (int32_t)w / 2;
-                label->u.text.y = (int32_t)h - (int32_t)label_h - 5;
+                label->u.text.y = show_icon
+                                      ? ((int32_t)h - (int32_t)label_h - kwindow_ui_scale_i32(5))
+                                      : ((h > label_h) ? ((int32_t)(h - label_h) / 2) : 0);
             }
         }
 
-        if (button.icon_loaded && button.icon_image.idx >= 0)
+        if (show_icon && button.icon_loaded && button.icon_image.idx >= 0)
         {
             kgfx_obj *image = kgfx_obj_ref(button.icon_image);
             uint32_t draw_w = button.icon.w;
@@ -333,18 +426,19 @@ namespace
             }
         }
 
-        if (button.icon_fallback.idx >= 0 && font_)
+        if (show_icon && button.icon_fallback.idx >= 0 && font_)
         {
             kgfx_obj *fallback = kgfx_obj_ref(button.icon_fallback);
             if (fallback && fallback->kind == KGFX_OBJ_TEXT)
             {
+                fallback->u.text.scale = fallback_scale;
                 fallback->u.text.x = (int32_t)w / 2;
                 fallback->u.text.y = icon_area_top + (icon_area_h - (int32_t)fallback_h) / 2;
             }
         }
 
-        SetObjectVisible(button.icon_image, button.icon_loaded ? 1u : 0u);
-        SetObjectVisible(button.icon_fallback, button.icon_loaded ? 0u : 1u);
+        SetObjectVisible(button.icon_image, (show_icon && button.icon_loaded) ? 1u : 0u);
+        SetObjectVisible(button.icon_fallback, (show_icon && !button.icon_loaded) ? 1u : 0u);
     }
 
     void DesktopShell::Layout(void)
@@ -352,14 +446,27 @@ namespace
         const kfb *fb = kgfx_info();
         uint32_t screen_w = 0u;
         uint32_t screen_h = 0u;
-        uint32_t bar_h = 58u;
-        uint32_t button_w = 88u;
-        uint32_t button_h = 46u;
-        int32_t button_y = 6;
-        int32_t gap = 10;
+        uint32_t bar_h = kwindow_ui_scale_u32(58u);
+        uint32_t button_w = kwindow_ui_scale_u32(88u);
+        uint32_t button_h = kwindow_ui_scale_u32(46u);
+        int32_t button_y = kwindow_ui_scale_i32(6);
+        int32_t gap = kwindow_ui_scale_i32(10);
+        int32_t button_x = kwindow_ui_scale_i32(10);
 
         if (!fb)
             return;
+        if (bar_h < 24u)
+            bar_h = 24u;
+        if (button_w < 32u)
+            button_w = 32u;
+        if (button_h < 20u)
+            button_h = 20u;
+        if (button_y < 2)
+            button_y = 2;
+        if (gap < 2)
+            gap = 2;
+        if (button_x < 2)
+            button_x = 2;
 
         screen_w = fb->width;
         screen_h = fb->height;
@@ -409,9 +516,10 @@ namespace
             kgfx_obj_ref(taskbar_)->u.rect.h = bar_h;
         }
 
-        LayoutButton(terminal_button_, 10, button_y, button_w, button_h, "Terminal", ">");
-        LayoutButton(explorer_button_, 10 + (int32_t)button_w + gap, button_y, button_w, button_h, "Files", "F");
-        LayoutButton(editor_button_, 10 + (int32_t)(button_w + gap) * 2, button_y, button_w, button_h, "Notes", "N");
+        LayoutButton(terminal_button_, button_x, button_y, button_w, button_h, "Terminal", ">");
+        LayoutButton(explorer_button_, button_x + (int32_t)button_w + gap, button_y, button_w, button_h, "Files", "F");
+        LayoutButton(editor_button_, button_x + (int32_t)(button_w + gap) * 2, button_y, button_w, button_h, "Notes", "N");
+        LayoutButton(task_manager_button_, button_x + (int32_t)(button_w + gap) * 3, button_y, button_w, button_h, "Tasks", "T");
     }
 
     void DesktopShell::UpdateButtonStyles(void)
@@ -419,6 +527,7 @@ namespace
         uint8_t terminal_active = terminal_visible() ? 1u : 0u;
         uint8_t explorer_active = file_explorer_visible() ? 1u : 0u;
         uint8_t editor_active = text_editor_visible() ? 1u : 0u;
+        uint8_t task_manager_active = task_manager_visible() ? 1u : 0u;
 
         if (terminal_active_ != terminal_active)
         {
@@ -436,6 +545,12 @@ namespace
         {
             editor_active_ = editor_active;
             kbutton_set_style(editor_button_.button, editor_active ? &active_style_ : &button_style_);
+        }
+
+        if (task_manager_active_ != task_manager_active)
+        {
+            task_manager_active_ = task_manager_active;
+            kbutton_set_style(task_manager_button_.button, task_manager_active ? &active_style_ : &button_style_);
         }
     }
 
@@ -471,6 +586,13 @@ namespace
         (void)button;
         (void)user;
         text_editor_activate();
+    }
+
+    void DesktopShell::TaskManagerClickThunk(kbutton_handle button, void *user)
+    {
+        (void)button;
+        (void)user;
+        task_manager_activate();
     }
 }
 

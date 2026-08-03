@@ -14,6 +14,9 @@
 #define KWINDOW_RESIZE_TOP 0x04u
 #define KWINDOW_RESIZE_BOTTOM 0x08u
 #define KWINDOW_TITLE_CAP 128u
+#define KWINDOW_DESIGN_W 1920u
+#define KWINDOW_DESIGN_H 1080u
+#define KWINDOW_SCALE_ONE 1024u
 
 typedef struct
 {
@@ -40,6 +43,8 @@ typedef struct
     uint8_t fullscreen;
     uint8_t close_deferred;
     uint8_t close_requested;
+    int16_t modal_parent_idx;
+    int16_t modal_child_idx;
     kgfx_obj_handle root;
     kgfx_obj_handle titlebar;
     kgfx_obj_handle title_text;
@@ -56,11 +61,129 @@ typedef struct
 } kwindow_slot;
 
 static kwindow_slot G_windows[KWINDOW_MAX];
+static uint16_t G_window_generation[KWINDOW_MAX];
 static uint8_t G_prev_buttons = 0;
 static int32_t G_prev_mouse_x = 0;
 static int32_t G_prev_mouse_y = 0;
 static uint8_t G_prev_mouse_valid = 0;
 static uint32_t G_work_area_bottom_inset = 0;
+
+static int kwindow_handle_valid(kwindow_handle h)
+{
+    if (h.idx < 0 || h.idx >= KWINDOW_MAX)
+        return 0;
+    if (!G_windows[h.idx].used)
+        return 0;
+    return h.generation == G_window_generation[h.idx];
+}
+
+static uint32_t kwindow_scale_apply_u32(uint32_t px, uint32_t scale_fp)
+{
+    uint64_t value = (uint64_t)px * (uint64_t)scale_fp;
+    uint32_t scaled = (uint32_t)((value + (KWINDOW_SCALE_ONE / 2u)) / KWINDOW_SCALE_ONE);
+    if (px && !scaled)
+        scaled = 1u;
+    return scaled;
+}
+
+static int32_t kwindow_scale_apply_i32(int32_t px, uint32_t scale_fp)
+{
+    int negative = px < 0;
+    uint32_t magnitude = negative ? (uint32_t)(-px) : (uint32_t)px;
+    uint32_t scaled = kwindow_scale_apply_u32(magnitude, scale_fp);
+    return negative ? -(int32_t)scaled : (int32_t)scaled;
+}
+
+uint32_t kwindow_ui_scale_fp(void)
+{
+    const kfb *fb = kgfx_info();
+    uint64_t sx;
+    uint64_t sy;
+    uint32_t scale;
+
+    if (!fb || !fb->width || !fb->height)
+        return KWINDOW_SCALE_ONE;
+
+    sx = ((uint64_t)fb->width * KWINDOW_SCALE_ONE) / KWINDOW_DESIGN_W;
+    sy = ((uint64_t)fb->height * KWINDOW_SCALE_ONE) / KWINDOW_DESIGN_H;
+    scale = (uint32_t)(sx < sy ? sx : sy);
+    if (scale < 256u)
+        scale = 256u;
+    if (scale > 2048u)
+        scale = 2048u;
+    return scale;
+}
+
+uint32_t kwindow_ui_scale_u32(uint32_t px)
+{
+    return kwindow_scale_apply_u32(px, kwindow_ui_scale_fp());
+}
+
+int32_t kwindow_ui_scale_i32(int32_t px)
+{
+    return kwindow_scale_apply_i32(px, kwindow_ui_scale_fp());
+}
+
+static uint32_t kwindow_scale_text_scale(uint32_t scale, uint32_t scale_fp)
+{
+    uint64_t base_fp;
+    uint64_t scaled_fp;
+
+    if (scale == 0u)
+        scale = 1u;
+
+    if (scale & KTEXT_SCALE_FP_FLAG)
+        base_fp = (uint64_t)(scale & KTEXT_SCALE_FP_MASK);
+    else
+        base_fp = ((10ull + (uint64_t)(scale - 1u)) * KTEXT_SCALE_FP_ONE + 5u) / 10u;
+
+    scaled_fp = (base_fp * (uint64_t)scale_fp + (KWINDOW_SCALE_ONE / 2u)) / KWINDOW_SCALE_ONE;
+    if (scaled_fp < 256u)
+        scaled_fp = 256u;
+    if (scaled_fp > KTEXT_SCALE_FP_MASK)
+        scaled_fp = KTEXT_SCALE_FP_MASK;
+    return ktext_scale_from_fp((uint32_t)scaled_fp);
+}
+
+uint32_t kwindow_ui_text_scale(uint32_t base_scale)
+{
+    return kwindow_scale_text_scale(base_scale ? base_scale : 1u, kwindow_ui_scale_fp());
+}
+
+static void kwindow_scale_button_style(kbutton_style *style, uint32_t scale_fp)
+{
+    if (!style)
+        return;
+    if (style->outline_width == 0u)
+        return;
+    style->outline_width = (uint16_t)kwindow_scale_apply_u32(style->outline_width, scale_fp);
+    if (style->outline_width == 0u)
+        style->outline_width = 1u;
+}
+
+static void kwindow_scale_style(kwindow_style *style, uint32_t scale_fp)
+{
+    uint32_t min_title = 24u;
+
+    if (!style || scale_fp == KWINDOW_SCALE_ONE)
+        return;
+
+    style->body_outline_width = (uint16_t)kwindow_scale_apply_u32(style->body_outline_width, scale_fp);
+    if (style->body_outline_width == 0u)
+        style->body_outline_width = 1u;
+    style->titlebar_height = kwindow_scale_apply_u32(style->titlebar_height, scale_fp);
+    if (style->titlebar_height < min_title)
+        style->titlebar_height = min_title;
+    style->close_button_width = kwindow_scale_apply_u32(style->close_button_width, scale_fp);
+    style->close_button_height = kwindow_scale_apply_u32(style->close_button_height, scale_fp);
+    style->fullscreen_button_width = kwindow_scale_apply_u32(style->fullscreen_button_width, scale_fp);
+    style->fullscreen_button_height = kwindow_scale_apply_u32(style->fullscreen_button_height, scale_fp);
+    style->title_scale = kwindow_scale_text_scale(style->title_scale, scale_fp);
+    style->close_glyph_scale = kwindow_scale_text_scale(style->close_glyph_scale, scale_fp);
+    style->fullscreen_glyph_scale = kwindow_scale_text_scale(style->fullscreen_glyph_scale, scale_fp);
+    kwindow_scale_button_style(&style->close_button_style, scale_fp);
+    kwindow_scale_button_style(&style->fullscreen_button_style, scale_fp);
+}
 
 static inline int32_t kwindow_max_i32(int32_t a, int32_t b)
 {
@@ -383,6 +506,7 @@ static int kwindow_resolve_obj(kgfx_obj_handle h, kwindow_resolved_rect *out, ui
         return 1;
 
     parent_handle.idx = (int)o->parent_idx;
+    parent_handle.generation = o->parent_generation;
     if (!kgfx_obj_ref(parent_handle) || !kgfx_obj_ref(parent_handle)->visible)
         return 0;
     if (!kwindow_resolve_obj(parent_handle, &parent, depth + 1u))
@@ -438,6 +562,7 @@ static kgfx_obj_handle kwindow_top_ancestor(kgfx_obj_handle h)
     while (obj && obj->parent_idx >= 0)
     {
         h.idx = (int)obj->parent_idx;
+        h.generation = obj->parent_generation;
         obj = kgfx_obj_ref(h);
     }
 
@@ -475,10 +600,64 @@ static int kwindow_top_window_at_point(int32_t x, int32_t y, kwindow_handle *out
         return 0;
 
     if (out_window)
+    {
         out_window->idx = best_idx;
+        out_window->generation = G_window_generation[best_idx];
+    }
     if (out_z)
         *out_z = best_z;
     return 1;
+}
+
+static int kwindow_active_modal_child_idx(int parent_idx)
+{
+    int child_idx = -1;
+
+    if (parent_idx < 0 || parent_idx >= KWINDOW_MAX || !G_windows[parent_idx].used)
+        return -1;
+
+    child_idx = G_windows[parent_idx].modal_child_idx;
+    if (child_idx < 0 || child_idx >= KWINDOW_MAX)
+        return -1;
+    if (!G_windows[child_idx].used || !G_windows[child_idx].visible)
+        return -1;
+
+    return child_idx;
+}
+
+static int kwindow_idx_for_root(kgfx_obj_handle root)
+{
+    for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
+        if (G_windows[i].used &&
+            G_windows[i].root.idx == root.idx &&
+            G_windows[i].root.generation == root.generation)
+            return (int)i;
+    }
+
+    return -1;
+}
+
+static void kwindow_clear_modal_refs_for_idx(int idx)
+{
+    int child_idx = -1;
+    int parent_idx = -1;
+
+    if (idx < 0 || idx >= KWINDOW_MAX)
+        return;
+
+    child_idx = G_windows[idx].modal_child_idx;
+    if (child_idx >= 0 && child_idx < KWINDOW_MAX && G_windows[child_idx].used &&
+        G_windows[child_idx].modal_parent_idx == idx)
+        G_windows[child_idx].modal_parent_idx = -1;
+
+    parent_idx = G_windows[idx].modal_parent_idx;
+    if (parent_idx >= 0 && parent_idx < KWINDOW_MAX && G_windows[parent_idx].used &&
+        G_windows[parent_idx].modal_child_idx == idx)
+        G_windows[parent_idx].modal_child_idx = -1;
+
+    G_windows[idx].modal_child_idx = -1;
+    G_windows[idx].modal_parent_idx = -1;
 }
 
 static uint8_t kwindow_hit_resize_edges(const kwindow_resolved_rect *r, int32_t x, int32_t y, uint16_t outline_width)
@@ -688,7 +867,12 @@ static void kwindow_fullscreen_click(kbutton_handle button, void *user)
 void kwindow_init(void)
 {
     for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
+    {
         G_windows[i] = (kwindow_slot){0};
+        G_window_generation[i] = 0u;
+        G_windows[i].modal_parent_idx = -1;
+        G_windows[i].modal_child_idx = -1;
+    }
     G_prev_buttons = 0;
     G_prev_mouse_x = 0;
     G_prev_mouse_y = 0;
@@ -703,14 +887,52 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
     kwindow_handle handle = {-1};
     kwindow_style resolved_style = kwindow_style_default();
     const char *resolved_title = title ? title : "Window";
+    uint32_t scale_fp = kwindow_ui_scale_fp();
 
     if (style)
         resolved_style = *style;
+    kwindow_scale_style(&resolved_style, scale_fp);
+    x = kwindow_scale_apply_i32(x, scale_fp);
+    y = kwindow_scale_apply_i32(y, scale_fp);
+    w = kwindow_scale_apply_u32(w, scale_fp);
+    h = kwindow_scale_apply_u32(h, scale_fp);
 
     if (w < kwindow_min_width_for_style(&resolved_style))
         w = kwindow_min_width_for_style(&resolved_style);
     if (h < kwindow_min_height_for_style(&resolved_style))
         h = kwindow_min_height_for_style(&resolved_style);
+    {
+        const kfb *fb = kgfx_info();
+        uint32_t usable_w = (fb && fb->width > 16u) ? fb->width - 16u : (fb ? fb->width : 0u);
+        uint32_t usable_h = (fb && fb->height > 16u + G_work_area_bottom_inset)
+                                ? fb->height - 16u - G_work_area_bottom_inset
+                                : (fb ? fb->height : 0u);
+
+        if (usable_w && w > usable_w)
+            w = usable_w;
+        if (usable_h && h > usable_h)
+            h = usable_h;
+        if (fb && fb->width)
+        {
+            int32_t max_x = (int32_t)fb->width - (int32_t)w - 8;
+            if (max_x < 0)
+                max_x = 0;
+            if (x < 8)
+                x = 8;
+            if (x > max_x)
+                x = max_x;
+        }
+        if (fb && fb->height)
+        {
+            int32_t max_y = (int32_t)fb->height - (int32_t)G_work_area_bottom_inset - (int32_t)h - 8;
+            if (max_y < 0)
+                max_y = 0;
+            if (y < 8)
+                y = 8;
+            if (y > max_y)
+                y = max_y;
+        }
+    }
     for (uint32_t i = 0; i < KWINDOW_MAX; ++i)
     {
         kgfx_obj *root_obj = 0;
@@ -728,12 +950,18 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
         if (G_windows[i].used)
             continue;
 
+        ++G_window_generation[i];
+        if (!G_window_generation[i])
+            G_window_generation[i] = 1u;
+
         G_windows[i] = (kwindow_slot){0};
         G_windows[i].root.idx = -1;
         G_windows[i].titlebar.idx = -1;
         G_windows[i].title_text.idx = -1;
         G_windows[i].close_text.idx = -1;
         G_windows[i].fullscreen_text.idx = -1;
+        G_windows[i].modal_parent_idx = -1;
+        G_windows[i].modal_child_idx = -1;
         G_windows[i].close_button.idx = -1;
         G_windows[i].fullscreen_button.idx = -1;
         kwindow_copy_title(G_windows[i].title, sizeof(G_windows[i].title), resolved_title);
@@ -883,6 +1111,7 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
         kwindow_layout_controls(&G_windows[i]);
 
         handle.idx = (int)i;
+        handle.generation = G_window_generation[i];
         return handle;
     }
 
@@ -891,8 +1120,10 @@ kwindow_handle kwindow_create(int32_t x, int32_t y, uint32_t w, uint32_t h,
 
 int kwindow_destroy(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return -1;
+
+    kwindow_clear_modal_refs_for_idx(h.idx);
 
     if (G_windows[h.idx].fullscreen_text.idx >= 0)
         kgfx_obj_destroy(G_windows[h.idx].fullscreen_text);
@@ -1063,7 +1294,17 @@ void kwindow_update_all(void)
         }
 
         if (focus_idx >= 0)
+        {
+            int modal_idx = kwindow_active_modal_child_idx(focus_idx);
+            if (modal_idx >= 0)
+            {
+                focus_idx = modal_idx;
+                resize_candidate_idx = -1;
+                resize_candidate_edges = 0;
+                drag_candidate_idx = -1;
+            }
             kwindow_raise_to_front(focus_idx);
+        }
 
         if (resize_candidate_idx != focus_idx)
         {
@@ -1158,7 +1399,7 @@ void kwindow_set_visible(kwindow_handle h, uint8_t visible)
 {
     kgfx_obj *root = 0;
 
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return;
 
     G_windows[h.idx].visible = visible ? 1u : 0u;
@@ -1178,7 +1419,7 @@ void kwindow_set_visible(kwindow_handle h, uint8_t visible)
 
 int kwindow_visible(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return 0;
     return G_windows[h.idx].visible != 0;
 }
@@ -1190,11 +1431,14 @@ int kwindow_focused(kwindow_handle h)
     int32_t front_z = 0;
     int found_front = 0;
 
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used || !G_windows[h.idx].visible)
+    if (!kwindow_handle_valid(h) || !G_windows[h.idx].visible)
         return 0;
 
     target = kgfx_obj_ref(G_windows[h.idx].root);
     if (!target || !target->visible)
+        return 0;
+
+    if (kwindow_active_modal_child_idx(h.idx) >= 0)
         return 0;
 
     target_z = target->z;
@@ -1221,7 +1465,7 @@ int kwindow_focused(kwindow_handle h)
 
 int kwindow_set_close_deferred(kwindow_handle h, uint8_t deferred)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return -1;
     G_windows[h.idx].close_deferred = deferred ? 1u : 0u;
     if (!deferred)
@@ -1231,14 +1475,14 @@ int kwindow_set_close_deferred(kwindow_handle h, uint8_t deferred)
 
 int kwindow_close_requested(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return 0;
     return G_windows[h.idx].close_requested ? 1 : 0;
 }
 
 int kwindow_close_accept(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return -1;
     G_windows[h.idx].close_requested = 0u;
     kwindow_set_visible(h, 0u);
@@ -1247,7 +1491,7 @@ int kwindow_close_accept(kwindow_handle h)
 
 int kwindow_close_cancel(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return -1;
     G_windows[h.idx].close_requested = 0u;
     return 0;
@@ -1255,7 +1499,7 @@ int kwindow_close_cancel(kwindow_handle h)
 
 int kwindow_raise(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return 0;
     return kwindow_raise_to_front(h.idx);
 }
@@ -1278,7 +1522,7 @@ void kwindow_set_title(kwindow_handle h, const char *title)
 {
     kgfx_obj *title_text = 0;
 
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return;
 
     title_text = kgfx_obj_ref(G_windows[h.idx].title_text);
@@ -1291,7 +1535,7 @@ void kwindow_set_title(kwindow_handle h, const char *title)
 
 kgfx_obj_handle kwindow_root(kwindow_handle h)
 {
-    if (h.idx < 0 || h.idx >= KWINDOW_MAX || !G_windows[h.idx].used)
+    if (!kwindow_handle_valid(h))
         return (kgfx_obj_handle){-1};
     return G_windows[h.idx].root;
 }
@@ -1302,6 +1546,8 @@ int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y)
     kwindow_resolved_rect ancestor_bounds = {0};
     kgfx_obj_handle ancestor = {-1};
     int32_t top_window_z = 0;
+    int target_idx = -1;
+    int modal_idx = -1;
 
     if (h.idx < 0)
         return 0;
@@ -1310,11 +1556,26 @@ int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y)
     if (!kwindow_resolve_obj(ancestor, &ancestor_bounds, 0))
         return 0;
 
+    target_idx = kwindow_idx_for_root(ancestor);
+    if (target_idx >= 0)
+    {
+        modal_idx = kwindow_active_modal_child_idx(target_idx);
+        if (modal_idx >= 0)
+        {
+            (void)kwindow_raise_to_front(modal_idx);
+            return 0;
+        }
+    }
+
     if (!kwindow_top_window_at_point(x, y, &top_window, &top_window_z))
         return 1;
 
-    if (top_window.idx >= 0 && kwindow_root(top_window).idx == ancestor.idx)
-        return 1;
+    if (top_window.idx >= 0)
+    {
+        kgfx_obj_handle top_root = kwindow_root(top_window);
+        if (top_root.idx == ancestor.idx && top_root.generation == ancestor.generation)
+            return 1;
+    }
 
     return ancestor_bounds.z > top_window_z;
 }
@@ -1322,4 +1583,111 @@ int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y)
 int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y)
 {
     return kwindow_obj_can_receive_input(kwindow_root(h), x, y);
+}
+
+int kwindow_center_on_parent(kwindow_handle child, kwindow_handle parent)
+{
+    kgfx_obj *child_root = 0;
+    kwindow_resolved_rect parent_bounds = {0};
+
+    if (!kwindow_handle_valid(child) || !kwindow_handle_valid(parent))
+        return -1;
+
+    child_root = kgfx_obj_ref(G_windows[child.idx].root);
+    if (!child_root || child_root->kind != KGFX_OBJ_RECT)
+        return -1;
+
+    if (!kwindow_resolve_rect_bounds(G_windows[parent.idx].root, &parent_bounds))
+        return -1;
+
+    child_root->u.rect.x = parent_bounds.x + (int32_t)(((uint32_t)(parent_bounds.clip.x1 - parent_bounds.clip.x0) > child_root->u.rect.w)
+                                                           ? (((uint32_t)(parent_bounds.clip.x1 - parent_bounds.clip.x0) - child_root->u.rect.w) / 2u)
+                                                           : 12u);
+    child_root->u.rect.y = parent_bounds.y + (int32_t)(((uint32_t)(parent_bounds.clip.y1 - parent_bounds.clip.y0) > child_root->u.rect.h)
+                                                           ? (((uint32_t)(parent_bounds.clip.y1 - parent_bounds.clip.y0) - child_root->u.rect.h) / 2u)
+                                                           : 12u);
+    return 0;
+}
+
+int kwindow_set_modal_child(kwindow_handle parent, kwindow_handle child)
+{
+    int old_child = -1;
+    int old_parent = -1;
+
+    if (!kwindow_handle_valid(parent) || !kwindow_handle_valid(child) ||
+        parent.idx == child.idx)
+        return -1;
+
+    old_child = G_windows[parent.idx].modal_child_idx;
+    if (old_child >= 0 && old_child < KWINDOW_MAX && G_windows[old_child].used &&
+        G_windows[old_child].modal_parent_idx == parent.idx)
+        G_windows[old_child].modal_parent_idx = -1;
+
+    old_parent = G_windows[child.idx].modal_parent_idx;
+    if (old_parent >= 0 && old_parent < KWINDOW_MAX && G_windows[old_parent].used &&
+        G_windows[old_parent].modal_child_idx == child.idx)
+        G_windows[old_parent].modal_child_idx = -1;
+
+    G_windows[parent.idx].modal_child_idx = (int16_t)child.idx;
+    G_windows[child.idx].modal_parent_idx = (int16_t)parent.idx;
+    (void)kwindow_center_on_parent(child, parent);
+    (void)kwindow_raise_to_front(child.idx);
+    return 0;
+}
+
+int kwindow_clear_modal_child(kwindow_handle parent)
+{
+    int child_idx = -1;
+
+    if (!kwindow_handle_valid(parent))
+        return -1;
+
+    child_idx = G_windows[parent.idx].modal_child_idx;
+    if (child_idx >= 0 && child_idx < KWINDOW_MAX && G_windows[child_idx].used &&
+        G_windows[child_idx].modal_parent_idx == parent.idx)
+        G_windows[child_idx].modal_parent_idx = -1;
+
+    G_windows[parent.idx].modal_child_idx = -1;
+    return 0;
+}
+
+int kwindow_has_active_modal(kwindow_handle parent)
+{
+    if (!kwindow_handle_valid(parent))
+        return 0;
+    return kwindow_active_modal_child_idx(parent.idx) >= 0 ? 1 : 0;
+}
+
+kwindow_handle kwindow_modal_parent(kwindow_handle child)
+{
+    kwindow_handle parent = {-1};
+    int parent_idx = -1;
+
+    if (!kwindow_handle_valid(child))
+        return parent;
+
+    parent_idx = G_windows[child.idx].modal_parent_idx;
+    if (parent_idx >= 0 && parent_idx < KWINDOW_MAX && G_windows[parent_idx].used)
+    {
+        parent.idx = parent_idx;
+        parent.generation = G_window_generation[parent_idx];
+    }
+    return parent;
+}
+
+kwindow_handle kwindow_modal_child(kwindow_handle parent)
+{
+    kwindow_handle child = {-1};
+    int child_idx = -1;
+
+    if (!kwindow_handle_valid(parent))
+        return child;
+
+    child_idx = G_windows[parent.idx].modal_child_idx;
+    if (child_idx >= 0 && child_idx < KWINDOW_MAX && G_windows[child_idx].used)
+    {
+        child.idx = child_idx;
+        child.generation = G_window_generation[child_idx];
+    }
+    return child;
 }

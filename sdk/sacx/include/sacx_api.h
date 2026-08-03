@@ -56,12 +56,43 @@ extern "C"
         SACX_MOUSE_CURSOR_COUNT
     };
 
+    enum
+    {
+        SACX_UI_STATE_ALWAYS = 0xFFFFFFFFu,
+        SACX_UI_MAX_ITEMS = 16u,
+    };
+
+    enum
+    {
+        SACX_UI_LAYOUT_NONE = 0,
+        SACX_UI_LAYOUT_ROW = 1,
+        SACX_UI_LAYOUT_COLUMN = 2,
+        SACX_UI_LAYOUT_GRID = 3,
+    };
+
+    enum
+    {
+        SACX_UI_LAYOUT_VISIBLE_ONLY = 1u << 0,
+        SACX_UI_LAYOUT_SQUARE_CELLS = 1u << 1,
+    };
+
+    enum
+    {
+        SACX_WORK_STATUS_EMPTY = 0u,
+        SACX_WORK_STATUS_QUEUED = 1u,
+        SACX_WORK_STATUS_RUNNING = 2u,
+        SACX_WORK_STATUS_DONE = 3u,
+        SACX_WORK_STATUS_FAILED = 4u,
+    };
+
     typedef struct sacx_api sacx_api;
     typedef int (*sacx_update_fn)(const sacx_api *api);
     typedef int (*sacx_entry_fn)(const sacx_api *api);
     typedef void (*sacx_button_on_click_fn)(uint32_t button_handle, void *user);
     typedef void (*sacx_textbox_on_submit_fn)(uint32_t textbox_handle, const char *text, void *user);
     typedef void (*sacx_file_dialog_fn)(int accepted, const char *raw_path, const char *friendly_path, void *user);
+    typedef void (*sacx_ui_on_change_fn)(uint32_t widget_handle, int32_t value, void *user);
+    typedef void (*sacx_worker_fn)(void *user);
 
     typedef struct sacx_color
     {
@@ -135,6 +166,17 @@ extern "C"
         uint32_t close_glyph_scale;
         uint32_t fullscreen_glyph_scale;
     } sacx_window_style;
+
+    typedef struct sacx_ui_layout_desc
+    {
+        uint32_t kind;
+        uint32_t padding_x;
+        uint32_t padding_y;
+        uint32_t gap_x;
+        uint32_t gap_y;
+        uint32_t columns;
+        uint32_t flags;
+    } sacx_ui_layout_desc;
 
     typedef struct sacx3d_vec3
     {
@@ -531,6 +573,78 @@ extern "C"
         int (*window_close_requested)(uint32_t window_handle);
         int (*window_close_accept)(uint32_t window_handle);
         int (*window_close_cancel)(uint32_t window_handle);
+
+        /* ABI v1 append-only UI backend extension. */
+        int (*textbox_select)(uint32_t textbox_handle, uint32_t start, uint32_t end);
+        int (*textbox_selection)(uint32_t textbox_handle, uint32_t *out_start, uint32_t *out_end);
+        int (*textbox_copy_selection)(uint32_t textbox_handle);
+        int (*textbox_cut_selection)(uint32_t textbox_handle);
+        int (*textbox_paste)(uint32_t textbox_handle);
+        int (*textbox_undo)(uint32_t textbox_handle);
+        int (*textbox_redo)(uint32_t textbox_handle);
+        int (*textbox_set_max_len)(uint32_t textbox_handle, uint32_t max_len);
+        uint32_t (*textbox_max_len)(uint32_t textbox_handle);
+        int (*window_set_modal_child)(uint32_t parent_window_handle, uint32_t child_window_handle);
+        int (*window_clear_modal_child)(uint32_t parent_window_handle);
+        int (*window_has_active_modal)(uint32_t parent_window_handle);
+        int (*window_center_on_parent)(uint32_t child_window_handle, uint32_t parent_window_handle);
+        int (*dialog_open_file_for_window)(uint32_t owner_window_handle, const char *initial_dir,
+                                           const char *suggested_name, sacx_file_dialog_fn on_result, void *user);
+        int (*dialog_save_file_for_window)(uint32_t owner_window_handle, const char *initial_dir,
+                                           const char *suggested_name, sacx_file_dialog_fn on_result, void *user);
+        int (*ui_view_create_rect)(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                   int32_t z, sacx_color fill, uint32_t visible,
+                                   uint32_t *out_view_handle, uint32_t *out_obj_handle);
+        int (*ui_window_view_create)(uint32_t window_handle, int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                     int32_t z, sacx_color fill, uint32_t visible,
+                                     uint32_t *out_view_handle, uint32_t *out_obj_handle);
+        int (*ui_view_destroy)(uint32_t view_handle);
+        int (*ui_view_root)(uint32_t view_handle, uint32_t *out_obj_handle);
+        int (*ui_view_add_obj)(uint32_t view_handle, uint32_t state, uint32_t obj_handle);
+        int (*ui_view_set_state)(uint32_t view_handle, uint32_t state);
+        uint32_t (*ui_view_state)(uint32_t view_handle);
+        int (*ui_view_set_visible)(uint32_t view_handle, uint32_t visible);
+        int (*ui_view_set_layout)(uint32_t view_handle, const sacx_ui_layout_desc *desc);
+        int (*ui_view_apply_layout)(uint32_t view_handle);
+        int (*ui_view_set_bounds)(uint32_t view_handle, int32_t x, int32_t y, uint32_t w, uint32_t h);
+        int (*ui_dropdown_create)(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t item_h,
+                                  int32_t z, const char *const *items, uint32_t item_count, uint32_t selected,
+                                  sacx_ui_on_change_fn on_change, void *user,
+                                  uint32_t *out_dropdown_handle, uint32_t *out_obj_handle);
+        int (*ui_dropdown_destroy)(uint32_t dropdown_handle);
+        int (*ui_dropdown_root)(uint32_t dropdown_handle, uint32_t *out_obj_handle);
+        int (*ui_dropdown_selected)(uint32_t dropdown_handle);
+        int (*ui_dropdown_set_selected)(uint32_t dropdown_handle, uint32_t selected);
+        int (*ui_dropdown_set_enabled)(uint32_t dropdown_handle, uint32_t enabled);
+        int (*ui_radio_create)(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t item_h,
+                               int32_t z, const char *const *items, uint32_t item_count, uint32_t selected,
+                               sacx_ui_on_change_fn on_change, void *user,
+                               uint32_t *out_radio_handle, uint32_t *out_obj_handle);
+        int (*ui_radio_destroy)(uint32_t radio_handle);
+        int (*ui_radio_root)(uint32_t radio_handle, uint32_t *out_obj_handle);
+        int (*ui_radio_selected)(uint32_t radio_handle);
+        int (*ui_radio_set_selected)(uint32_t radio_handle, uint32_t selected);
+        int (*ui_radio_set_enabled)(uint32_t radio_handle, uint32_t enabled);
+        int (*ui_toggle_create)(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                int32_t z, const char *label, uint32_t checked,
+                                sacx_ui_on_change_fn on_change, void *user,
+                                uint32_t *out_toggle_handle, uint32_t *out_obj_handle);
+        int (*ui_toggle_destroy)(uint32_t toggle_handle);
+        int (*ui_toggle_root)(uint32_t toggle_handle, uint32_t *out_obj_handle);
+        int (*ui_toggle_checked)(uint32_t toggle_handle);
+        int (*ui_toggle_set_checked)(uint32_t toggle_handle, uint32_t checked);
+        int (*ui_toggle_set_enabled)(uint32_t toggle_handle, uint32_t enabled);
+
+        /* ABI v1 append-only worker extension. Worker callbacks should be compute-only. */
+        int (*work_submit)(sacx_worker_fn fn, void *user, uint32_t *out_job_id);
+        uint32_t (*work_status)(uint32_t job_id);
+        int (*work_wait)(uint32_t job_id, uint64_t spin_limit);
+        int (*work_cancel)(uint32_t job_id);
+
+        int (*img_save_async)(uint32_t image_handle, const char *path, uint32_t format, uint32_t quality,
+                              uint32_t *out_save_id);
+        uint32_t (*img_save_status)(uint32_t save_id, int *out_result);
+        int (*img_save_release)(uint32_t save_id);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

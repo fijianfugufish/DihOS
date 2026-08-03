@@ -99,6 +99,48 @@ static void hex64(EFI_SYSTEM_TABLE *st, uint64_t v)
     println(st, b);
 }
 
+static void dec64(EFI_SYSTEM_TABLE *st, uint64_t v)
+{
+    wchar_t b[21];
+    uint32_t i = 20u;
+
+    b[i] = 0;
+    if (v == 0u)
+    {
+        b[--i] = L'0';
+    }
+    else
+    {
+        while (v && i)
+        {
+            b[--i] = (wchar_t)(L'0' + (v % 10u));
+            v /= 10u;
+        }
+    }
+    println(st, &b[i]);
+}
+
+static void dec64_inline(EFI_SYSTEM_TABLE *st, uint64_t v)
+{
+    wchar_t b[21];
+    uint32_t i = 20u;
+
+    b[i] = 0;
+    if (v == 0u)
+    {
+        b[--i] = L'0';
+    }
+    else
+    {
+        while (v && i)
+        {
+            b[--i] = (wchar_t)(L'0' + (v % 10u));
+            v /= 10u;
+        }
+    }
+    print(st, &b[i]);
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Boot-service function pointer offsets (no headers)                        */
 /* -------------------------------------------------------------------------- */
@@ -107,9 +149,11 @@ typedef EFI_STATUS (*EFI_LOCATE_PROTOCOL)(const EFI_GUID *, void *, void **);
 typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(UINTN, const EFI_GUID *, void *, UINTN *, EFI_HANDLE **);
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void **);
 typedef EFI_STATUS (*EFI_FREE_POOL)(void *);
+typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)(uint32_t, uint32_t, UINTN, EFI_PHYSICAL_ADDRESS *);
 typedef EFI_STATUS (*EFI_SET_WATCHDOG_TIMER)(UINTN, UINTN, UINTN, const wchar_t *);
 
 static inline EFI_OPEN_PROTOCOL BsOpenProto(void *BS) { return *(EFI_OPEN_PROTOCOL *)((char *)BS + 0x118); }
+static inline EFI_ALLOCATE_PAGES BsAllocPages(void *BS) { return *(EFI_ALLOCATE_PAGES *)((char *)BS + 0x28); }
 static inline EFI_ALLOCATE_POOL BsAllocPool(void *BS) { return *(EFI_ALLOCATE_POOL *)((char *)BS + 0x40); }
 static inline EFI_FREE_POOL BsFreePool(void *BS) { return *(EFI_FREE_POOL *)((char *)BS + 0x48); }
 static inline EFI_LOCATE_HANDLE_BUFFER BsLocateHandles(void *BS) { return *(EFI_LOCATE_HANDLE_BUFFER *)((char *)BS + 0x138); }
@@ -117,6 +161,7 @@ static inline EFI_LOCATE_PROTOCOL BsLocate(void *BS) { return *(EFI_LOCATE_PROTO
 static inline EFI_SET_WATCHDOG_TIMER BsWatchdog(void *BS) { return *(EFI_SET_WATCHDOG_TIMER *)((char *)BS + 0x100); }
 enum
 {
+    AllocateAnyPages = 0,
     EfiLoaderData = 2,
     EFI_OPEN_PROTOCOL_GET_PROTOCOL = 2,
     EFI_LOCATE_BY_PROTOCOL = 2
@@ -155,7 +200,136 @@ typedef struct EFI_GRAPHICS_OUTPUT_PROTOCOL
     void *QueryMode, *SetMode, *Blt;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 } EFI_GRAPHICS_OUTPUT_PROTOCOL;
+typedef EFI_STATUS (*EFI_GOP_QUERY_MODE)(EFI_GRAPHICS_OUTPUT_PROTOCOL *, uint32_t, UINTN *, EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **);
+typedef EFI_STATUS (*EFI_GOP_SET_MODE)(EFI_GRAPHICS_OUTPUT_PROTOCOL *, uint32_t);
 static const EFI_GUID GOP_GUID = (EFI_GUID){0x9042a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
+
+static uint8_t gop_mode_is_usable(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info)
+{
+    if (!info)
+        return 0u;
+    if (info->HorizontalResolution < 640u || info->VerticalResolution < 480u)
+        return 0u;
+    if (info->PixelFormat == PixelBltOnly)
+        return 0u;
+    if (info->PixelsPerScanLine < info->HorizontalResolution)
+        return 0u;
+    return 1u;
+}
+
+static uint64_t gop_mode_score(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info)
+{
+    uint64_t w;
+    uint64_t h;
+    uint64_t area;
+
+    if (!gop_mode_is_usable(info))
+        return 0u;
+
+    w = (uint64_t)info->HorizontalResolution;
+    h = (uint64_t)info->VerticalResolution;
+    area = w * h;
+
+    return (area << 4) +
+           ((info->PixelFormat == PixelRGBX || info->PixelFormat == PixelBGRX) ? 8u : 0u) +
+           ((w >= h) ? 1u : 0u);
+}
+
+static void gop_print_mode(EFI_SYSTEM_TABLE *st, const wchar_t *prefix, uint32_t mode,
+                           const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info)
+{
+    print(st, prefix);
+    dec64_inline(st, mode);
+    print(st, L": ");
+    if (info)
+    {
+        dec64_inline(st, info->HorizontalResolution);
+        print(st, L"x");
+        dec64_inline(st, info->VerticalResolution);
+        print(st, L" fmt=");
+        dec64_inline(st, (uint64_t)info->PixelFormat);
+    }
+    else
+    {
+        print(st, L"<query failed>");
+    }
+    print(st, L"\r\n");
+}
+
+static void gop_choose_best_mode(EFI_SYSTEM_TABLE *st, EFI_GRAPHICS_OUTPUT_PROTOCOL *gop)
+{
+    EFI_GOP_QUERY_MODE QueryMode = 0;
+    EFI_GOP_SET_MODE SetMode = 0;
+    EFI_FREE_POOL FreePool = 0;
+    uint32_t best_mode = 0u;
+    uint64_t best_score = 0u;
+    uint8_t have_best = 0u;
+
+    if (!st || !gop || !gop->Mode)
+        return;
+
+    QueryMode = (EFI_GOP_QUERY_MODE)gop->QueryMode;
+    SetMode = (EFI_GOP_SET_MODE)gop->SetMode;
+    FreePool = BsFreePool(st->BootServices);
+
+    if (!QueryMode || !SetMode)
+        return;
+
+    print(st, L"[S2] GOP modes found: ");
+    dec64(st, gop->Mode->MaxMode);
+
+    for (uint32_t i = 0; i < gop->Mode->MaxMode; ++i)
+    {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = 0;
+        UINTN info_size = 0;
+        EFI_STATUS qs = QueryMode(gop, i, &info_size, &info);
+        uint64_t score = 0u;
+
+        if (qs || !info)
+        {
+            if (i < 16u)
+                gop_print_mode(st, L"[S2] GOP mode ", i, 0);
+            continue;
+        }
+
+        if (i < 16u)
+            gop_print_mode(st, L"[S2] GOP mode ", i, info);
+
+        score = gop_mode_score(info);
+        if (score > best_score)
+        {
+            best_score = score;
+            best_mode = i;
+            have_best = 1u;
+        }
+
+        if (FreePool)
+            FreePool(info);
+    }
+
+    if (!have_best)
+    {
+        println(st, L"[S2] GOP mode auto-select: keeping firmware default");
+        return;
+    }
+
+    if (best_mode != gop->Mode->Mode)
+    {
+        EFI_STATUS ss;
+        print(st, L"[S2] GOP auto-select mode ");
+        dec64_inline(st, best_mode);
+        print(st, L"\r\n");
+        ss = SetMode(gop, best_mode);
+        if (ss)
+        {
+            println(st, L"[S2] GOP SetMode failed; keeping firmware default");
+            return;
+        }
+    }
+
+    if (gop->Mode && gop->Mode->Info)
+        gop_print_mode(st, L"[S2] GOP active mode ", gop->Mode->Mode, gop->Mode->Info);
+}
 
 /* fwd decl so we can call fs_open_root() before its definition */
 struct EFI_FILE_PROTOCOL;
@@ -1358,6 +1532,154 @@ typedef struct
 } EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
 static const EFI_GUID SIMPLE_FS_GUID = {0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 static const EFI_GUID LOADED_IMAGE_GUID = {0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+static const EFI_GUID BLOCK_IO_GUID = {0x964E5B21, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+
+typedef struct
+{
+    uint32_t MediaId;
+    uint8_t RemovableMedia;
+    uint8_t MediaPresent;
+    uint8_t LogicalPartition;
+    uint8_t ReadOnly;
+    uint8_t WriteCaching;
+    uint32_t BlockSize;
+    uint32_t IoAlign;
+    uint64_t LastBlock;
+} EFI_BLOCK_IO_MEDIA;
+
+typedef struct EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
+struct EFI_BLOCK_IO_PROTOCOL
+{
+    uint64_t Revision;
+    EFI_BLOCK_IO_MEDIA *Media;
+    void *Reset;
+    EFI_STATUS (*ReadBlocks)(EFI_BLOCK_IO_PROTOCOL *self, uint32_t MediaId,
+                             uint64_t LBA, UINTN BufferSize, void *Buffer);
+    void *WriteBlocks;
+    void *FlushBlocks;
+};
+
+#define DIHOS_BOOT_VOLUME_SOURCE_UEFI_BLOCK_IO 1u
+#define DIHOS_BOOT_VOLUME_SNAPSHOT_MAX_BYTES (512ull * 1024ull * 1024ull)
+
+static EFI_STATUS stage2_loaded_device(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EFI_HANDLE *out_device)
+{
+    EFI_OPEN_PROTOCOL Open = BsOpenProto(st->BootServices);
+    void *loaded = 0;
+    EFI_STATUS s;
+
+    if (!out_device || !Open)
+        return 1;
+
+    *out_device = 0;
+    s = Open(image, &LOADED_IMAGE_GUID, &loaded, image, 0, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if (s || !loaded)
+        return s ? s : 1;
+
+    *out_device = *(EFI_HANDLE *)((char *)loaded + 0x18);
+    if (!*out_device)
+    {
+        EFI_HANDLE parent = *(EFI_HANDLE *)((char *)loaded + 0x08);
+        if (parent)
+        {
+            void *pl = 0;
+            if (!Open(parent, &LOADED_IMAGE_GUID, &pl, image, 0, EFI_OPEN_PROTOCOL_GET_PROTOCOL) && pl)
+                *out_device = *(EFI_HANDLE *)((char *)pl + 0x18);
+        }
+    }
+
+    return *out_device ? 0 : 1;
+}
+
+static void stage2_snapshot_boot_volume(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, boot_info *bi)
+{
+    EFI_HANDLE device = 0;
+    EFI_BLOCK_IO_PROTOCOL *bio = 0;
+    EFI_STATUS s;
+    uint64_t blocks = 0;
+    uint64_t bytes = 0;
+    EFI_PHYSICAL_ADDRESS dst = 0;
+    uint8_t *buf = 0;
+    uint64_t lba = 0;
+
+    if (!st || !bi)
+        return;
+
+    bi->boot_volume_base_phys = 0;
+    bi->boot_volume_size_bytes = 0;
+    bi->boot_volume_sector_size = 0;
+    bi->boot_volume_source = 0;
+
+    if (stage2_loaded_device(st, image, &device) != 0 || !device)
+    {
+        println(st, L"[S2:BOOTVOL] loaded device unavailable");
+        return;
+    }
+
+    EFI_OPEN_PROTOCOL Open = BsOpenProto(st->BootServices);
+    if (!Open)
+    {
+        println(st, L"[S2:BOOTVOL] OpenProtocol unavailable");
+        return;
+    }
+
+    s = Open(device, &BLOCK_IO_GUID, (void **)&bio,
+             image, 0, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+    if (s || !bio || !bio->Media || !bio->ReadBlocks)
+    {
+        println(st, L"[S2:BOOTVOL] BlockIO unavailable");
+        return;
+    }
+
+    if (!bio->Media->MediaPresent || bio->Media->BlockSize != 512u)
+    {
+        println(st, L"[S2:BOOTVOL] unsupported media");
+        return;
+    }
+
+    blocks = bio->Media->LastBlock + 1ull;
+    bytes = blocks * (uint64_t)bio->Media->BlockSize;
+    print(st, L"[S2:BOOTVOL] bytes = ");
+    hex64(st, bytes);
+    if (!bytes || bytes > DIHOS_BOOT_VOLUME_SNAPSHOT_MAX_BYTES)
+    {
+        println(st, L"[S2:BOOTVOL] snapshot skipped: too large");
+        return;
+    }
+
+    if (BsAllocPages(st->BootServices)(AllocateAnyPages, EfiLoaderData,
+                                       (UINTN)((bytes + 4095ull) >> 12),
+                                       &dst) != 0 || !dst)
+    {
+        println(st, L"[S2:BOOTVOL] snapshot allocation failed");
+        return;
+    }
+
+    buf = (uint8_t *)(uintptr_t)dst;
+    while (lba < blocks)
+    {
+        uint64_t todo = blocks - lba;
+        UINTN chunk_bytes;
+        if (todo > 32768ull)
+            todo = 32768ull;
+        chunk_bytes = (UINTN)(todo * (uint64_t)bio->Media->BlockSize);
+        s = bio->ReadBlocks(bio, bio->Media->MediaId, lba, chunk_bytes,
+                            buf + lba * (uint64_t)bio->Media->BlockSize);
+        if (s)
+        {
+            println(st, L"[S2:BOOTVOL] ReadBlocks failed");
+            return;
+        }
+        lba += todo;
+    }
+
+    bi->boot_volume_base_phys = (uint64_t)dst;
+    bi->boot_volume_size_bytes = bytes;
+    bi->boot_volume_sector_size = bio->Media->BlockSize;
+    bi->boot_volume_source = DIHOS_BOOT_VOLUME_SOURCE_UEFI_BLOCK_IO;
+    print(st, L"[S2:BOOTVOL] snapshot base = ");
+    hex64(st, bi->boot_volume_base_phys);
+}
 
 static EFI_STATUS open_root_on_device_c(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, EFI_HANDLE dev, EFI_FILE_PROTOCOL **root_out)
 {
@@ -1657,6 +1979,12 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (W)
         W(0, 0, 0, 0);
 
+    boot_info bi = (boot_info){0};
+    bi.version = 1;
+    bi.stage2_report_len = 0;
+    bi.stage2_report[0] = 0;
+    g_stage2_report_bi = &bi;
+
     /* GOP */
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
     EFI_STATUS s = BsLocate(st->BootServices) ? BsLocate(st->BootServices)(&GOP_GUID, 0, (void **)&gop) : ~0ULL;
@@ -1667,12 +1995,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         {
         }
     }
-
-    boot_info bi = (boot_info){0};
-    bi.version = 1;
-    bi.stage2_report_len = 0;
-    bi.stage2_report[0] = 0;
-    g_stage2_report_bi = &bi;
+    gop_choose_best_mode(st, gop);
 
     bi.fb.fb_base = (uint64_t)gop->Mode->FrameBufferBase;
     bi.fb.fb_size = (uint64_t)gop->Mode->FrameBufferSize;
@@ -1775,6 +2098,8 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         {
         }
     }
+
+    stage2_snapshot_boot_volume(st, image, &bi);
 
     println(st, L"[CHAIN] ExitBootServices -> kernel");
     exit_boot_and_jump(st, image, &bi, entry);

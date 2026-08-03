@@ -8,12 +8,20 @@
 //   \x1F<RRGGBB>  -> set current text fill color
 //   \x1F.         -> reset to the base fill color passed to draw call
 #define KTEXT_INLINE_COLOR_CTRL ((char)0x1F)
+#define KTEXT_SCALE_FP_FLAG 0x80000000u
+#define KTEXT_SCALE_FP_ONE 1024u
+#define KTEXT_SCALE_FP_MASK 0x7FFFFFFFu
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
+    /*
+     * Legacy text drawing API.
+     * Kept as the low-level renderer; higher-level UI text should flow through
+     * the SACX UI backend as that surface grows.
+     */
     /* Full definition + typedef of kfont lives HERE */
     typedef struct kfont
     {
@@ -66,6 +74,8 @@ extern "C"
     // Optional: text metrics for layout
     // Scale steps are fine-grained:
     //   scale 1 -> 1.0x, scale 2 -> 1.1x, scale 3 -> 1.2x, etc.
+    // ktext_scale_from_fp() supports fractional scaling below 1.0x.
+    uint32_t ktext_scale_from_fp(uint32_t fp);
     uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale);
     uint32_t ktext_line_height(const kfont *f, uint32_t scale, int line_spacing);
     uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, int char_spacing);

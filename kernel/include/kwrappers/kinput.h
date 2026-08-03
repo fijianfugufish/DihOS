@@ -174,8 +174,20 @@ extern "C"
         int32_t dx;
         int32_t dy;
         int32_t wheel;
+        int32_t x;
+        int32_t y;
+        uint8_t absolute;
         uint8_t buttons;
     } kinput_mouse_state;
+
+    typedef struct kinput_device_status
+    {
+        uint8_t usb_hid_online;
+        uint8_t usb_keyboard_present;
+        uint8_t usb_mouse_present;
+        uint8_t i2c_keyboard_online;
+        uint8_t i2c_touchpad_online;
+    } kinput_device_status;
 
     void kinput_init(uint64_t xhci_mmio_base, uint64_t rsdp_phys);
     void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count, uint64_t rsdp_phys);
@@ -191,6 +203,7 @@ extern "C"
     uint8_t kinput_mouse_buttons(void);
 
     void kinput_mouse_consume(kinput_mouse_state *out);
+    void kinput_get_device_status(kinput_device_status *out_status);
 
 #ifdef __cplusplus
 }

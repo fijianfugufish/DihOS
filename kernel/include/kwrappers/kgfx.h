@@ -83,6 +83,7 @@ extern "C"
         int32_t z;
         uint8_t visible;
         int16_t parent_idx;
+        uint16_t parent_generation;
         uint8_t clip_to_parent;
 
         kcolor fill;
@@ -108,6 +109,7 @@ extern "C"
     typedef struct
     {
         int idx;
+        uint16_t generation;
     } kgfx_obj_handle;
 
     int kgfx_scene_init(void);
@@ -239,15 +241,21 @@ extern "C"
     static inline void kgfx_obj_set_parent(kgfx_obj_handle child, kgfx_obj_handle parent)
     {
         kgfx_obj *o = kgfx_obj_ref(child);
-        if (o)
+        if (o && kgfx_obj_ref(parent))
+        {
             o->parent_idx = (int16_t)parent.idx;
+            o->parent_generation = parent.generation;
+        }
     }
 
     static inline void kgfx_obj_clear_parent(kgfx_obj_handle child)
     {
         kgfx_obj *o = kgfx_obj_ref(child);
         if (o)
+        {
             o->parent_idx = -1;
+            o->parent_generation = 0u;
+        }
     }
 
     static inline void kgfx_obj_set_clip_to_parent(kgfx_obj_handle h, uint8_t enabled)
@@ -288,6 +296,7 @@ extern "C"
     typedef struct
     {
         int idx;
+        uint16_t generation;
     } kgfx_rect_handle;
 
     typedef struct
@@ -305,6 +314,7 @@ extern "C"
         kgfx_obj_handle oh = kgfx_obj_add_rect(x, y, w, h, z, color, vis);
         kgfx_rect_handle rh;
         rh.idx = oh.idx;
+        rh.generation = oh.generation;
         return rh;
     }
 
@@ -312,6 +322,7 @@ extern "C"
     {
         kgfx_obj_handle oh;
         oh.idx = h.idx;
+        oh.generation = h.generation;
 
         kgfx_obj *o = kgfx_obj_ref(oh);
         if (!o || o->kind != KGFX_OBJ_RECT)

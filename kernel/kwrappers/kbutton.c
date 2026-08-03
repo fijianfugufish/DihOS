@@ -159,6 +159,7 @@ static int kbutton_resolve_obj(kgfx_obj_handle h, kbutton_resolved_rect *out, ui
         return 1;
 
     parent_handle.idx = (int)o->parent_idx;
+    parent_handle.generation = o->parent_generation;
     if (!kgfx_obj_ref(parent_handle) || !kgfx_obj_ref(parent_handle)->visible)
         return 0;
     if (!kbutton_resolve_obj(parent_handle, &parent, depth + 1u))

@@ -26,6 +26,9 @@ static kmouse_ctx_t G;
 
 #define KMOUSE_CURSOR_BASE_PATH "0:/OS/System/Images/Mouse/"
 #define KMOUSE_CURSOR_SCALE_PCT 150u
+#define KMOUSE_DESIGN_W 1920u
+#define KMOUSE_DESIGN_H 1080u
+#define KMOUSE_SCALE_ONE 1024u
 #define KMOUSE_FILE_READ_CHUNK_BYTES (64u * 1024u)
 
 static const char *kmouse_cursor_file_name(kmouse_cursor cursor)
@@ -110,9 +113,40 @@ static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi)
     return v;
 }
 
+static uint32_t kmouse_ui_scale_fp(void)
+{
+    const kfb *fb = kgfx_info();
+    uint64_t sx = 0;
+    uint64_t sy = 0;
+    uint32_t scale = KMOUSE_SCALE_ONE;
+
+    if (!fb || !fb->width || !fb->height)
+        return KMOUSE_SCALE_ONE;
+
+    sx = ((uint64_t)fb->width * KMOUSE_SCALE_ONE) / KMOUSE_DESIGN_W;
+    sy = ((uint64_t)fb->height * KMOUSE_SCALE_ONE) / KMOUSE_DESIGN_H;
+    scale = (uint32_t)(sx < sy ? sx : sy);
+    if (scale < 256u)
+        scale = 256u;
+    if (scale > 2048u)
+        scale = 2048u;
+    return scale;
+}
+
+static uint32_t kmouse_cursor_scale_pct(void)
+{
+    uint64_t pct = ((uint64_t)KMOUSE_CURSOR_SCALE_PCT * (uint64_t)kmouse_ui_scale_fp() + (KMOUSE_SCALE_ONE / 2u)) / KMOUSE_SCALE_ONE;
+
+    if (pct < 25ull)
+        pct = 25ull;
+    if (pct > 300ull)
+        pct = 300ull;
+    return (uint32_t)pct;
+}
+
 static inline uint32_t kmouse_scale_u32(uint32_t v)
 {
-    uint64_t scaled = ((uint64_t)v * (uint64_t)KMOUSE_CURSOR_SCALE_PCT + 50ull) / 100ull;
+    uint64_t scaled = ((uint64_t)v * (uint64_t)kmouse_cursor_scale_pct() + 50ull) / 100ull;
     if (v != 0u && scaled == 0ull)
         scaled = 1ull;
     if (scaled > 0xFFFFFFFFull)
@@ -716,6 +750,15 @@ static void kmouse_sync_cursor(void)
     cursor_obj = kgfx_obj_ref(G.cursor_handle);
     if (cursor_obj && cursor_obj->kind == KGFX_OBJ_IMAGE)
     {
+        if (asset && asset->img.px && asset->img.w && asset->img.h)
+        {
+            cursor_obj->u.image.argb = asset->img.px;
+            cursor_obj->u.image.src_w = asset->img.w;
+            cursor_obj->u.image.src_h = asset->img.h;
+            cursor_obj->u.image.w = kmouse_scale_u32(asset->img.w);
+            cursor_obj->u.image.h = kmouse_scale_u32(asset->img.h);
+            cursor_obj->u.image.stride_px = asset->img.w;
+        }
         cursor_obj->u.image.x = G.state.x - hot_x;
         cursor_obj->u.image.y = G.state.y - hot_y;
     }
@@ -858,8 +901,22 @@ void kmouse_update(void)
     G.state.wheel = raw.wheel;
     G.state.buttons = raw.buttons;
 
-    G.state.x += G.state.dx;
-    G.state.y += G.state.dy;
+    if (raw.absolute)
+    {
+        const kfb *fb = kgfx_info();
+        uint32_t max_x = (fb && fb->width) ? (fb->width - 1u) : 0u;
+        uint32_t max_y = (fb && fb->height) ? (fb->height - 1u) : 0u;
+
+        G.state.x = (int32_t)(((uint64_t)(uint32_t)raw.x * max_x) / 0x7FFFu);
+        G.state.y = (int32_t)(((uint64_t)(uint32_t)raw.y * max_y) / 0x7FFFu);
+        G.state.dx = 0;
+        G.state.dy = 0;
+    }
+    else
+    {
+        G.state.x += G.state.dx;
+        G.state.y += G.state.dy;
+    }
 
     kmouse_sync_cursor();
 }

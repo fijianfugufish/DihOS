@@ -27,6 +27,10 @@ int kimg_load_jpeg(kimg *out, const char *path);
 // Auto-detect by file signature and dispatch to BMP/PNG/JPEG loader.
 int kimg_load(kimg *out, const char *path);
 
+// Reserve decoder scratch memory early, before later DMA/ring allocations make
+// large contiguous allocations harder.
+int kimg_prepare_decoder(void);
+
 enum
 {
     KIMG_FORMAT_PNG = 1u,
@@ -34,8 +38,22 @@ enum
     KIMG_FORMAT_BMP = 3u,
 };
 
+enum
+{
+    KIMG_SAVE_FLAG_NONE = 0u,
+    KIMG_SAVE_FLAG_NO_BUSY = 1u << 0,
+};
+
 // Save ARGB pixels to PNG, baseline JPEG, or 32-bit BMP.
 int kimg_save(const kimg *img, const char *path, uint32_t format, uint32_t quality);
+int kimg_save_ex(const kimg *img, const char *path, uint32_t format, uint32_t quality, uint32_t flags);
+int kimg_encode_alloc(const kimg *img, uint32_t format, uint32_t quality,
+                      uint8_t **out_data, uint32_t *out_size, uint64_t *out_pages);
+uint32_t kimg_encode_bound(const kimg *img, uint32_t format);
+int kimg_encode_to_buffer(const kimg *img, uint32_t format, uint32_t quality,
+                          uint8_t *out_data, uint32_t out_capacity, uint32_t *out_size);
+void kimg_encode_free(uint8_t *data, uint64_t pages);
+int kimg_save_encoded(const char *path, const uint8_t *data, uint32_t size, uint32_t flags);
 
 // Draw at (x,y). global_alpha multiplies per-pixel alpha (0..255).
 void kimg_draw(const kimg *img, int x, int y, uint8_t global_alpha);

@@ -18,13 +18,18 @@ extern "C"
 #include "kwrappers/kmouse.h"
 #include "kwrappers/ktext.h"
 #include "kwrappers/ktextbox.h"
+#include "kwrappers/kui.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
+#include "bootinfo.h"
 #include "memory/pmem.h"
 #include "system/dihos_time.h"
 #include "system/kbusy.h"
+#include "system/kwork.h"
 #include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
+
+extern const boot_info *k_bootinfo_ptr;
 }
 
 #define SACX_MAX_TASKS 16u
@@ -33,10 +38,16 @@ extern "C"
 #define SACX_MAX_TASK_WINDOWS 16u
 #define SACX_MAX_TASK_BUTTONS 64u
 #define SACX_MAX_TASK_TEXTBOXES 32u
+#define SACX_MAX_TASK_UI_VIEWS 32u
+#define SACX_MAX_TASK_UI_DROPDOWNS 32u
+#define SACX_MAX_TASK_UI_RADIOS 32u
+#define SACX_MAX_TASK_UI_TOGGLES 32u
 #define SACX_MAX_TASK_GFX_OBJECTS 512u
 #define SACX_MAX_TASK_IMAGES 128u
 #define SACX_MAX_TASK_3D_SCENES 8u
 #define SACX_MAX_TASK_3D_PLAYERS 8u
+#define SACX_MAX_TASK_WORKERS 8u
+#define SACX_MAX_TASK_ASYNC_IMAGE_SAVES 1u
 #define SACX_MAX_SEGMENTS 128u
 #define SACX_MAX_RELOCS 8192u
 #define SACX_MAX_IMPORTS 256u
@@ -69,6 +80,7 @@ typedef struct sacx_gfx_slot
 {
     kgfx_obj_handle handle;
     uint8_t used;
+    uint8_t destroy_on_finish;
 } sacx_gfx_slot;
 
 typedef struct sacx_button_slot
@@ -88,6 +100,39 @@ typedef struct sacx_textbox_slot
     void *callback_user;
     sacx_task *owner;
 } sacx_textbox_slot;
+
+typedef struct sacx_ui_view_slot
+{
+    kui_view_handle handle;
+    uint8_t used;
+} sacx_ui_view_slot;
+
+typedef struct sacx_ui_dropdown_slot
+{
+    kui_dropdown_handle handle;
+    uint8_t used;
+    sacx_ui_on_change_fn callback;
+    void *callback_user;
+    sacx_task *owner;
+} sacx_ui_dropdown_slot;
+
+typedef struct sacx_ui_radio_slot
+{
+    kui_radio_handle handle;
+    uint8_t used;
+    sacx_ui_on_change_fn callback;
+    void *callback_user;
+    sacx_task *owner;
+} sacx_ui_radio_slot;
+
+typedef struct sacx_ui_toggle_slot
+{
+    kui_toggle_handle handle;
+    uint8_t used;
+    sacx_ui_on_change_fn callback;
+    void *callback_user;
+    sacx_task *owner;
+} sacx_ui_toggle_slot;
 
 typedef struct sacx_image_slot
 {
@@ -109,6 +154,42 @@ typedef struct sacx_3d_player_slot
     uint32_t window_handle;
     uint8_t used;
 } sacx_3d_player_slot;
+
+typedef struct sacx_worker_slot
+{
+    uint8_t used;
+    sacx_worker_fn fn;
+    void *user;
+    uint32_t job_id;
+    sacx_task *owner;
+} sacx_worker_slot;
+
+typedef struct __attribute__((aligned(64))) sacx_async_image_save_state
+{
+    volatile int result;
+    volatile uint32_t stage;
+    volatile uint32_t encoded_size;
+    uint32_t reserved[13];
+} sacx_async_image_save_state;
+
+typedef struct sacx_async_image_save_slot
+{
+    uint8_t used;
+    uint8_t file_written;
+    uint8_t write_open;
+    uint8_t encoded_ready;
+    uint32_t id;
+    uint32_t job_id;
+    uint32_t format;
+    uint32_t quality;
+    sacx_async_image_save_state state;
+    uint8_t *encoded_data;
+    uint32_t write_offset;
+    uint64_t encoded_pages;
+    KFile write_file;
+    kimg image;
+    char path[256];
+} sacx_async_image_save_slot;
 
 typedef struct sacx_task
 {
@@ -155,10 +236,16 @@ typedef struct sacx_task
     sacx_window_slot windows[SACX_MAX_TASK_WINDOWS];
     sacx_button_slot buttons[SACX_MAX_TASK_BUTTONS];
     sacx_textbox_slot textboxes[SACX_MAX_TASK_TEXTBOXES];
+    sacx_ui_view_slot ui_views[SACX_MAX_TASK_UI_VIEWS];
+    sacx_ui_dropdown_slot ui_dropdowns[SACX_MAX_TASK_UI_DROPDOWNS];
+    sacx_ui_radio_slot ui_radios[SACX_MAX_TASK_UI_RADIOS];
+    sacx_ui_toggle_slot ui_toggles[SACX_MAX_TASK_UI_TOGGLES];
     sacx_gfx_slot gfx_objects[SACX_MAX_TASK_GFX_OBJECTS];
     sacx_image_slot images[SACX_MAX_TASK_IMAGES];
     sacx_3d_scene_slot scenes3d[SACX_MAX_TASK_3D_SCENES];
     sacx_3d_player_slot players3d[SACX_MAX_TASK_3D_PLAYERS];
+    sacx_worker_slot workers[SACX_MAX_TASK_WORKERS];
+    sacx_async_image_save_slot image_saves[SACX_MAX_TASK_ASYNC_IMAGE_SAVES];
 } sacx_task;
 
 static sacx_task G_tasks[SACX_MAX_TASKS];
@@ -168,6 +255,7 @@ static uint32_t G_rr_cursor = 0u;
 static const kfont *G_runtime_font = 0;
 
 static kwindow_handle sacx_task_busy_window(sacx_task *task);
+static void sacx_task_clean_worker_memory(sacx_task *task);
 
 static void sacx_sync_executable_range(const void *base, uint32_t size)
 {
@@ -201,6 +289,64 @@ static int sacx_ptr_in_image(const sacx_task *task, const void *ptr)
     if ((p & 0x3u) != 0u)
         return 0;
     return 1;
+}
+
+static int sacx_task_worker_active(const sacx_task *task)
+{
+    if (!task)
+        return 0;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_WORKERS; ++i)
+    {
+        if (!task->workers[i].used)
+            continue;
+        uint32_t status = kwork_status(task->workers[i].job_id);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+            return 1;
+    }
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_ASYNC_IMAGE_SAVES; ++i)
+    {
+        if (!task->image_saves[i].used)
+            continue;
+        uint32_t status = kwork_status(task->image_saves[i].job_id);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+            return 1;
+    }
+    return 0;
+}
+
+static sacx_worker_slot *sacx_task_alloc_worker_slot(sacx_task *task)
+{
+    if (!task)
+        return 0;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_WORKERS; ++i)
+    {
+        uint32_t status = task->workers[i].used ? kwork_status(task->workers[i].job_id) : KWORK_STATUS_EMPTY;
+        if (!task->workers[i].used ||
+            status == KWORK_STATUS_EMPTY ||
+            status == KWORK_STATUS_DONE ||
+            status == KWORK_STATUS_FAILED)
+        {
+            task->workers[i] = (sacx_worker_slot){0};
+            task->workers[i].used = 1u;
+            task->workers[i].owner = task;
+            return &task->workers[i];
+        }
+    }
+    return 0;
+}
+
+static void sacx_worker_thunk(void *ctx)
+{
+    sacx_worker_slot *slot = (sacx_worker_slot *)ctx;
+    sacx_task *task = slot ? slot->owner : 0;
+    if (!slot || !task || !slot->fn)
+        return;
+    if (task->state == SACX_TASK_UNUSED)
+        return;
+    if (!sacx_ptr_in_image(task, (const void *)slot->fn))
+        return;
+    slot->fn(slot->user);
+    sacx_task_clean_worker_memory(task);
 }
 
 static void sacx_copy_trunc(char *dst, uint32_t cap, const char *src)
@@ -508,6 +654,9 @@ static const char *G_known_imports[] = {
     "img_pixels",
     "img_touch",
     "img_save",
+    "img_save_async",
+    "img_save_status",
+    "img_save_release",
     "img_draw_text",
     "img_clipboard_set",
     "img_clipboard_get",
@@ -517,6 +666,54 @@ static const char *G_known_imports[] = {
     "window_close_requested",
     "window_close_accept",
     "window_close_cancel",
+    "textbox_select",
+    "textbox_selection",
+    "textbox_copy_selection",
+    "textbox_cut_selection",
+    "textbox_paste",
+    "textbox_undo",
+    "textbox_redo",
+    "textbox_set_max_len",
+    "textbox_max_len",
+    "window_set_modal_child",
+    "window_clear_modal_child",
+    "window_has_active_modal",
+    "window_center_on_parent",
+    "dialog_open_file_for_window",
+    "dialog_save_file_for_window",
+    "ui_view_create_rect",
+    "ui_window_view_create",
+    "ui_view_destroy",
+    "ui_view_root",
+    "ui_view_add_obj",
+    "ui_view_set_state",
+    "ui_view_state",
+    "ui_view_set_visible",
+    "ui_view_set_layout",
+    "ui_view_apply_layout",
+    "ui_view_set_bounds",
+    "ui_dropdown_create",
+    "ui_dropdown_destroy",
+    "ui_dropdown_root",
+    "ui_dropdown_selected",
+    "ui_dropdown_set_selected",
+    "ui_dropdown_set_enabled",
+    "ui_radio_create",
+    "ui_radio_destroy",
+    "ui_radio_root",
+    "ui_radio_selected",
+    "ui_radio_set_selected",
+    "ui_radio_set_enabled",
+    "ui_toggle_create",
+    "ui_toggle_destroy",
+    "ui_toggle_root",
+    "ui_toggle_checked",
+    "ui_toggle_set_checked",
+    "ui_toggle_set_enabled",
+    "work_submit",
+    "work_status",
+    "work_wait",
+    "work_cancel",
 };
 
 static int sacx_import_known(const char *name)
@@ -697,22 +894,80 @@ static kgfx_image_sample_mode sacx_to_sample_mode(uint32_t mode)
     return KGFX_IMAGE_SAMPLE_NEAREST;
 }
 
+static int32_t sacx_ui_i32(int32_t px)
+{
+    return kwindow_ui_scale_i32(px);
+}
+
+static uint32_t sacx_ui_u32(uint32_t px)
+{
+    return kwindow_ui_scale_u32(px);
+}
+
+static int32_t sacx_ui_unscale_i32(int32_t px)
+{
+    uint32_t fp = kwindow_ui_scale_fp();
+    int64_t scaled;
+    if (fp == 0u)
+        return px;
+    scaled = (int64_t)px * 1024ll;
+    if (scaled >= 0)
+        scaled += (int64_t)fp / 2ll;
+    else
+        scaled -= (int64_t)fp / 2ll;
+    return (int32_t)(scaled / (int64_t)fp);
+}
+
+static uint32_t sacx_ui_unscale_u32(uint32_t px)
+{
+    uint32_t fp = kwindow_ui_scale_fp();
+    uint64_t scaled;
+    if (fp == 0u)
+        return px;
+    scaled = (uint64_t)px * 1024ull + ((uint64_t)fp / 2ull);
+    return (uint32_t)(scaled / (uint64_t)fp);
+}
+
+static uint32_t sacx_ui_text(uint32_t scale)
+{
+    return kwindow_ui_text_scale(scale ? scale : 1u);
+}
+
+static uint32_t sacx_ui_percent(uint32_t pct)
+{
+    uint64_t scaled = ((uint64_t)pct * (uint64_t)kwindow_ui_scale_fp() + 512ull) / 1024ull;
+    if (pct && !scaled)
+        scaled = 1ull;
+    if (scaled > 0xFFFFFFFFull)
+        scaled = 0xFFFFFFFFull;
+    return (uint32_t)scaled;
+}
+
+static int32_t sacx_ui_spacing(int32_t px)
+{
+    return px ? kwindow_ui_scale_i32(px) : 0;
+}
+
 static void sacx_button_style_to_native(const sacx_button_style *in, kbutton_style *out)
 {
     if (!out)
         return;
 
     *out = kbutton_style_default();
-    if (!in)
-        return;
+    if (in)
+    {
+        out->fill = sacx_to_kcolor(in->fill);
+        out->hover_fill = sacx_to_kcolor(in->hover_fill);
+        out->pressed_fill = sacx_to_kcolor(in->pressed_fill);
+        out->outline = sacx_to_kcolor(in->outline);
+        out->alpha = in->alpha;
+        out->outline_alpha = in->outline_alpha;
+        out->outline_width = in->outline_width;
+    }
 
-    out->fill = sacx_to_kcolor(in->fill);
-    out->hover_fill = sacx_to_kcolor(in->hover_fill);
-    out->pressed_fill = sacx_to_kcolor(in->pressed_fill);
-    out->outline = sacx_to_kcolor(in->outline);
-    out->alpha = in->alpha;
-    out->outline_alpha = in->outline_alpha;
-    out->outline_width = in->outline_width;
+    out->outline_width = (uint16_t)sacx_ui_u32(out->outline_width);
+    if (!out->outline_width)
+        out->outline_width = 1u;
 }
 
 static void sacx_textbox_style_to_native(const sacx_textbox_style *in, ktextbox_style *out)
@@ -721,21 +976,28 @@ static void sacx_textbox_style_to_native(const sacx_textbox_style *in, ktextbox_
         return;
 
     *out = ktextbox_style_default();
-    if (!in)
-        return;
+    if (in)
+    {
+        out->fill = sacx_to_kcolor(in->fill);
+        out->hover_fill = sacx_to_kcolor(in->hover_fill);
+        out->focus_fill = sacx_to_kcolor(in->focus_fill);
+        out->outline = sacx_to_kcolor(in->outline);
+        out->focus_outline = sacx_to_kcolor(in->focus_outline);
+        out->text_color = sacx_to_kcolor(in->text_color);
+        out->alpha = in->alpha;
+        out->outline_alpha = in->outline_alpha;
+        out->outline_width = in->outline_width;
+        out->padding_x = in->padding_x;
+        out->padding_y = in->padding_y;
+        out->text_scale = in->text_scale ? in->text_scale : 1u;
+    }
 
-    out->fill = sacx_to_kcolor(in->fill);
-    out->hover_fill = sacx_to_kcolor(in->hover_fill);
-    out->focus_fill = sacx_to_kcolor(in->focus_fill);
-    out->outline = sacx_to_kcolor(in->outline);
-    out->focus_outline = sacx_to_kcolor(in->focus_outline);
-    out->text_color = sacx_to_kcolor(in->text_color);
-    out->alpha = in->alpha;
-    out->outline_alpha = in->outline_alpha;
-    out->outline_width = in->outline_width;
-    out->padding_x = in->padding_x;
-    out->padding_y = in->padding_y;
-    out->text_scale = in->text_scale ? in->text_scale : 1u;
+    out->outline_width = (uint16_t)sacx_ui_u32(out->outline_width);
+    out->padding_x = (uint16_t)sacx_ui_u32(out->padding_x);
+    out->padding_y = (uint16_t)sacx_ui_u32(out->padding_y);
+    out->text_scale = sacx_ui_text(out->text_scale ? out->text_scale : 1u);
+    if (!out->outline_width)
+        out->outline_width = 1u;
 }
 
 static void sacx_window_style_to_native(const sacx_window_style *in, kwindow_style *out)
@@ -793,6 +1055,15 @@ static sacx_gfx_slot *sacx_gfx_from_handle(sacx_task *task, uint32_t handle)
     return &task->gfx_objects[handle - 1u];
 }
 
+static void sacx_gfx_mark_owned(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_GFX_OBJECTS)
+        return;
+    if (!task->gfx_objects[handle - 1u].used)
+        return;
+    task->gfx_objects[handle - 1u].destroy_on_finish = 1u;
+}
+
 static int sacx_gfx_register_existing(sacx_task *task, kgfx_obj_handle obj, uint32_t *out_handle)
 {
     if (!task || !out_handle || obj.idx < 0 || !kgfx_obj_ref(obj))
@@ -814,6 +1085,7 @@ static int sacx_gfx_register_existing(sacx_task *task, kgfx_obj_handle obj, uint
         if (task->gfx_objects[i].used)
             continue;
         task->gfx_objects[i].used = 1u;
+        task->gfx_objects[i].destroy_on_finish = 0u;
         task->gfx_objects[i].handle = obj;
         *out_handle = i + 1u;
         return 0;
@@ -838,6 +1110,42 @@ static sacx_textbox_slot *sacx_textbox_from_handle(sacx_task *task, uint32_t han
     if (!task->textboxes[handle - 1u].used)
         return 0;
     return &task->textboxes[handle - 1u];
+}
+
+static sacx_ui_view_slot *sacx_ui_view_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_UI_VIEWS)
+        return 0;
+    if (!task->ui_views[handle - 1u].used)
+        return 0;
+    return &task->ui_views[handle - 1u];
+}
+
+static sacx_ui_dropdown_slot *sacx_ui_dropdown_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_UI_DROPDOWNS)
+        return 0;
+    if (!task->ui_dropdowns[handle - 1u].used)
+        return 0;
+    return &task->ui_dropdowns[handle - 1u];
+}
+
+static sacx_ui_radio_slot *sacx_ui_radio_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_UI_RADIOS)
+        return 0;
+    if (!task->ui_radios[handle - 1u].used)
+        return 0;
+    return &task->ui_radios[handle - 1u];
+}
+
+static sacx_ui_toggle_slot *sacx_ui_toggle_from_handle(sacx_task *task, uint32_t handle)
+{
+    if (!task || handle == 0u || handle > SACX_MAX_TASK_UI_TOGGLES)
+        return 0;
+    if (!task->ui_toggles[handle - 1u].used)
+        return 0;
+    return &task->ui_toggles[handle - 1u];
 }
 
 static sacx_image_slot *sacx_image_from_handle(sacx_task *task, uint32_t handle)
@@ -898,6 +1206,57 @@ static void sacx_textbox_submit_trampoline(ktextbox_handle textbox, const char *
     app_handle = (uint32_t)((slot - slot->owner->textboxes) + 1u);
     G_current_task = slot->owner;
     slot->callback(app_handle, text ? text : "", slot->callback_user);
+    G_current_task = saved;
+}
+
+static void sacx_ui_dropdown_change_trampoline(uint32_t handle, int32_t value, void *user)
+{
+    sacx_ui_dropdown_slot *slot = (sacx_ui_dropdown_slot *)user;
+    sacx_task *saved = G_current_task;
+    uint32_t app_handle = 0u;
+
+    (void)handle;
+
+    if (!slot || !slot->used || !slot->owner || !slot->callback)
+        return;
+
+    app_handle = (uint32_t)((slot - slot->owner->ui_dropdowns) + 1u);
+    G_current_task = slot->owner;
+    slot->callback(app_handle, value, slot->callback_user);
+    G_current_task = saved;
+}
+
+static void sacx_ui_radio_change_trampoline(uint32_t handle, int32_t value, void *user)
+{
+    sacx_ui_radio_slot *slot = (sacx_ui_radio_slot *)user;
+    sacx_task *saved = G_current_task;
+    uint32_t app_handle = 0u;
+
+    (void)handle;
+
+    if (!slot || !slot->used || !slot->owner || !slot->callback)
+        return;
+
+    app_handle = (uint32_t)((slot - slot->owner->ui_radios) + 1u);
+    G_current_task = slot->owner;
+    slot->callback(app_handle, value, slot->callback_user);
+    G_current_task = saved;
+}
+
+static void sacx_ui_toggle_change_trampoline(uint32_t handle, int32_t value, void *user)
+{
+    sacx_ui_toggle_slot *slot = (sacx_ui_toggle_slot *)user;
+    sacx_task *saved = G_current_task;
+    uint32_t app_handle = 0u;
+
+    (void)handle;
+
+    if (!slot || !slot->used || !slot->owner || !slot->callback)
+        return;
+
+    app_handle = (uint32_t)((slot - slot->owner->ui_toggles) + 1u);
+    G_current_task = slot->owner;
+    slot->callback(app_handle, value, slot->callback_user);
     G_current_task = saved;
 }
 
@@ -973,6 +1332,63 @@ static void sacx_task_destroy_textboxes(sacx_task *task)
     }
 }
 
+static void sacx_task_destroy_ui_widgets(sacx_task *task)
+{
+    if (!task)
+        return;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_DROPDOWNS; ++i)
+    {
+        if (!task->ui_dropdowns[i].used)
+            continue;
+        (void)kui_dropdown_destroy(task->ui_dropdowns[i].handle);
+        task->ui_dropdowns[i].used = 0u;
+        task->ui_dropdowns[i].handle.idx = -1;
+        task->ui_dropdowns[i].callback = 0;
+        task->ui_dropdowns[i].callback_user = 0;
+        task->ui_dropdowns[i].owner = 0;
+    }
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_RADIOS; ++i)
+    {
+        if (!task->ui_radios[i].used)
+            continue;
+        (void)kui_radio_destroy(task->ui_radios[i].handle);
+        task->ui_radios[i].used = 0u;
+        task->ui_radios[i].handle.idx = -1;
+        task->ui_radios[i].callback = 0;
+        task->ui_radios[i].callback_user = 0;
+        task->ui_radios[i].owner = 0;
+    }
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_TOGGLES; ++i)
+    {
+        if (!task->ui_toggles[i].used)
+            continue;
+        (void)kui_toggle_destroy(task->ui_toggles[i].handle);
+        task->ui_toggles[i].used = 0u;
+        task->ui_toggles[i].handle.idx = -1;
+        task->ui_toggles[i].callback = 0;
+        task->ui_toggles[i].callback_user = 0;
+        task->ui_toggles[i].owner = 0;
+    }
+}
+
+static void sacx_task_destroy_ui_views(sacx_task *task)
+{
+    if (!task)
+        return;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_VIEWS; ++i)
+    {
+        if (!task->ui_views[i].used)
+            continue;
+        (void)kui_view_destroy(task->ui_views[i].handle);
+        task->ui_views[i].used = 0u;
+        task->ui_views[i].handle.idx = -1;
+    }
+}
+
 static void sacx_task_destroy_buttons(sacx_task *task)
 {
     if (!task)
@@ -1015,8 +1431,10 @@ static void sacx_task_destroy_gfx_objects(sacx_task *task)
     {
         if (!task->gfx_objects[i].used)
             continue;
-        (void)kgfx_obj_destroy(task->gfx_objects[i].handle);
+        if (task->gfx_objects[i].destroy_on_finish)
+            (void)kgfx_obj_destroy(task->gfx_objects[i].handle);
         task->gfx_objects[i].used = 0u;
+        task->gfx_objects[i].destroy_on_finish = 0u;
         task->gfx_objects[i].handle.idx = -1;
     }
 }
@@ -1047,6 +1465,69 @@ static void sacx_task_destroy_images(sacx_task *task)
         task->images[i].image.h = 0u;
         task->images[i].image.px = 0;
     }
+}
+
+static void sacx_task_clean_worker_memory(sacx_task *task)
+{
+    if (!task)
+        return;
+    if (task->arena && task->arena_size)
+        asm_dma_clean_range(task->arena, task->arena_size);
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
+    {
+        uint64_t bytes = 0u;
+        if (!task->images[i].used || !task->images[i].image.px ||
+            !task->images[i].image.w || !task->images[i].image.h)
+            continue;
+        bytes = (uint64_t)task->images[i].image.w * (uint64_t)task->images[i].image.h * 4ull;
+        asm_dma_clean_range(task->images[i].image.px, bytes);
+    }
+}
+
+static void sacx_task_invalidate_image_memory(sacx_task *task)
+{
+    if (!task)
+        return;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
+    {
+        uint64_t bytes = 0u;
+        if (!task->images[i].used || !task->images[i].image.px ||
+            !task->images[i].image.w || !task->images[i].image.h)
+            continue;
+        bytes = (uint64_t)task->images[i].image.w * (uint64_t)task->images[i].image.h * 4ull;
+        asm_dma_invalidate_range(task->images[i].image.px, bytes);
+    }
+}
+
+static void sacx_async_image_save_release_slot(sacx_async_image_save_slot *slot)
+{
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+
+    if (!slot || !slot->used)
+        return;
+    if (slot->write_open)
+    {
+        kfile_close(&slot->write_file);
+        slot->write_open = 0u;
+    }
+    if (slot->image.px && slot->image.w && slot->image.h)
+    {
+        bytes = (uint64_t)slot->image.w * (uint64_t)slot->image.h * 4ull;
+        pages = (bytes + 4095ull) >> 12;
+        if (pages)
+            pmem_free_pages(slot->image.px, pages);
+    }
+    kimg_encode_free(slot->encoded_data, slot->encoded_pages);
+    *slot = (sacx_async_image_save_slot){0};
+}
+
+static void sacx_task_destroy_async_image_saves(sacx_task *task)
+{
+    if (!task)
+        return;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_ASYNC_IMAGE_SAVES; ++i)
+        sacx_async_image_save_release_slot(&task->image_saves[i]);
 }
 
 static void sacx_task_destroy_3d_scenes(sacx_task *task)
@@ -1091,28 +1572,38 @@ static void sacx_task_destroy_3d_players(sacx_task *task)
 static void sacx_task_finish(sacx_task *task, int32_t status, const char *message, uint32_t new_state)
 {
     char status_text[16];
+    int worker_active = 0;
 
     if (!task)
         return;
+
+    worker_active = sacx_task_worker_active(task);
 
     sacx_task_close_files(task);
     sacx_task_close_dirs(task);
     sacx_task_destroy_3d_players(task);
     sacx_task_destroy_3d_scenes(task);
+    sacx_task_destroy_gfx_objects(task);
+    sacx_task_destroy_ui_widgets(task);
+    sacx_task_destroy_ui_views(task);
     sacx_task_destroy_textboxes(task);
     sacx_task_destroy_buttons(task);
     sacx_task_destroy_windows(task);
-    sacx_task_destroy_gfx_objects(task);
     sacx_task_destroy_images(task);
+    if (!worker_active)
+        sacx_task_destroy_async_image_saves(task);
 
-    if (task->arena)
+    if (task->arena && !worker_active)
     {
         pmem_free_executable_pages(task->arena, task->arena_size / 4096u);
         task->arena = 0;
     }
 
-    task->image_base = 0;
-    task->image_size = 0u;
+    if (!worker_active)
+    {
+        task->image_base = 0;
+        task->image_size = 0u;
+    }
     task->entry = 0;
     task->update_fn = 0;
     task->dialog_callback = 0;
@@ -1172,8 +1663,19 @@ static void sacx_task_reset(sacx_task *task)
         task->buttons[i].handle.idx = -1;
     for (uint32_t i = 0u; i < SACX_MAX_TASK_TEXTBOXES; ++i)
         task->textboxes[i].handle.idx = -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_VIEWS; ++i)
+        task->ui_views[i].handle.idx = -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_DROPDOWNS; ++i)
+        task->ui_dropdowns[i].handle.idx = -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_RADIOS; ++i)
+        task->ui_radios[i].handle.idx = -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_TOGGLES; ++i)
+        task->ui_toggles[i].handle.idx = -1;
     for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
+    {
         task->gfx_objects[i].handle.idx = -1;
+        task->gfx_objects[i].destroy_on_finish = 0u;
+    }
     task->sched_quantum_ticks = SACX_SCHED_DEFAULT_QUANTUM_TICKS;
     task->sched_budget_left = SACX_SCHED_DEFAULT_QUANTUM_TICKS;
 }
@@ -1293,7 +1795,10 @@ static int sacx_select_fat_image(const uint8_t *file_data, uint32_t file_size, s
     uint32_t runtime_arch = sacx_runtime_arch();
 
     if (!file_data || !out || file_size < sizeof(sacx_fat_header) || runtime_arch == SACX_ARCH_UNKNOWN)
+    {
+        terminal_warn("sacx: fat select precheck failed");
         return -1;
+    }
 
     fat = (const sacx_fat_header *)file_data;
     if (fat->magic != SACX_MAGIC ||
@@ -1302,13 +1807,22 @@ static int sacx_select_fat_image(const uint8_t *file_data, uint32_t file_size, s
         fat->slice_offset < fat->header_size ||
         fat->slice_count == 0u ||
         fat->slice_count > SACX_MAX_SLICES)
+    {
+        terminal_warn("sacx: fat header invalid");
         return -1;
+    }
 
     if (!sacx_table_ok(fat->slice_offset, fat->slice_count, sizeof(sacx_slice), file_size))
+    {
+        terminal_warn("sacx: fat slice table invalid");
         return -1;
+    }
 
     if (sacx_crc32_zero_range(file_data, file_size, (uint32_t)offsetof(sacx_fat_header, crc32), 4u) != fat->crc32)
+    {
+        terminal_warn("sacx: fat crc invalid");
         return -1;
+    }
 
     slice_bytes = file_data + fat->slice_offset;
     for (uint32_t i = 0u; i < fat->slice_count; ++i)
@@ -1319,7 +1833,10 @@ static int sacx_select_fat_image(const uint8_t *file_data, uint32_t file_size, s
         if (slice.kind != SACX_SLICE_KIND_NATIVE)
             continue;
         if (slice.file_size < sizeof(sacx_header) || !sacx_range_ok(slice.file_offset, slice.file_size, file_size))
+        {
+            terminal_warn("sacx: fat slice range invalid");
             return -1;
+        }
         if (slice.arch != runtime_arch)
             continue;
 
@@ -1330,6 +1847,9 @@ static int sacx_select_fat_image(const uint8_t *file_data, uint32_t file_size, s
         return 0;
     }
 
+    terminal_print_inline("sacx: no slice for runtime arch=");
+    terminal_print_inline_hex32(runtime_arch);
+    terminal_print("");
     return -1;
 }
 
@@ -1338,12 +1858,18 @@ static int sacx_select_image(const uint8_t *file_data, uint32_t file_size, sacx_
     const sacx_header *hdr = 0;
 
     if (!file_data || !out || file_size < sizeof(sacx_header))
+    {
+        terminal_warn("sacx: file too small");
         return -1;
+    }
 
     memset(out, 0, sizeof(*out));
     hdr = (const sacx_header *)file_data;
     if (hdr->magic != SACX_MAGIC)
+    {
+        terminal_warn("sacx: bad magic");
         return -1;
+    }
 
     if (hdr->version == SACX_FAT_VERSION)
         return sacx_select_fat_image(file_data, file_size, out);
@@ -1352,7 +1878,10 @@ static int sacx_select_image(const uint8_t *file_data, uint32_t file_size, sacx_
     {
         /* Legacy v1 SACX files were produced as AArch64-only images. */
         if (sacx_runtime_arch() != SACX_ARCH_AA64)
+        {
+            terminal_warn("sacx: legacy aa64 app on non-aa64 runtime");
             return -1;
+        }
 
         out->data = file_data;
         out->size = file_size;
@@ -1361,6 +1890,9 @@ static int sacx_select_image(const uint8_t *file_data, uint32_t file_size, sacx_
         return 0;
     }
 
+    terminal_print_inline("sacx: unsupported version=");
+    terminal_print_inline_hex32(hdr->version);
+    terminal_print("");
     return -1;
 }
 
@@ -1376,31 +1908,49 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
     uint32_t arena_pages = 0u;
 
     if (!task || !file_data || file_size < sizeof(sacx_header))
+    {
+        terminal_warn("sacx: payload too small");
         return -1;
+    }
 
     hdr = (const sacx_header *)file_data;
     if (hdr->magic != SACX_MAGIC ||
         hdr->version != SACX_VERSION ||
         hdr->header_size < sizeof(sacx_header))
+    {
+        terminal_warn("sacx: payload header invalid");
         return -1;
+    }
 
     if (hdr->segment_count > SACX_MAX_SEGMENTS ||
         hdr->reloc_count > SACX_MAX_RELOCS ||
         hdr->import_count > SACX_MAX_IMPORTS)
+    {
+        terminal_warn("sacx: payload table count invalid");
         return -1;
+    }
 
     if (!sacx_table_ok(hdr->segment_offset, hdr->segment_count, sizeof(sacx_segment), file_size) ||
         !sacx_table_ok(hdr->reloc_offset, hdr->reloc_count, sizeof(sacx_reloc), file_size) ||
         !sacx_table_ok(hdr->import_offset, hdr->import_count, sizeof(sacx_import), file_size) ||
         !sacx_range_ok(hdr->strings_offset, hdr->strings_size, file_size) ||
         !sacx_range_ok(hdr->image_offset, 0u, file_size))
+    {
+        terminal_warn("sacx: payload ranges invalid");
         return -1;
+    }
 
     if (hdr->image_size == 0u || hdr->image_size > SACX_APP_ARENA_BYTES || hdr->entry_rva >= hdr->image_size)
+    {
+        terminal_warn("sacx: payload image size invalid");
         return -1;
+    }
 
     if (sacx_crc32_zero_range(file_data, file_size, (uint32_t)offsetof(sacx_header, crc32), 4u) != hdr->crc32)
+    {
+        terminal_warn("sacx: payload crc invalid");
         return -1;
+    }
 
     segment_bytes = file_data + hdr->segment_offset;
     reloc_bytes = file_data + hdr->reloc_offset;
@@ -1416,13 +1966,30 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
         memcpy(&imp, import_bytes + (uint64_t)i * sizeof(sacx_import), sizeof(imp));
         name = sacx_string_at(strings, hdr->strings_size, imp.name_offset);
         if (!name || !sacx_import_known(name))
+        {
+            terminal_print_inline("sacx: unknown import ");
+            terminal_print(name ? name : "(bad)");
             return -1;
+        }
     }
 
     arena_pages = (hdr->image_size + 4095u) / 4096u;
     task->arena = (uint8_t *)pmem_alloc_executable_pages(arena_pages);
     if (!task->arena)
+    {
+        terminal_print_inline("sacx: executable arena alloc failed pages=");
+        terminal_print_inline_hex32(arena_pages);
+        terminal_print("");
+        if (k_bootinfo_ptr)
+        {
+            terminal_print_inline("sacx: exec pool base=");
+            terminal_print_inline_hex64(k_bootinfo_ptr->sacx_exec_pool_base_phys);
+            terminal_print_inline(" size=");
+            terminal_print_inline_hex64(k_bootinfo_ptr->sacx_exec_pool_size_bytes);
+            terminal_print("");
+        }
         return -1;
+    }
     task->arena_size = arena_pages * 4096u;
     sacx_memset_cooperative(task->arena, 0u, task->arena_size);
     task->image_base = task->arena;
@@ -1437,11 +2004,20 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
         memcpy(&seg, segment_bytes + (uint64_t)i * sizeof(sacx_segment), sizeof(seg));
 
         if (seg.mem_size < seg.file_size)
+        {
+            terminal_warn("sacx: segment mem/file invalid");
             return -1;
+        }
         if (!sacx_range_ok(seg.rva, seg.mem_size, hdr->image_size))
+        {
+            terminal_warn("sacx: segment memory range invalid");
             return -1;
+        }
         if (!sacx_range_ok(seg.file_offset, seg.file_size, image_blob_size))
+        {
+            terminal_warn("sacx: segment file range invalid");
             return -1;
+        }
 
         dst = task->image_base + seg.rva;
         src = image_blob + seg.file_offset;
@@ -1459,11 +2035,20 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
         memcpy(&rel, reloc_bytes + (uint64_t)i * sizeof(sacx_reloc), sizeof(rel));
 
         if (rel.type != SACX_RELOC_RELATIVE64)
+        {
+            terminal_warn("sacx: unsupported reloc type");
             return -1;
+        }
         if (!sacx_range_ok(rel.target_rva, 8u, hdr->image_size))
+        {
+            terminal_warn("sacx: reloc target invalid");
             return -1;
+        }
         if (rel.addend >= hdr->image_size)
+        {
+            terminal_warn("sacx: reloc addend invalid");
             return -1;
+        }
 
         where = (uint64_t *)(task->image_base + rel.target_rva);
         *where = (uint64_t)(uintptr_t)(task->image_base + rel.addend);
@@ -1481,9 +2066,14 @@ static int sacx_load_image(sacx_task *task, const uint8_t *file_data, uint32_t f
     int rc = -1;
 
     if (sacx_select_image(file_data, file_size, &selected) != 0)
+    {
+        terminal_warn("sacx: image selection failed");
         return -1;
+    }
 
     rc = sacx_load_image_payload(task, selected.data, selected.size, friendly_path);
+    if (rc != 0)
+        terminal_warn("sacx: payload load failed");
     if (rc == 0)
     {
         task->loaded_arch = selected.arch;
@@ -1542,25 +2132,36 @@ static int sacx_api_set_console_visible(uint32_t visible)
     return 0;
 }
 
-static int sacx_api_dialog_open_file(const char *initial_dir,
-                                     const char *suggested_name,
-                                     sacx_file_dialog_fn on_result,
-                                     void *user)
+static int sacx_api_dialog_begin(file_explorer_dialog_mode mode,
+                                 uint32_t owner_window_handle,
+                                 const char *initial_dir,
+                                 const char *suggested_name,
+                                 sacx_file_dialog_fn on_result,
+                                 void *user)
 {
+    kwindow_handle owner = {-1};
+
     if (!G_current_task || !on_result)
         return -1;
     if (!sacx_ptr_in_image(G_current_task, (const void *)on_result))
         return -1;
     if (file_explorer_dialog_active())
         return -1;
+    if (owner_window_handle)
+    {
+        sacx_window_slot *slot = sacx_window_from_handle(G_current_task, owner_window_handle);
+        if (!slot)
+            return -1;
+        owner = slot->handle;
+    }
 
     G_current_task->dialog_callback = on_result;
     G_current_task->dialog_user = user;
-    if (file_explorer_begin_dialog(FILE_EXPLORER_DIALOG_OPEN_FILE,
-                                   (initial_dir && initial_dir[0]) ? initial_dir : "/",
-                                   suggested_name,
-                                   sacx_file_dialog_trampoline,
-                                   G_current_task) != 0)
+    if (file_explorer_begin_dialog_for_window(mode, owner,
+                                              (initial_dir && initial_dir[0]) ? initial_dir : "/",
+                                              suggested_name,
+                                              sacx_file_dialog_trampoline,
+                                              G_current_task) != 0)
     {
         G_current_task->dialog_callback = 0;
         G_current_task->dialog_user = 0;
@@ -1569,31 +2170,40 @@ static int sacx_api_dialog_open_file(const char *initial_dir,
     return 0;
 }
 
+static int sacx_api_dialog_open_file(const char *initial_dir,
+                                     const char *suggested_name,
+                                     sacx_file_dialog_fn on_result,
+                                     void *user)
+{
+    return sacx_api_dialog_begin(FILE_EXPLORER_DIALOG_OPEN_FILE, 0u, initial_dir, suggested_name, on_result, user);
+}
+
 static int sacx_api_dialog_save_file(const char *initial_dir,
                                      const char *suggested_name,
                                      sacx_file_dialog_fn on_result,
                                      void *user)
 {
-    if (!G_current_task || !on_result)
-        return -1;
-    if (!sacx_ptr_in_image(G_current_task, (const void *)on_result))
-        return -1;
-    if (file_explorer_dialog_active())
-        return -1;
+    return sacx_api_dialog_begin(FILE_EXPLORER_DIALOG_SAVE_FILE, 0u, initial_dir, suggested_name, on_result, user);
+}
 
-    G_current_task->dialog_callback = on_result;
-    G_current_task->dialog_user = user;
-    if (file_explorer_begin_dialog(FILE_EXPLORER_DIALOG_SAVE_FILE,
-                                   (initial_dir && initial_dir[0]) ? initial_dir : "/",
-                                   suggested_name,
-                                   sacx_file_dialog_trampoline,
-                                   G_current_task) != 0)
-    {
-        G_current_task->dialog_callback = 0;
-        G_current_task->dialog_user = 0;
-        return -1;
-    }
-    return 0;
+static int sacx_api_dialog_open_file_for_window(uint32_t owner_window_handle,
+                                                const char *initial_dir,
+                                                const char *suggested_name,
+                                                sacx_file_dialog_fn on_result,
+                                                void *user)
+{
+    return sacx_api_dialog_begin(FILE_EXPLORER_DIALOG_OPEN_FILE, owner_window_handle,
+                                 initial_dir, suggested_name, on_result, user);
+}
+
+static int sacx_api_dialog_save_file_for_window(uint32_t owner_window_handle,
+                                                const char *initial_dir,
+                                                const char *suggested_name,
+                                                sacx_file_dialog_fn on_result,
+                                                void *user)
+{
+    return sacx_api_dialog_begin(FILE_EXPLORER_DIALOG_SAVE_FILE, owner_window_handle,
+                                 initial_dir, suggested_name, on_result, user);
 }
 
 static int sacx_api_dialog_active(void)
@@ -1631,6 +2241,61 @@ static uint32_t sacx_api_sched_preemptions(void)
     if (!G_current_task)
         return 0u;
     return G_current_task->preemptions;
+}
+
+static int sacx_api_work_submit(sacx_worker_fn fn, void *user, uint32_t *out_job_id)
+{
+    sacx_worker_slot *slot;
+    uint32_t job_id = 0u;
+    int rc;
+
+    if (out_job_id)
+        *out_job_id = 0u;
+    if (!G_current_task || !fn || !out_job_id)
+        return -1;
+    if (!sacx_ptr_in_image(G_current_task, (const void *)fn))
+        return -2;
+
+    slot = sacx_task_alloc_worker_slot(G_current_task);
+    if (!slot)
+        return -3;
+    slot->fn = fn;
+    slot->user = user;
+
+    sacx_task_clean_worker_memory(G_current_task);
+    asm_dma_clean_range(slot, sizeof(*slot));
+    rc = kwork_submit(sacx_worker_thunk, slot, KWORK_SUBMIT_REQUIRE_REMOTE, &job_id);
+    if (rc != 0)
+    {
+        *slot = (sacx_worker_slot){0};
+        return rc;
+    }
+    slot->job_id = job_id;
+    *out_job_id = job_id;
+    return 0;
+}
+
+static uint32_t sacx_api_work_status(uint32_t job_id)
+{
+    uint32_t status = kwork_status(job_id);
+    if (G_current_task &&
+        (status == KWORK_STATUS_DONE || status == KWORK_STATUS_FAILED))
+    {
+        if (G_current_task->arena && G_current_task->arena_size)
+            asm_dma_invalidate_range(G_current_task->arena, G_current_task->arena_size);
+        sacx_task_invalidate_image_memory(G_current_task);
+    }
+    return status;
+}
+
+static int sacx_api_work_wait(uint32_t job_id, uint64_t spin_limit)
+{
+    return kwork_wait(job_id, spin_limit);
+}
+
+static int sacx_api_work_cancel(uint32_t job_id)
+{
+    return kwork_cancel(job_id);
 }
 
 static uint64_t sacx_api_time_ticks(void)
@@ -1840,14 +2505,15 @@ static int sacx_api_dir_close(uint32_t handle)
 static int sacx_api_window_create_internal(int32_t x, int32_t y, uint32_t w, uint32_t h, int32_t z,
                                            const char *title, const sacx_window_style *style, uint32_t *out_handle)
 {
-    kwindow_handle hnd = {0};
+    kwindow_handle hnd = {-1};
     kwindow_style native_style;
 
     if (!G_current_task || !out_handle || !G_runtime_font)
         return -1;
 
     sacx_window_style_to_native(style, &native_style);
-    hnd = kwindow_create(x, y, w, h, z, G_runtime_font, title ? title : "SACX App", &native_style);
+    hnd = kwindow_create(sacx_ui_i32(x), sacx_ui_i32(y), sacx_ui_u32(w), sacx_ui_u32(h),
+                         z, G_runtime_font, title ? title : "SACX App", &native_style);
     if (hnd.idx < 0)
         return -1;
 
@@ -1982,7 +2648,506 @@ static int sacx_api_window_point_can_receive_input(uint32_t window_handle, int32
     sacx_window_slot *slot = sacx_window_from_handle(G_current_task, window_handle);
     if (!slot)
         return 0;
-    return kwindow_point_can_receive_input(slot->handle, x, y);
+    return kwindow_point_can_receive_input(slot->handle, sacx_ui_i32(x), sacx_ui_i32(y));
+}
+
+static int sacx_api_window_set_modal_child(uint32_t parent_window_handle, uint32_t child_window_handle)
+{
+    sacx_window_slot *parent = sacx_window_from_handle(G_current_task, parent_window_handle);
+    sacx_window_slot *child = sacx_window_from_handle(G_current_task, child_window_handle);
+    if (!parent || !child)
+        return -1;
+    return kwindow_set_modal_child(parent->handle, child->handle);
+}
+
+static int sacx_api_window_clear_modal_child(uint32_t parent_window_handle)
+{
+    sacx_window_slot *parent = sacx_window_from_handle(G_current_task, parent_window_handle);
+    if (!parent)
+        return -1;
+    return kwindow_clear_modal_child(parent->handle);
+}
+
+static int sacx_api_window_has_active_modal(uint32_t parent_window_handle)
+{
+    sacx_window_slot *parent = sacx_window_from_handle(G_current_task, parent_window_handle);
+    if (!parent)
+        return 0;
+    return kwindow_has_active_modal(parent->handle);
+}
+
+static int sacx_api_window_center_on_parent(uint32_t child_window_handle, uint32_t parent_window_handle)
+{
+    sacx_window_slot *child = sacx_window_from_handle(G_current_task, child_window_handle);
+    sacx_window_slot *parent = sacx_window_from_handle(G_current_task, parent_window_handle);
+    if (!child || !parent)
+        return -1;
+    return kwindow_center_on_parent(child->handle, parent->handle);
+}
+
+static int sacx_ui_parent_from_obj_handle(uint32_t parent_obj_handle, kgfx_obj_handle *out_parent)
+{
+    sacx_gfx_slot *parent = 0;
+
+    if (!out_parent)
+        return -1;
+    out_parent->idx = -1;
+    if (parent_obj_handle == 0u)
+        return 0;
+
+    parent = sacx_gfx_from_handle(G_current_task, parent_obj_handle);
+    if (!parent)
+        return -1;
+    *out_parent = parent->handle;
+    return 0;
+}
+
+static void sacx_ui_layout_to_native(const sacx_ui_layout_desc *in, kui_layout_desc *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!in)
+        return;
+
+    out->kind = in->kind;
+    out->padding_x = sacx_ui_u32(in->padding_x);
+    out->padding_y = sacx_ui_u32(in->padding_y);
+    out->gap_x = sacx_ui_u32(in->gap_x);
+    out->gap_y = sacx_ui_u32(in->gap_y);
+    out->columns = in->columns;
+    out->flags = in->flags;
+}
+
+static int sacx_api_ui_view_create_with_parent(kgfx_obj_handle parent, int32_t x, int32_t y,
+                                               uint32_t w, uint32_t h, int32_t z,
+                                               sacx_color fill, uint32_t visible,
+                                               uint32_t *out_view_handle, uint32_t *out_obj_handle)
+{
+    kui_view_handle view = {-1};
+    kgfx_obj_handle root = {-1};
+    uint32_t free_idx = SACX_MAX_TASK_UI_VIEWS;
+
+    if (!G_current_task || !out_view_handle || !out_obj_handle)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_VIEWS; ++i)
+    {
+        if (!G_current_task->ui_views[i].used)
+        {
+            free_idx = i;
+            break;
+        }
+    }
+    if (free_idx >= SACX_MAX_TASK_UI_VIEWS)
+        return -1;
+
+    if (kui_view_create_rect(parent, sacx_ui_i32(x), sacx_ui_i32(y),
+                             sacx_ui_u32(w), sacx_ui_u32(h), z,
+                             sacx_to_kcolor(fill), visible, &view, &root) != 0)
+        return -1;
+
+    if (sacx_gfx_register_existing(G_current_task, root, out_obj_handle) != 0)
+    {
+        (void)kui_view_destroy(view);
+        return -1;
+    }
+
+    G_current_task->ui_views[free_idx].used = 1u;
+    G_current_task->ui_views[free_idx].handle = view;
+    *out_view_handle = free_idx + 1u;
+    return 0;
+}
+
+static int sacx_api_ui_view_create_rect(uint32_t parent_obj_handle, int32_t x, int32_t y,
+                                        uint32_t w, uint32_t h, int32_t z,
+                                        sacx_color fill, uint32_t visible,
+                                        uint32_t *out_view_handle, uint32_t *out_obj_handle)
+{
+    kgfx_obj_handle parent = {-1};
+    if (sacx_ui_parent_from_obj_handle(parent_obj_handle, &parent) != 0)
+        return -1;
+    return sacx_api_ui_view_create_with_parent(parent, x, y, w, h, z, fill, visible,
+                                              out_view_handle, out_obj_handle);
+}
+
+static int sacx_api_ui_window_view_create(uint32_t window_handle, int32_t x, int32_t y,
+                                          uint32_t w, uint32_t h, int32_t z,
+                                          sacx_color fill, uint32_t visible,
+                                          uint32_t *out_view_handle, uint32_t *out_obj_handle)
+{
+    sacx_window_slot *window = sacx_window_from_handle(G_current_task, window_handle);
+    if (!window)
+        return -1;
+    return sacx_api_ui_view_create_with_parent(kwindow_root(window->handle), x, y, w, h, z, fill, visible,
+                                              out_view_handle, out_obj_handle);
+}
+
+static int sacx_api_ui_view_destroy(uint32_t view_handle)
+{
+    sacx_ui_view_slot *slot = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!slot)
+        return -1;
+    (void)kui_view_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    return 0;
+}
+
+static int sacx_api_ui_view_root(uint32_t view_handle, uint32_t *out_obj_handle)
+{
+    sacx_ui_view_slot *slot = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!slot || !out_obj_handle)
+        return -1;
+    return sacx_gfx_register_existing(G_current_task, kui_view_root(slot->handle), out_obj_handle);
+}
+
+static int sacx_api_ui_view_add_obj(uint32_t view_handle, uint32_t state, uint32_t obj_handle)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    sacx_gfx_slot *obj = sacx_gfx_from_handle(G_current_task, obj_handle);
+    if (!view || !obj)
+        return -1;
+    return kui_view_add_obj(view->handle, state, obj->handle);
+}
+
+static int sacx_api_ui_view_set_state(uint32_t view_handle, uint32_t state)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!view)
+        return -1;
+    return kui_view_set_state(view->handle, state);
+}
+
+static uint32_t sacx_api_ui_view_state(uint32_t view_handle)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    return view ? kui_view_state(view->handle) : 0u;
+}
+
+static int sacx_api_ui_view_set_visible(uint32_t view_handle, uint32_t visible)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!view)
+        return -1;
+    return kui_view_set_visible(view->handle, visible);
+}
+
+static int sacx_api_ui_view_set_layout(uint32_t view_handle, const sacx_ui_layout_desc *desc)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    kui_layout_desc native_desc;
+    if (!view)
+        return -1;
+    sacx_ui_layout_to_native(desc, &native_desc);
+    return kui_view_set_layout(view->handle, &native_desc);
+}
+
+static int sacx_api_ui_view_apply_layout(uint32_t view_handle)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!view)
+        return -1;
+    return kui_view_apply_layout(view->handle);
+}
+
+static int sacx_api_ui_view_set_bounds(uint32_t view_handle, int32_t x, int32_t y, uint32_t w, uint32_t h)
+{
+    sacx_ui_view_slot *view = sacx_ui_view_from_handle(G_current_task, view_handle);
+    if (!view)
+        return -1;
+    return kui_view_set_bounds(view->handle, sacx_ui_i32(x), sacx_ui_i32(y), sacx_ui_u32(w), sacx_ui_u32(h));
+}
+
+static int sacx_api_ui_dropdown_create(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t item_h,
+                                       int32_t z, const char *const *items, uint32_t item_count, uint32_t selected,
+                                       sacx_ui_on_change_fn on_change, void *user,
+                                       uint32_t *out_dropdown_handle, uint32_t *out_obj_handle)
+{
+    kgfx_obj_handle parent = {-1};
+    kgfx_obj_handle root = {-1};
+    kui_dropdown_handle dropdown = {-1};
+
+    if (!G_current_task || !out_dropdown_handle || !out_obj_handle)
+        return -1;
+    if (sacx_ui_parent_from_obj_handle(parent_obj_handle, &parent) != 0)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_DROPDOWNS; ++i)
+    {
+        if (G_current_task->ui_dropdowns[i].used)
+            continue;
+
+        G_current_task->ui_dropdowns[i].used = 1u;
+        G_current_task->ui_dropdowns[i].handle.idx = -1;
+        G_current_task->ui_dropdowns[i].callback = on_change;
+        G_current_task->ui_dropdowns[i].callback_user = user;
+        G_current_task->ui_dropdowns[i].owner = G_current_task;
+
+        if (kui_dropdown_create(parent, sacx_ui_i32(x), sacx_ui_i32(y),
+                                sacx_ui_u32(w), sacx_ui_u32(item_h), z, items, item_count, selected,
+                                on_change ? sacx_ui_dropdown_change_trampoline : 0,
+                                &G_current_task->ui_dropdowns[i], &dropdown, &root) != 0)
+            goto fail;
+
+        if (sacx_gfx_register_existing(G_current_task, root, out_obj_handle) != 0)
+        {
+            (void)kui_dropdown_destroy(dropdown);
+            goto fail;
+        }
+
+        G_current_task->ui_dropdowns[i].handle = dropdown;
+        *out_dropdown_handle = i + 1u;
+        return 0;
+
+    fail:
+        G_current_task->ui_dropdowns[i].used = 0u;
+        G_current_task->ui_dropdowns[i].handle.idx = -1;
+        G_current_task->ui_dropdowns[i].callback = 0;
+        G_current_task->ui_dropdowns[i].callback_user = 0;
+        G_current_task->ui_dropdowns[i].owner = 0;
+        return -1;
+    }
+
+    return -1;
+}
+
+static int sacx_api_ui_dropdown_destroy(uint32_t dropdown_handle)
+{
+    sacx_ui_dropdown_slot *slot = sacx_ui_dropdown_from_handle(G_current_task, dropdown_handle);
+    if (!slot)
+        return -1;
+    (void)kui_dropdown_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    slot->callback = 0;
+    slot->callback_user = 0;
+    slot->owner = 0;
+    return 0;
+}
+
+static int sacx_api_ui_dropdown_root(uint32_t dropdown_handle, uint32_t *out_obj_handle)
+{
+    sacx_ui_dropdown_slot *slot = sacx_ui_dropdown_from_handle(G_current_task, dropdown_handle);
+    if (!slot || !out_obj_handle)
+        return -1;
+    return sacx_gfx_register_existing(G_current_task, kui_dropdown_root(slot->handle), out_obj_handle);
+}
+
+static int sacx_api_ui_dropdown_selected(uint32_t dropdown_handle)
+{
+    sacx_ui_dropdown_slot *slot = sacx_ui_dropdown_from_handle(G_current_task, dropdown_handle);
+    return slot ? kui_dropdown_selected(slot->handle) : -1;
+}
+
+static int sacx_api_ui_dropdown_set_selected(uint32_t dropdown_handle, uint32_t selected)
+{
+    sacx_ui_dropdown_slot *slot = sacx_ui_dropdown_from_handle(G_current_task, dropdown_handle);
+    if (!slot)
+        return -1;
+    return kui_dropdown_set_selected(slot->handle, selected);
+}
+
+static int sacx_api_ui_dropdown_set_enabled(uint32_t dropdown_handle, uint32_t enabled)
+{
+    sacx_ui_dropdown_slot *slot = sacx_ui_dropdown_from_handle(G_current_task, dropdown_handle);
+    if (!slot)
+        return -1;
+    return kui_dropdown_set_enabled(slot->handle, enabled);
+}
+
+static int sacx_api_ui_radio_create(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t item_h,
+                                    int32_t z, const char *const *items, uint32_t item_count, uint32_t selected,
+                                    sacx_ui_on_change_fn on_change, void *user,
+                                    uint32_t *out_radio_handle, uint32_t *out_obj_handle)
+{
+    kgfx_obj_handle parent = {-1};
+    kgfx_obj_handle root = {-1};
+    kui_radio_handle radio = {-1};
+
+    if (!G_current_task || !out_radio_handle || !out_obj_handle)
+        return -1;
+    if (sacx_ui_parent_from_obj_handle(parent_obj_handle, &parent) != 0)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_RADIOS; ++i)
+    {
+        if (G_current_task->ui_radios[i].used)
+            continue;
+
+        G_current_task->ui_radios[i].used = 1u;
+        G_current_task->ui_radios[i].handle.idx = -1;
+        G_current_task->ui_radios[i].callback = on_change;
+        G_current_task->ui_radios[i].callback_user = user;
+        G_current_task->ui_radios[i].owner = G_current_task;
+
+        if (kui_radio_create(parent, sacx_ui_i32(x), sacx_ui_i32(y),
+                             sacx_ui_u32(w), sacx_ui_u32(item_h), z, items, item_count, selected,
+                             on_change ? sacx_ui_radio_change_trampoline : 0,
+                             &G_current_task->ui_radios[i], &radio, &root) != 0)
+            goto fail;
+
+        if (sacx_gfx_register_existing(G_current_task, root, out_obj_handle) != 0)
+        {
+            (void)kui_radio_destroy(radio);
+            goto fail;
+        }
+
+        G_current_task->ui_radios[i].handle = radio;
+        *out_radio_handle = i + 1u;
+        return 0;
+
+    fail:
+        G_current_task->ui_radios[i].used = 0u;
+        G_current_task->ui_radios[i].handle.idx = -1;
+        G_current_task->ui_radios[i].callback = 0;
+        G_current_task->ui_radios[i].callback_user = 0;
+        G_current_task->ui_radios[i].owner = 0;
+        return -1;
+    }
+
+    return -1;
+}
+
+static int sacx_api_ui_radio_destroy(uint32_t radio_handle)
+{
+    sacx_ui_radio_slot *slot = sacx_ui_radio_from_handle(G_current_task, radio_handle);
+    if (!slot)
+        return -1;
+    (void)kui_radio_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    slot->callback = 0;
+    slot->callback_user = 0;
+    slot->owner = 0;
+    return 0;
+}
+
+static int sacx_api_ui_radio_root(uint32_t radio_handle, uint32_t *out_obj_handle)
+{
+    sacx_ui_radio_slot *slot = sacx_ui_radio_from_handle(G_current_task, radio_handle);
+    if (!slot || !out_obj_handle)
+        return -1;
+    return sacx_gfx_register_existing(G_current_task, kui_radio_root(slot->handle), out_obj_handle);
+}
+
+static int sacx_api_ui_radio_selected(uint32_t radio_handle)
+{
+    sacx_ui_radio_slot *slot = sacx_ui_radio_from_handle(G_current_task, radio_handle);
+    return slot ? kui_radio_selected(slot->handle) : -1;
+}
+
+static int sacx_api_ui_radio_set_selected(uint32_t radio_handle, uint32_t selected)
+{
+    sacx_ui_radio_slot *slot = sacx_ui_radio_from_handle(G_current_task, radio_handle);
+    if (!slot)
+        return -1;
+    return kui_radio_set_selected(slot->handle, selected);
+}
+
+static int sacx_api_ui_radio_set_enabled(uint32_t radio_handle, uint32_t enabled)
+{
+    sacx_ui_radio_slot *slot = sacx_ui_radio_from_handle(G_current_task, radio_handle);
+    if (!slot)
+        return -1;
+    return kui_radio_set_enabled(slot->handle, enabled);
+}
+
+static int sacx_api_ui_toggle_create(uint32_t parent_obj_handle, int32_t x, int32_t y, uint32_t w, uint32_t h,
+                                     int32_t z, const char *label, uint32_t checked,
+                                     sacx_ui_on_change_fn on_change, void *user,
+                                     uint32_t *out_toggle_handle, uint32_t *out_obj_handle)
+{
+    kgfx_obj_handle parent = {-1};
+    kgfx_obj_handle root = {-1};
+    kui_toggle_handle toggle = {-1};
+
+    if (!G_current_task || !out_toggle_handle || !out_obj_handle)
+        return -1;
+    if (sacx_ui_parent_from_obj_handle(parent_obj_handle, &parent) != 0)
+        return -1;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_UI_TOGGLES; ++i)
+    {
+        if (G_current_task->ui_toggles[i].used)
+            continue;
+
+        G_current_task->ui_toggles[i].used = 1u;
+        G_current_task->ui_toggles[i].handle.idx = -1;
+        G_current_task->ui_toggles[i].callback = on_change;
+        G_current_task->ui_toggles[i].callback_user = user;
+        G_current_task->ui_toggles[i].owner = G_current_task;
+
+        if (kui_toggle_create(parent, sacx_ui_i32(x), sacx_ui_i32(y),
+                              sacx_ui_u32(w), sacx_ui_u32(h), z, label, checked,
+                              on_change ? sacx_ui_toggle_change_trampoline : 0,
+                              &G_current_task->ui_toggles[i], &toggle, &root) != 0)
+            goto fail;
+
+        if (sacx_gfx_register_existing(G_current_task, root, out_obj_handle) != 0)
+        {
+            (void)kui_toggle_destroy(toggle);
+            goto fail;
+        }
+
+        G_current_task->ui_toggles[i].handle = toggle;
+        *out_toggle_handle = i + 1u;
+        return 0;
+
+    fail:
+        G_current_task->ui_toggles[i].used = 0u;
+        G_current_task->ui_toggles[i].handle.idx = -1;
+        G_current_task->ui_toggles[i].callback = 0;
+        G_current_task->ui_toggles[i].callback_user = 0;
+        G_current_task->ui_toggles[i].owner = 0;
+        return -1;
+    }
+
+    return -1;
+}
+
+static int sacx_api_ui_toggle_destroy(uint32_t toggle_handle)
+{
+    sacx_ui_toggle_slot *slot = sacx_ui_toggle_from_handle(G_current_task, toggle_handle);
+    if (!slot)
+        return -1;
+    (void)kui_toggle_destroy(slot->handle);
+    slot->used = 0u;
+    slot->handle.idx = -1;
+    slot->callback = 0;
+    slot->callback_user = 0;
+    slot->owner = 0;
+    return 0;
+}
+
+static int sacx_api_ui_toggle_root(uint32_t toggle_handle, uint32_t *out_obj_handle)
+{
+    sacx_ui_toggle_slot *slot = sacx_ui_toggle_from_handle(G_current_task, toggle_handle);
+    if (!slot || !out_obj_handle)
+        return -1;
+    return sacx_gfx_register_existing(G_current_task, kui_toggle_root(slot->handle), out_obj_handle);
+}
+
+static int sacx_api_ui_toggle_checked(uint32_t toggle_handle)
+{
+    sacx_ui_toggle_slot *slot = sacx_ui_toggle_from_handle(G_current_task, toggle_handle);
+    return slot ? kui_toggle_checked(slot->handle) : -1;
+}
+
+static int sacx_api_ui_toggle_set_checked(uint32_t toggle_handle, uint32_t checked)
+{
+    sacx_ui_toggle_slot *slot = sacx_ui_toggle_from_handle(G_current_task, toggle_handle);
+    if (!slot)
+        return -1;
+    return kui_toggle_set_checked(slot->handle, checked);
+}
+
+static int sacx_api_ui_toggle_set_enabled(uint32_t toggle_handle, uint32_t enabled)
+{
+    sacx_ui_toggle_slot *slot = sacx_ui_toggle_from_handle(G_current_task, toggle_handle);
+    if (!slot)
+        return -1;
+    return kui_toggle_set_enabled(slot->handle, enabled);
 }
 
 static void sacx_api_gfx_fill_rgb(uint8_t r, uint8_t g, uint8_t b)
@@ -2031,7 +3196,9 @@ static int sacx_api_gfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t 
     kgfx_obj_handle obj;
     if (!G_current_task || !out_obj_handle)
         return -1;
-    obj = kgfx_obj_add_rect(x, y, w, h, z, sacx_to_kcolor(fill), visible ? 1u : 0u);
+    obj = kgfx_obj_add_rect(sacx_ui_i32(x), sacx_ui_i32(y),
+                            sacx_ui_u32(w), sacx_ui_u32(h),
+                            z, sacx_to_kcolor(fill), visible ? 1u : 0u);
     if (obj.idx < 0)
         return -1;
     if (sacx_gfx_register_existing(G_current_task, obj, out_obj_handle) != 0)
@@ -2039,6 +3206,7 @@ static int sacx_api_gfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t 
         (void)kgfx_obj_destroy(obj);
         return -1;
     }
+    sacx_gfx_mark_owned(G_current_task, *out_obj_handle);
     return 0;
 }
 
@@ -2048,7 +3216,9 @@ static int sacx_api_gfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r, int32
     kgfx_obj_handle obj;
     if (!G_current_task || !out_obj_handle)
         return -1;
-    obj = kgfx_obj_add_circle(cx, cy, r, z, sacx_to_kcolor(fill), visible ? 1u : 0u);
+    obj = kgfx_obj_add_circle(sacx_ui_i32(cx), sacx_ui_i32(cy),
+                              sacx_ui_u32(r), z, sacx_to_kcolor(fill),
+                              visible ? 1u : 0u);
     if (obj.idx < 0)
         return -1;
     if (sacx_gfx_register_existing(G_current_task, obj, out_obj_handle) != 0)
@@ -2056,6 +3226,7 @@ static int sacx_api_gfx_obj_add_circle(int32_t cx, int32_t cy, uint32_t r, int32
         (void)kgfx_obj_destroy(obj);
         return -1;
     }
+    sacx_gfx_mark_owned(G_current_task, *out_obj_handle);
     return 0;
 }
 
@@ -2067,8 +3238,11 @@ static int sacx_api_gfx_obj_add_text(const char *text, int32_t x, int32_t y, int
     kgfx_obj_handle obj;
     if (!G_current_task || !out_obj_handle || !G_runtime_font || !text || scale == 0u)
         return -1;
-    obj = kgfx_obj_add_text(G_runtime_font, text, x, y, z, sacx_to_kcolor(color), alpha,
-                            scale, char_spacing, line_spacing, sacx_to_text_align(align),
+    obj = kgfx_obj_add_text(G_runtime_font, text, sacx_ui_i32(x), sacx_ui_i32(y),
+                            z, sacx_to_kcolor(color), alpha,
+                            sacx_ui_text(scale),
+                            sacx_ui_spacing(char_spacing),
+                            sacx_ui_spacing(line_spacing), sacx_to_text_align(align),
                             visible ? 1u : 0u);
     if (obj.idx < 0)
         return -1;
@@ -2077,6 +3251,7 @@ static int sacx_api_gfx_obj_add_text(const char *text, int32_t x, int32_t y, int
         (void)kgfx_obj_destroy(obj);
         return -1;
     }
+    sacx_gfx_mark_owned(G_current_task, *out_obj_handle);
     return 0;
 }
 
@@ -2086,14 +3261,17 @@ static int sacx_api_gfx_obj_add_image_from_img(uint32_t image_handle, int32_t x,
     kgfx_obj_handle obj;
     if (!img || !img->image.px || !out_obj_handle)
         return -1;
-    obj = kgfx_obj_add_image(img->image.px, img->image.w, img->image.h, x, y, img->image.w);
+    obj = kgfx_obj_add_image(img->image.px, img->image.w, img->image.h,
+                             sacx_ui_i32(x), sacx_ui_i32(y), img->image.w);
     if (obj.idx < 0)
         return -1;
+    kgfx_image_set_size(obj, sacx_ui_u32(img->image.w), sacx_ui_u32(img->image.h));
     if (sacx_gfx_register_existing(G_current_task, obj, out_obj_handle) != 0)
     {
         (void)kgfx_obj_destroy(obj);
         return -1;
     }
+    sacx_gfx_mark_owned(G_current_task, *out_obj_handle);
     return 0;
 }
 
@@ -2102,8 +3280,10 @@ static int sacx_api_gfx_obj_destroy(uint32_t obj_handle)
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot)
         return -1;
-    (void)kgfx_obj_destroy(slot->handle);
+    if (slot->destroy_on_finish)
+        (void)kgfx_obj_destroy(slot->handle);
     slot->used = 0u;
+    slot->destroy_on_finish = 0u;
     slot->handle.idx = -1;
     return 0;
 }
@@ -2204,7 +3384,9 @@ static int sacx_api_gfx_obj_set_outline_width(uint32_t obj_handle, uint32_t widt
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
     if (!obj)
         return -1;
-    obj->outline_width = (uint16_t)width;
+    obj->outline_width = (uint16_t)sacx_ui_u32(width);
+    if (width && !obj->outline_width)
+        obj->outline_width = 1u;
     return 0;
 }
 
@@ -2222,10 +3404,10 @@ static int sacx_api_gfx_obj_set_rect(uint32_t obj_handle, int32_t x, int32_t y, 
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
     if (!obj || obj->kind != KGFX_OBJ_RECT)
         return -1;
-    obj->u.rect.x = x;
-    obj->u.rect.y = y;
-    obj->u.rect.w = w;
-    obj->u.rect.h = h;
+    obj->u.rect.x = sacx_ui_i32(x);
+    obj->u.rect.y = sacx_ui_i32(y);
+    obj->u.rect.w = sacx_ui_u32(w);
+    obj->u.rect.h = sacx_ui_u32(h);
     return 0;
 }
 
@@ -2237,18 +3419,18 @@ static int sacx_api_gfx_obj_get_rect(uint32_t obj_handle, int32_t *out_x, int32_
 
     if (obj->kind == KGFX_OBJ_RECT)
     {
-        *out_x = obj->u.rect.x;
-        *out_y = obj->u.rect.y;
-        *out_w = obj->u.rect.w;
-        *out_h = obj->u.rect.h;
+        *out_x = sacx_ui_unscale_i32(obj->u.rect.x);
+        *out_y = sacx_ui_unscale_i32(obj->u.rect.y);
+        *out_w = sacx_ui_unscale_u32(obj->u.rect.w);
+        *out_h = sacx_ui_unscale_u32(obj->u.rect.h);
         return 0;
     }
     if (obj->kind == KGFX_OBJ_IMAGE)
     {
-        *out_x = obj->u.image.x;
-        *out_y = obj->u.image.y;
-        *out_w = obj->u.image.w;
-        *out_h = obj->u.image.h;
+        *out_x = sacx_ui_unscale_i32(obj->u.image.x);
+        *out_y = sacx_ui_unscale_i32(obj->u.image.y);
+        *out_w = sacx_ui_unscale_u32(obj->u.image.w);
+        *out_h = sacx_ui_unscale_u32(obj->u.image.h);
         return 0;
     }
     return -1;
@@ -2277,7 +3459,7 @@ static int sacx_api_gfx_obj_set_rotation_pivot(uint32_t obj_handle, int32_t x, i
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot)
         return -1;
-    kgfx_obj_set_rotation_pivot(slot->handle, x, y);
+    kgfx_obj_set_rotation_pivot(slot->handle, sacx_ui_i32(x), sacx_ui_i32(y));
     return 0;
 }
 
@@ -2295,9 +3477,9 @@ static int sacx_api_gfx_obj_set_circle(uint32_t obj_handle, int32_t cx, int32_t 
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
     if (!obj || obj->kind != KGFX_OBJ_CIRCLE)
         return -1;
-    obj->u.circle.cx = cx;
-    obj->u.circle.cy = cy;
-    obj->u.circle.r = r;
+    obj->u.circle.cx = sacx_ui_i32(cx);
+    obj->u.circle.cy = sacx_ui_i32(cy);
+    obj->u.circle.r = sacx_ui_u32(r);
     return 0;
 }
 
@@ -2324,7 +3506,7 @@ static int sacx_api_gfx_text_set_spacing(uint32_t obj_handle, int32_t char_spaci
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot)
         return -1;
-    kgfx_text_set_spacing(slot->handle, char_spacing, line_spacing);
+    kgfx_text_set_spacing(slot->handle, sacx_ui_spacing(char_spacing), sacx_ui_spacing(line_spacing));
     return 0;
 }
 
@@ -2333,7 +3515,7 @@ static int sacx_api_gfx_text_set_scale(uint32_t obj_handle, uint32_t scale)
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot || scale == 0u)
         return -1;
-    kgfx_text_set_scale(slot->handle, scale);
+    kgfx_text_set_scale(slot->handle, sacx_ui_text(scale));
     return 0;
 }
 
@@ -2342,8 +3524,8 @@ static int sacx_api_gfx_text_set_pos(uint32_t obj_handle, int32_t x, int32_t y)
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
     if (!obj || obj->kind != KGFX_OBJ_TEXT)
         return -1;
-    obj->u.text.x = x;
-    obj->u.text.y = y;
+    obj->u.text.x = sacx_ui_i32(x);
+    obj->u.text.y = sacx_ui_i32(y);
     return 0;
 }
 
@@ -2352,7 +3534,7 @@ static int sacx_api_gfx_image_set_size(uint32_t obj_handle, uint32_t w, uint32_t
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot || w == 0u || h == 0u)
         return -1;
-    kgfx_image_set_size(slot->handle, w, h);
+    kgfx_image_set_size(slot->handle, sacx_ui_u32(w), sacx_ui_u32(h));
     return 0;
 }
 
@@ -2361,8 +3543,8 @@ static int sacx_api_gfx_image_set_pos(uint32_t obj_handle, int32_t x, int32_t y)
     kgfx_obj *obj = sacx_api_obj_ref(obj_handle);
     if (!obj || obj->kind != KGFX_OBJ_IMAGE)
         return -1;
-    obj->u.image.x = x;
-    obj->u.image.y = y;
+    obj->u.image.x = sacx_ui_i32(x);
+    obj->u.image.y = sacx_ui_i32(y);
     return 0;
 }
 
@@ -2371,7 +3553,7 @@ static int sacx_api_gfx_image_set_scale_pct(uint32_t obj_handle, uint32_t scale_
     sacx_gfx_slot *slot = sacx_gfx_from_handle(G_current_task, obj_handle);
     if (!slot || scale_pct == 0u)
         return -1;
-    kgfx_image_set_scale(slot->handle, scale_pct);
+    kgfx_image_set_scale(slot->handle, sacx_ui_percent(scale_pct));
     return 0;
 }
 
@@ -2395,7 +3577,9 @@ static int sacx_api_button_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h
         return -1;
 
     sacx_button_style_to_native(style, &native_style);
-    button = kbutton_add_rect(x, y, w, h, z, &native_style, 0, 0);
+    button = kbutton_add_rect(sacx_ui_i32(x), sacx_ui_i32(y),
+                              sacx_ui_u32(w), sacx_ui_u32(h),
+                              z, &native_style, 0, 0);
     if (button.idx < 0)
         return -1;
 
@@ -2516,7 +3700,9 @@ static int sacx_api_textbox_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t 
         return -1;
 
     sacx_textbox_style_to_native(style, &native_style);
-    textbox = ktextbox_add_rect(x, y, w, h, z, G_runtime_font, &native_style, 0, 0);
+    textbox = ktextbox_add_rect(sacx_ui_i32(x), sacx_ui_i32(y),
+                                sacx_ui_u32(w), sacx_ui_u32(h),
+                                z, G_runtime_font, &native_style, 0, 0);
     if (textbox.idx < 0)
         return -1;
 
@@ -2626,7 +3812,8 @@ static int sacx_api_textbox_set_bounds(uint32_t textbox_handle, int32_t x, int32
     sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
     if (!slot)
         return -1;
-    ktextbox_set_bounds(slot->handle, x, y, w, h);
+    ktextbox_set_bounds(slot->handle, sacx_ui_i32(x), sacx_ui_i32(y),
+                        sacx_ui_u32(w), sacx_ui_u32(h));
     return 0;
 }
 
@@ -2662,14 +3849,88 @@ static int sacx_api_textbox_text_copy(uint32_t textbox_handle, char *dst, uint32
     return (int)copied;
 }
 
+static int sacx_api_textbox_select(uint32_t textbox_handle, uint32_t start, uint32_t end)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    ktextbox_select(slot->handle, start, end);
+    return 0;
+}
+
+static int sacx_api_textbox_selection(uint32_t textbox_handle, uint32_t *out_start, uint32_t *out_end)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot || !out_start || !out_end)
+        return -1;
+    return ktextbox_selection(slot->handle, out_start, out_end);
+}
+
+static int sacx_api_textbox_copy_selection(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    return (int)ktextbox_copy_selection(slot->handle);
+}
+
+static int sacx_api_textbox_cut_selection(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    return (int)ktextbox_cut_selection(slot->handle);
+}
+
+static int sacx_api_textbox_paste(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    return (int)ktextbox_paste(slot->handle);
+}
+
+static int sacx_api_textbox_undo(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    return ktextbox_undo(slot->handle);
+}
+
+static int sacx_api_textbox_redo(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    return ktextbox_redo(slot->handle);
+}
+
+static int sacx_api_textbox_set_max_len(uint32_t textbox_handle, uint32_t max_len)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return -1;
+    ktextbox_set_max_len(slot->handle, max_len);
+    return 0;
+}
+
+static uint32_t sacx_api_textbox_max_len(uint32_t textbox_handle)
+{
+    sacx_textbox_slot *slot = sacx_textbox_from_handle(G_current_task, textbox_handle);
+    if (!slot)
+        return 0u;
+    return ktextbox_max_len(slot->handle);
+}
+
 static int32_t sacx_api_input_mouse_dx(void)
 {
-    return kmouse_dx();
+    return sacx_ui_unscale_i32(kmouse_dx());
 }
 
 static int32_t sacx_api_input_mouse_dy(void)
 {
-    return kmouse_dy();
+    return sacx_ui_unscale_i32(kmouse_dy());
 }
 
 static int32_t sacx_api_input_mouse_wheel(void)
@@ -2692,10 +3953,10 @@ static int sacx_api_input_mouse_consume(sacx_mouse_state *out_state)
     memset(&mouse, 0, sizeof(mouse));
     kmouse_get_state(&mouse);
     memset(out_state, 0, sizeof(*out_state));
-    out_state->x = mouse.x;
-    out_state->y = mouse.y;
-    out_state->dx = mouse.dx;
-    out_state->dy = mouse.dy;
+    out_state->x = sacx_ui_unscale_i32(mouse.x);
+    out_state->y = sacx_ui_unscale_i32(mouse.y);
+    out_state->dx = sacx_ui_unscale_i32(mouse.dx);
+    out_state->dy = sacx_ui_unscale_i32(mouse.dy);
     out_state->wheel = mouse.wheel;
     out_state->buttons = mouse.buttons;
     out_state->visible = mouse.visible;
@@ -2724,22 +3985,22 @@ static uint32_t sacx_api_mouse_sensitivity_pct(void)
 
 static int32_t sacx_api_mouse_x(void)
 {
-    return kmouse_x();
+    return sacx_ui_unscale_i32(kmouse_x());
 }
 
 static int32_t sacx_api_mouse_y(void)
 {
-    return kmouse_y();
+    return sacx_ui_unscale_i32(kmouse_y());
 }
 
 static int32_t sacx_api_mouse_dx(void)
 {
-    return kmouse_dx();
+    return sacx_ui_unscale_i32(kmouse_dx());
 }
 
 static int32_t sacx_api_mouse_dy(void)
 {
-    return kmouse_dy();
+    return sacx_ui_unscale_i32(kmouse_dy());
 }
 
 static int32_t sacx_api_mouse_wheel(void)
@@ -2764,10 +4025,10 @@ static int sacx_api_mouse_get_state(sacx_mouse_state *out_state)
         return -1;
     memset(&in, 0, sizeof(in));
     kmouse_get_state(&in);
-    out_state->x = in.x;
-    out_state->y = in.y;
-    out_state->dx = in.dx;
-    out_state->dy = in.dy;
+    out_state->x = sacx_ui_unscale_i32(in.x);
+    out_state->y = sacx_ui_unscale_i32(in.y);
+    out_state->dx = sacx_ui_unscale_i32(in.dx);
+    out_state->dy = sacx_ui_unscale_i32(in.dy);
     out_state->wheel = in.wheel;
     out_state->buttons = in.buttons;
     out_state->visible = in.visible;
@@ -2780,7 +4041,9 @@ static int sacx_api_text_draw(int32_t x, int32_t y, const char *text,
 {
     if (!G_runtime_font || !text || scale == 0u)
         return -1;
-    ktext_draw_str_ex(G_runtime_font, x, y, text, sacx_to_kcolor(color), alpha, scale, char_spacing, line_spacing);
+    ktext_draw_str_ex(G_runtime_font, sacx_ui_i32(x), sacx_ui_i32(y), text,
+                      sacx_to_kcolor(color), alpha, sacx_ui_text(scale),
+                      sacx_ui_spacing(char_spacing), sacx_ui_spacing(line_spacing));
     return 0;
 }
 
@@ -2790,8 +4053,10 @@ static int sacx_api_text_draw_align(int32_t anchor_x, int32_t y, const char *tex
 {
     if (!G_runtime_font || !text || scale == 0u)
         return -1;
-    ktext_draw_str_align(G_runtime_font, anchor_x, y, text, sacx_to_kcolor(color), alpha, scale,
-                         char_spacing, line_spacing, sacx_to_text_align(align));
+    ktext_draw_str_align(G_runtime_font, sacx_ui_i32(anchor_x), sacx_ui_i32(y), text,
+                         sacx_to_kcolor(color), alpha, sacx_ui_text(scale),
+                         sacx_ui_spacing(char_spacing), sacx_ui_spacing(line_spacing),
+                         sacx_to_text_align(align));
     return 0;
 }
 
@@ -2802,10 +4067,11 @@ static int sacx_api_text_draw_outline_align(int32_t anchor_x, int32_t y, const c
 {
     if (!G_runtime_font || !text || scale == 0u)
         return -1;
-    ktext_draw_str_align_outline(G_runtime_font, anchor_x, y, text,
-                                 sacx_to_kcolor(fill), fill_alpha, scale,
-                                 char_spacing, line_spacing, sacx_to_text_align(align),
-                                 outline_width, sacx_to_kcolor(outline), outline_alpha);
+    ktext_draw_str_align_outline(G_runtime_font, sacx_ui_i32(anchor_x), sacx_ui_i32(y), text,
+                                 sacx_to_kcolor(fill), fill_alpha, sacx_ui_text(scale),
+                                 sacx_ui_spacing(char_spacing), sacx_ui_spacing(line_spacing),
+                                 sacx_to_text_align(align),
+                                 sacx_ui_u32(outline_width), sacx_to_kcolor(outline), outline_alpha);
     return 0;
 }
 
@@ -2813,19 +4079,19 @@ static uint32_t sacx_api_text_measure_line_px(const char *text, uint32_t scale, 
 {
     if (!G_runtime_font || !text || scale == 0u)
         return 0u;
-    return ktext_measure_line_px(G_runtime_font, text, scale, char_spacing);
+    return ktext_measure_line_px(G_runtime_font, text, sacx_ui_text(scale), sacx_ui_spacing(char_spacing));
 }
 
 static uint32_t sacx_api_text_line_height(uint32_t scale, int32_t line_spacing)
 {
     if (!G_runtime_font || scale == 0u)
         return 0u;
-    return ktext_line_height(G_runtime_font, scale, line_spacing);
+    return ktext_line_height(G_runtime_font, sacx_ui_text(scale), sacx_ui_spacing(line_spacing));
 }
 
 static uint32_t sacx_api_text_scale_mul_px(uint32_t px, uint32_t scale)
 {
-    return ktext_scale_mul_px(px, scale ? scale : 1u);
+    return ktext_scale_mul_px(px, sacx_ui_text(scale ? scale : 1u));
 }
 
 static uint64_t sacx_task_image_bytes(const sacx_task *task);
@@ -3126,6 +4392,9 @@ static int sacx_api_img_touch(uint32_t image_handle)
     if (!slot || !slot->image.px)
         return -1;
 
+    if (slot->image.w && slot->image.h)
+        asm_dma_invalidate_range(slot->image.px,
+                                 (uint64_t)slot->image.w * (uint64_t)slot->image.h * 4ull);
     for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
     {
         kgfx_obj *obj = 0;
@@ -3172,6 +4441,213 @@ static int sacx_api_img_save(uint32_t image_handle, const char *path, uint32_t f
     rc = kimg_save(&slot->image, path, format, quality);
     kbusy_end();
     return rc;
+}
+
+static void sacx_async_image_save_worker(void *ctx)
+{
+    sacx_async_image_save_slot *slot = (sacx_async_image_save_slot *)ctx;
+    if (!slot || !slot->used || !slot->image.px || !slot->path[0])
+        return;
+    slot->state.stage = 1u;
+    asm_dma_clean_range(&slot->state, sizeof(slot->state));
+    slot->state.stage = 2u;
+    asm_dma_clean_range(&slot->state, sizeof(slot->state));
+    slot->state.result = kimg_encode_to_buffer(&slot->image, slot->format, slot->quality,
+                                         slot->encoded_data, slot->encoded_pages << 12,
+                                         (uint32_t *)&slot->state.encoded_size);
+    slot->state.stage = slot->state.result == 0 ? 3u : 5u;
+    if (slot->state.result == 0 && slot->encoded_data && slot->state.encoded_size)
+        asm_dma_clean_range(slot->encoded_data, slot->state.encoded_size);
+    asm_dma_clean_range(&slot->state, sizeof(slot->state));
+}
+
+static uint32_t sacx_async_image_save_write_step(sacx_async_image_save_slot *slot)
+{
+    uint32_t budget = 64u * 1024u;
+
+    if (!slot || !slot->used)
+        return KWORK_STATUS_EMPTY;
+    if (slot->state.result != 0)
+        return KWORK_STATUS_DONE;
+    if (!slot->encoded_data || !slot->state.encoded_size)
+    {
+        slot->state.result = -1;
+        return KWORK_STATUS_DONE;
+    }
+    if (!slot->write_open)
+    {
+        if (kfile_open(&slot->write_file, slot->path, KFILE_WRITE | KFILE_CREATE | KFILE_TRUNC) != 0)
+        {
+            slot->state.result = -1;
+            return KWORK_STATUS_DONE;
+        }
+        slot->write_open = 1u;
+        slot->write_offset = 0u;
+    }
+
+    while (budget && slot->write_offset < slot->state.encoded_size)
+    {
+        uint32_t written = 0u;
+        uint32_t chunk = slot->state.encoded_size - slot->write_offset;
+        if (chunk > 16384u)
+            chunk = 16384u;
+        if (chunk > budget)
+            chunk = budget;
+        if (kfile_write(&slot->write_file, slot->encoded_data + slot->write_offset,
+                        chunk, &written) != 0 || written == 0u)
+        {
+            kfile_close(&slot->write_file);
+            slot->write_open = 0u;
+            slot->state.result = -1;
+            return KWORK_STATUS_DONE;
+        }
+        slot->write_offset += written;
+        budget -= written;
+    }
+
+    if (slot->write_offset < slot->state.encoded_size)
+        return KWORK_STATUS_RUNNING;
+
+    kfile_close(&slot->write_file);
+    slot->write_open = 0u;
+    slot->file_written = 1u;
+    return KWORK_STATUS_DONE;
+}
+
+static int sacx_api_img_save_async(uint32_t image_handle, const char *path, uint32_t format,
+                                   uint32_t quality, uint32_t *out_save_id)
+{
+    sacx_image_slot *source = sacx_image_from_handle(G_current_task, image_handle);
+    sacx_async_image_save_slot *slot = 0;
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+    uint32_t *pixels = 0;
+    uint32_t encoded_bound = 0u;
+    uint32_t job_id = 0u;
+
+    if (out_save_id)
+        *out_save_id = 0u;
+    if (!G_current_task || !source || !source->image.px || !path || !path[0] || !out_save_id)
+        return -1;
+    if (!source->image.w || !source->image.h)
+        return -1;
+
+    slot = &G_current_task->image_saves[0];
+    if (slot->used)
+    {
+        uint32_t status = kwork_status(slot->job_id);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+            return -2;
+        sacx_async_image_save_release_slot(slot);
+    }
+
+    *slot = (sacx_async_image_save_slot){0};
+    slot->used = 1u;
+    slot->id = 1u;
+    slot->format = format;
+    slot->quality = quality;
+    slot->state.result = -1;
+    bytes = (uint64_t)source->image.w * (uint64_t)source->image.h * 4ull;
+    pages = (bytes + 4095ull) >> 12;
+    if (!pages)
+    {
+        sacx_async_image_save_release_slot(slot);
+        return -1;
+    }
+    pixels = (uint32_t *)pmem_alloc_pages(pages);
+    if (!pixels)
+    {
+        sacx_async_image_save_release_slot(slot);
+        return -3;
+    }
+    memcpy(pixels, source->image.px, (size_t)bytes);
+    asm_dma_clean_range(pixels, bytes);
+    slot->image.px = pixels;
+    slot->image.w = source->image.w;
+    slot->image.h = source->image.h;
+    sacx_copy_trunc(slot->path, sizeof(slot->path), path);
+
+    encoded_bound = kimg_encode_bound(&slot->image, format);
+    if (!encoded_bound)
+    {
+        sacx_async_image_save_release_slot(slot);
+        return -1;
+    }
+    slot->encoded_pages = ((uint64_t)encoded_bound + 4095ull) >> 12;
+    slot->encoded_data = (uint8_t *)pmem_alloc_pages(slot->encoded_pages);
+    if (!slot->encoded_data)
+    {
+        sacx_async_image_save_release_slot(slot);
+        return -3;
+    }
+    asm_dma_clean_range(slot->encoded_data, slot->encoded_pages << 12);
+    asm_dma_clean_range(slot, sizeof(*slot));
+    if (kwork_submit(sacx_async_image_save_worker, slot, KWORK_SUBMIT_REQUIRE_REMOTE, &job_id) != 0 || !job_id)
+    {
+        sacx_async_image_save_release_slot(slot);
+        return -1;
+    }
+    slot->job_id = job_id;
+    *out_save_id = slot->id;
+    return 0;
+}
+
+static uint32_t sacx_api_img_save_status(uint32_t save_id, int *out_result)
+{
+    sacx_async_image_save_slot *slot;
+    uint32_t status;
+    int result_hint = -1;
+    if (out_result)
+        *out_result = -1;
+    if (!G_current_task || save_id == 0u || save_id > SACX_MAX_TASK_ASYNC_IMAGE_SAVES)
+        return KWORK_STATUS_EMPTY;
+    slot = &G_current_task->image_saves[save_id - 1u];
+    if (!slot->used)
+        return KWORK_STATUS_EMPTY;
+    status = slot->job_id ? kwork_status(slot->job_id) : KWORK_STATUS_DONE;
+    if (status == KWORK_STATUS_RUNNING)
+    {
+        asm_dma_invalidate_range(&slot->state, sizeof(slot->state));
+        result_hint = -10 - (int)slot->state.stage;
+    }
+    if (status == KWORK_STATUS_DONE)
+    {
+        if (!slot->encoded_ready)
+        {
+            asm_dma_invalidate_range(&slot->state, sizeof(slot->state));
+            slot->encoded_ready = 1u;
+        }
+        asm_dma_invalidate_range(&slot->state, sizeof(slot->state));
+        if (slot->state.result == 0 && !slot->file_written)
+        {
+            if (slot->encoded_data && slot->state.encoded_size)
+                asm_dma_invalidate_range(slot->encoded_data, slot->state.encoded_size);
+            status = sacx_async_image_save_write_step(slot);
+            if (status == KWORK_STATUS_RUNNING)
+                result_hint = -2;
+        }
+    }
+    if (out_result && (status == KWORK_STATUS_DONE || status == KWORK_STATUS_FAILED))
+        *out_result = slot->state.result;
+    else if (out_result && status == KWORK_STATUS_RUNNING)
+        *out_result = result_hint;
+    return status;
+}
+
+static int sacx_api_img_save_release(uint32_t save_id)
+{
+    sacx_async_image_save_slot *slot;
+    uint32_t status;
+    if (!G_current_task || save_id == 0u || save_id > SACX_MAX_TASK_ASYNC_IMAGE_SAVES)
+        return -1;
+    slot = &G_current_task->image_saves[save_id - 1u];
+    if (!slot->used)
+        return 0;
+    status = kwork_status(slot->job_id);
+    if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+        return -2;
+    sacx_async_image_save_release_slot(slot);
+    return 0;
 }
 
 static int sacx_api_img_draw_text(uint32_t image_handle, int32_t x, int32_t y, const char *text,
@@ -3901,6 +5377,9 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.img_pixels = sacx_api_img_pixels;
     task->api.img_touch = sacx_api_img_touch;
     task->api.img_save = sacx_api_img_save;
+    task->api.img_save_async = sacx_api_img_save_async;
+    task->api.img_save_status = sacx_api_img_save_status;
+    task->api.img_save_release = sacx_api_img_save_release;
     task->api.img_draw_text = sacx_api_img_draw_text;
     task->api.img_clipboard_set = sacx_api_img_clipboard_set;
     task->api.img_clipboard_get = sacx_api_img_clipboard_get;
@@ -3910,6 +5389,54 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.window_close_requested = sacx_api_window_close_requested;
     task->api.window_close_accept = sacx_api_window_close_accept;
     task->api.window_close_cancel = sacx_api_window_close_cancel;
+    task->api.textbox_select = sacx_api_textbox_select;
+    task->api.textbox_selection = sacx_api_textbox_selection;
+    task->api.textbox_copy_selection = sacx_api_textbox_copy_selection;
+    task->api.textbox_cut_selection = sacx_api_textbox_cut_selection;
+    task->api.textbox_paste = sacx_api_textbox_paste;
+    task->api.textbox_undo = sacx_api_textbox_undo;
+    task->api.textbox_redo = sacx_api_textbox_redo;
+    task->api.textbox_set_max_len = sacx_api_textbox_set_max_len;
+    task->api.textbox_max_len = sacx_api_textbox_max_len;
+    task->api.window_set_modal_child = sacx_api_window_set_modal_child;
+    task->api.window_clear_modal_child = sacx_api_window_clear_modal_child;
+    task->api.window_has_active_modal = sacx_api_window_has_active_modal;
+    task->api.window_center_on_parent = sacx_api_window_center_on_parent;
+    task->api.dialog_open_file_for_window = sacx_api_dialog_open_file_for_window;
+    task->api.dialog_save_file_for_window = sacx_api_dialog_save_file_for_window;
+    task->api.ui_view_create_rect = sacx_api_ui_view_create_rect;
+    task->api.ui_window_view_create = sacx_api_ui_window_view_create;
+    task->api.ui_view_destroy = sacx_api_ui_view_destroy;
+    task->api.ui_view_root = sacx_api_ui_view_root;
+    task->api.ui_view_add_obj = sacx_api_ui_view_add_obj;
+    task->api.ui_view_set_state = sacx_api_ui_view_set_state;
+    task->api.ui_view_state = sacx_api_ui_view_state;
+    task->api.ui_view_set_visible = sacx_api_ui_view_set_visible;
+    task->api.ui_view_set_layout = sacx_api_ui_view_set_layout;
+    task->api.ui_view_apply_layout = sacx_api_ui_view_apply_layout;
+    task->api.ui_view_set_bounds = sacx_api_ui_view_set_bounds;
+    task->api.ui_dropdown_create = sacx_api_ui_dropdown_create;
+    task->api.ui_dropdown_destroy = sacx_api_ui_dropdown_destroy;
+    task->api.ui_dropdown_root = sacx_api_ui_dropdown_root;
+    task->api.ui_dropdown_selected = sacx_api_ui_dropdown_selected;
+    task->api.ui_dropdown_set_selected = sacx_api_ui_dropdown_set_selected;
+    task->api.ui_dropdown_set_enabled = sacx_api_ui_dropdown_set_enabled;
+    task->api.ui_radio_create = sacx_api_ui_radio_create;
+    task->api.ui_radio_destroy = sacx_api_ui_radio_destroy;
+    task->api.ui_radio_root = sacx_api_ui_radio_root;
+    task->api.ui_radio_selected = sacx_api_ui_radio_selected;
+    task->api.ui_radio_set_selected = sacx_api_ui_radio_set_selected;
+    task->api.ui_radio_set_enabled = sacx_api_ui_radio_set_enabled;
+    task->api.ui_toggle_create = sacx_api_ui_toggle_create;
+    task->api.ui_toggle_destroy = sacx_api_ui_toggle_destroy;
+    task->api.ui_toggle_root = sacx_api_ui_toggle_root;
+    task->api.ui_toggle_checked = sacx_api_ui_toggle_checked;
+    task->api.ui_toggle_set_checked = sacx_api_ui_toggle_set_checked;
+    task->api.ui_toggle_set_enabled = sacx_api_ui_toggle_set_enabled;
+    task->api.work_submit = sacx_api_work_submit;
+    task->api.work_status = sacx_api_work_status;
+    task->api.work_wait = sacx_api_work_wait;
+    task->api.work_cancel = sacx_api_work_cancel;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -3945,7 +5472,10 @@ extern "C" int sacx_runtime_launch_ex(const char *raw_path,
 
     task = sacx_alloc_task_slot();
     if (!task)
+    {
+        terminal_warn("sacx: no free task slot");
         return -1;
+    }
 
     sacx_task_reset(task);
     task->task_id = G_next_task_id++;
@@ -3961,9 +5491,16 @@ extern "C" int sacx_runtime_launch_ex(const char *raw_path,
 
     if (sacx_read_file_all(raw_path, &file_data, &file_size) != 0)
     {
+        terminal_print_inline("sacx: app file read failed rc=");
+        terminal_print_inline_hex32((uint32_t)kfile_last_result());
+        terminal_print("");
         sacx_task_reset(task);
         return -1;
     }
+
+    terminal_print_inline("sacx: app file bytes=");
+    terminal_print_inline_hex32(file_size);
+    terminal_print("");
 
     rc = sacx_load_image(task, file_data, file_size, friendly_path ? friendly_path : raw_path);
     pmem_free_pages(file_data, (file_size + 4095u) / 4096u);
@@ -4162,6 +5699,75 @@ extern "C" int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_
     return 0;
 }
 
+static uint32_t sacx_count_windows(const sacx_task *task)
+{
+    uint32_t count = 0u;
+    if (!task)
+        return 0u;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_WINDOWS; ++i)
+        if (task->windows[i].used)
+            ++count;
+    return count;
+}
+
+static uint32_t sacx_count_gfx_objects(const sacx_task *task)
+{
+    uint32_t count = 0u;
+    if (!task)
+        return 0u;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
+        if (task->gfx_objects[i].used)
+            ++count;
+    return count;
+}
+
+static uint32_t sacx_count_images(const sacx_task *task)
+{
+    uint32_t count = 0u;
+    if (!task)
+        return 0u;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_IMAGES; ++i)
+        if (task->images[i].used)
+            ++count;
+    return count;
+}
+
+extern "C" uint32_t sacx_runtime_task_snapshot(sacx_task_info *out_items, uint32_t max_items)
+{
+    uint32_t written = 0u;
+
+    if (!out_items || max_items == 0u)
+        return 0u;
+
+    for (uint32_t i = 0u; i < SACX_MAX_TASKS && written < max_items; ++i)
+    {
+        sacx_task *task = &G_tasks[i];
+        sacx_task_info *out = 0;
+
+        if (task->state == SACX_TASK_UNUSED)
+            continue;
+
+        out = &out_items[written++];
+        memset(out, 0, sizeof(*out));
+        out->task_id = task->task_id;
+        out->state = task->state;
+        out->state_age = task->state_age;
+        out->exit_status = task->exit_status;
+        out->wake_tick = task->wake_tick;
+        out->arena_size = task->arena_size;
+        out->image_size = task->image_size;
+        out->loaded_arch = task->loaded_arch;
+        out->window_count = sacx_count_windows(task);
+        out->gfx_count = sacx_count_gfx_objects(task);
+        out->image_count = sacx_count_images(task);
+        out->preemptions = task->preemptions;
+        sacx_copy_trunc(out->friendly_path, sizeof(out->friendly_path), task->friendly_path);
+        sacx_copy_trunc(out->message, sizeof(out->message), task->exit_message);
+    }
+
+    return written;
+}
+
 extern "C" int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message)
 {
     sacx_task *task = sacx_find_task_by_id(task_id);
@@ -4183,6 +5789,13 @@ extern "C" int sacx_runtime_task_release(uint32_t task_id)
         return -1;
     if (task->state != SACX_TASK_EXITED && task->state != SACX_TASK_FAULTED)
         return -1;
+    if (sacx_task_worker_active(task))
+        return -2;
+    if (task->arena)
+    {
+        pmem_free_executable_pages(task->arena, task->arena_size / 4096u);
+        task->arena = 0;
+    }
     sacx_task_reset(task);
     return 0;
 }

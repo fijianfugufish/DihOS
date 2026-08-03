@@ -23,6 +23,7 @@ static range_t pool[256];
 static uint32_t pool_count = 0;
 static range_t pool_exec[256];
 static uint32_t pool_exec_count = 0;
+static uint64_t g_pmem_total_pages = 0;
 
 // Minimal descriptor layout per UEFI spec (version-independent via desc_size stride)
 typedef struct
@@ -200,6 +201,7 @@ void pmem_init(const boot_info *bi)
 {
     pool_count = 0;
     pool_exec_count = 0;
+    g_pmem_total_pages = 0;
 
     pmem_try_learn_va_delta();
 
@@ -216,13 +218,19 @@ void pmem_init(const boot_info *bi)
 
         // normalise and store
         if (size && is_reclaimable_type(d->Type))
+        {
             range_add(base, size);
+            g_pmem_total_pages += size / PAGE_SIZE;
+        }
     }
 
     // Stage2 reserves this as EfiLoaderCode before ExitBootServices, so it is
     // writable for loading and executable for direct AArch64 app entry.
     if (bi->sacx_exec_pool_base_phys && bi->sacx_exec_pool_size_bytes)
+    {
         range_add_exec(bi->sacx_exec_pool_base_phys, bi->sacx_exec_pool_size_bytes);
+        g_pmem_total_pages += bi->sacx_exec_pool_size_bytes / PAGE_SIZE;
+    }
 
     // 2) exclude regions we must not touch:
     //    - the kernel image itself
@@ -237,6 +245,9 @@ void pmem_init(const boot_info *bi)
     //    - firmware blobs passed by stage2
     for (uint32_t i = 0; i < bi->wifi_fw_count && i < BOOTINFO_WIFI_FW_MAX; ++i)
         range_exclude(bi->wifi_fw[i].base_phys, bi->wifi_fw[i].size_bytes);
+
+    //    - optional boot volume snapshot passed by stage2
+    range_exclude(bi->boot_volume_base_phys, bi->boot_volume_size_bytes);
 
     // 3) page-align all ranges (down/up)
     for (uint32_t i = 0; i < pool_count; ++i)
@@ -355,4 +366,30 @@ void pmem_free_pages(void *p, uint64_t n)
     {
         range_add_to(pool_hi, &pool_hi_count, base, len);
     }
+}
+
+static uint64_t pmem_count_pages(const range_t *ranges, uint32_t count)
+{
+    uint64_t pages = 0;
+
+    if (!ranges)
+        return 0;
+
+    for (uint32_t i = 0; i < count; ++i)
+        pages += ranges[i].len / PAGE_SIZE;
+
+    return pages;
+}
+
+void pmem_get_stats(pmem_stats *out_stats)
+{
+    if (!out_stats)
+        return;
+
+    out_stats->total_pages = g_pmem_total_pages;
+    out_stats->free_lowdma_pages = pmem_count_pages(pool_lo, pool_lo_count);
+    out_stats->free_high_pages = pmem_count_pages(pool_hi, pool_hi_count);
+    out_stats->free_executable_pages = pmem_count_pages(pool_exec, pool_exec_count);
+    out_stats->free_pages = out_stats->free_lowdma_pages + out_stats->free_high_pages + out_stats->free_executable_pages;
+    out_stats->page_size = PAGE_SIZE;
 }

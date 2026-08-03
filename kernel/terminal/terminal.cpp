@@ -13,6 +13,7 @@ extern "C"
 #include "kwrappers/string.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/kmouse.h"
+#include "memory/pmem.h"
 }
 
 static char g_log_line[16384];
@@ -138,6 +139,11 @@ static void terminal_log_flush_pending(void)
 
     if (g_log_pending_len <= 0)
         return;
+    if (!kfile_storage_writable())
+    {
+        log_pending_clear();
+        return;
+    }
 
     KFile f;
     if (kfile_open(&f, "0:/OS/System/Logs/terminal.txt",
@@ -283,6 +289,9 @@ static kcolor rgb(uint8_t r, uint8_t g, uint8_t b)
 
 Terminal::Terminal()
 {
+    visual_argb = 0;
+    visual_argb_pages = 0u;
+    visual_image.idx = -1;
     ResetState();
 }
 
@@ -293,6 +302,18 @@ void Terminal::FlushLog()
 
 void Terminal::ResetState()
 {
+    if (visual_image.idx >= 0)
+    {
+        (void)kgfx_obj_destroy(visual_image);
+        visual_image.idx = -1;
+    }
+    if (visual_argb && visual_argb_pages)
+    {
+        pmem_free_pages(visual_argb, visual_argb_pages);
+        visual_argb = 0;
+        visual_argb_pages = 0u;
+    }
+
     initialized = 0;
     slot_index = 0;
     x = 1000;
@@ -300,15 +321,20 @@ void Terminal::ResetState()
     z = 20;
     width = 600;
     height = 300;
-    scale = 1;
+    scale = kwindow_ui_text_scale(1u);
     active = 1;
 
-    padding_x = 8;
-    padding_y = 8;
+    padding_x = kwindow_ui_scale_i32(8);
+    padding_y = kwindow_ui_scale_i32(8);
+    if (padding_x < 2)
+        padding_x = 2;
+    if (padding_y < 2)
+        padding_y = 2;
     line_spacing = padding_y / 2;
     line_height_px = 1;
     content_x = padding_x;
     content_y = padding_y;
+    content_width = 1;
     content_height = 1;
     view_top_line = 0;
     line_open = 0;
@@ -354,6 +380,8 @@ void Terminal::ResetState()
 
     for (int i = 0; i < MAX_VISIBLE_LINES; ++i)
         visible_handles[i].idx = -1;
+
+    VisualResetState();
 
     log_line_clear();
     log_pending_clear();
@@ -433,7 +461,7 @@ void Terminal::LayoutInputBox(int placeholder_y)
         prompt = dihos_shell_session_prompt(&shell);
     }
     if (prompt && prompt[0])
-        prompt_px = ktext_measure_line_px(font_ptr, prompt, (uint32_t)scale, 1);
+        prompt_px = ktext_measure_line_px(font_ptr, prompt, scale, 1);
 
     if (root->u.rect.w > (uint32_t)(padding_x * 2) + prompt_px)
         input_w = root->u.rect.w - (uint32_t)(padding_x * 2) - prompt_px;
@@ -456,7 +484,9 @@ int Terminal::SyncLayoutFromWindow()
     int new_line_height = 1;
     int new_content_x = padding_x;
     int new_content_y = padding_y;
+    int new_content_width = 1;
     int new_content_height = 1;
+    int titlebar_h = (int)kwindow_ui_scale_u32(window_style.titlebar_height);
 
     root = kgfx_obj_ref(kwindow_root(window));
     if (!root || root->kind != KGFX_OBJ_RECT)
@@ -471,18 +501,24 @@ int Terminal::SyncLayoutFromWindow()
 
     new_root_w = (int)root->u.rect.w;
     new_root_h = (int)root->u.rect.h;
-    new_line_height = font_ptr ? (int)ktext_line_height(font_ptr, (uint32_t)scale, line_spacing) : 1;
-    new_content_y = (int)window_style.titlebar_height + padding_y;
-    new_content_height = new_root_h - (int)window_style.titlebar_height - (padding_y * 2);
+    new_line_height = font_ptr ? (int)ktext_line_height(font_ptr, scale, line_spacing) : 1;
+    if (titlebar_h < 24)
+        titlebar_h = 24;
+    new_content_y = titlebar_h + padding_y;
+    new_content_width = new_root_w - (padding_x * 2);
+    new_content_height = new_root_h - titlebar_h - (padding_y * 2);
 
     if (new_line_height < 1)
         new_line_height = 1;
+    if (new_content_width < 1)
+        new_content_width = 1;
     if (new_content_height < 1)
         new_content_height = 1;
 
     if (last_root_w != new_root_w || last_root_h != new_root_h ||
         line_height_px != new_line_height ||
         content_x != new_content_x || content_y != new_content_y ||
+        content_width != new_content_width ||
         content_height != new_content_height)
     {
         changed = 1;
@@ -493,6 +529,7 @@ int Terminal::SyncLayoutFromWindow()
     line_height_px = new_line_height;
     content_x = new_content_x;
     content_y = new_content_y;
+    content_width = new_content_width;
     content_height = new_content_height;
 
     if (changed)
@@ -542,6 +579,11 @@ void Terminal::DropOldestLine()
     if (view_top_line > 0)
         --view_top_line;
 
+    if (visual_start_line > 0)
+        --visual_start_line;
+    else if (visual_start_line == 0)
+        visual_start_line = -1;
+
     if (line_count <= 0)
         line_open = 0;
 }
@@ -577,7 +619,7 @@ int Terminal::EnsureVisibleHandle(int slot_idx)
         handle = kgfx_obj_add_text(font_ptr, "",
                                    content_x, content_y, 0,
                                    white, 255,
-                                   (uint32_t)scale,
+                                   scale,
                                    1, 0,
                                    KTEXT_ALIGN_LEFT,
                                    active ? 1u : 0u);
@@ -613,6 +655,13 @@ void Terminal::RefreshVisibleLines()
         return;
 
     (void)SyncLayoutFromWindow();
+    if (visual_active && visual_fullscreen)
+    {
+        VisualHideNormalObjects();
+        (void)VisualEnsureSurface();
+        return;
+    }
+
     if (sacx_active)
     {
         prompt = "sacx> ";
@@ -686,7 +735,7 @@ void Terminal::RefreshVisibleLines()
         obj->u.text.text = line->text;
         obj->u.text.x = content_x;
         obj->u.text.y = base_y + (slot_idx * line_height_px);
-        obj->u.text.scale = (uint32_t)scale;
+        obj->u.text.scale = scale;
         obj->u.text.char_spacing = 1;
         obj->u.text.line_spacing = 0;
         obj->u.text.align = KTEXT_ALIGN_LEFT;
@@ -705,7 +754,7 @@ void Terminal::RefreshVisibleLines()
             obj->u.text.text = prompt ? prompt : "";
             obj->u.text.x = content_x;
             obj->u.text.y = base_y + (placeholder_slot * line_height_px);
-            obj->u.text.scale = (uint32_t)scale;
+            obj->u.text.scale = scale;
             obj->u.text.char_spacing = 1;
             obj->u.text.line_spacing = 0;
             obj->u.text.align = KTEXT_ALIGN_LEFT;
@@ -762,7 +811,7 @@ void Terminal::Initialize(kfont *font, const char *title, int new_slot_index)
         input_style.outline_width = 0;
         input_style.padding_x = 0;
         input_style.padding_y = 0;
-        input_style.text_scale = (uint32_t)scale;
+        input_style.text_scale = scale;
         input_box = ktextbox_add_rect(0, 0, 10, 10, 2, font_ptr, &input_style,
                                       terminal_input_submit, this);
         if (input_box.idx >= 0)
@@ -777,6 +826,7 @@ void Terminal::Initialize(kfont *font, const char *title, int new_slot_index)
 
     KFile f;
     if (slot_index == 0 &&
+        kfile_storage_writable() &&
         kfile_open(&f, "0:/OS/System/Logs/terminal.txt",
                    KFILE_WRITE | KFILE_CREATE | KFILE_TRUNC) == 0)
     {
@@ -1009,6 +1059,508 @@ int Terminal::CopyConsoleText(char *out, uint32_t cap) const
     return 0;
 }
 
+uint32_t Terminal::VisualPackArgb(kcolor color) const
+{
+    return 0xFF000000u | ((uint32_t)color.r << 16) | ((uint32_t)color.g << 8) | (uint32_t)color.b;
+}
+
+void Terminal::VisualResetState()
+{
+    visual_active = 0u;
+    visual_dirty = 0u;
+    visual_fullscreen = 0u;
+    visual_title[0] = 0;
+    visual_cols = 0;
+    visual_rows = 0;
+    visual_requested_rows = 0;
+    visual_start_line = -1;
+    visual_reserved_rows = 0;
+    visual_cell_w = 1;
+    visual_cell_h = 1;
+    visual_argb_w = 0u;
+    visual_argb_h = 0u;
+    if (visual_image.idx >= 0)
+    {
+        kgfx_obj *obj = kgfx_obj_ref(visual_image);
+        if (obj)
+            obj->visible = 0u;
+    }
+
+    for (int i = 0; i < VISUAL_MAX_COLS * VISUAL_MAX_ROWS; ++i)
+    {
+        visual_cells[i].ch = ' ';
+        visual_cells[i].fg = white;
+        visual_cells[i].bg = window_style.body_fill;
+    }
+}
+
+void Terminal::VisualHideNormalObjects()
+{
+    for (int i = 0; i < visible_handle_count; ++i)
+    {
+        kgfx_obj *obj = kgfx_obj_ref(visible_handles[i]);
+        if (obj)
+            obj->visible = 0u;
+    }
+
+    if (input_box.idx >= 0)
+    {
+        ktextbox_clear(input_box);
+        ktextbox_set_focus(input_box, 0u);
+        ktextbox_set_enabled(input_box, 0u);
+        kgfx_obj *root = kgfx_obj_ref(ktextbox_root(input_box));
+        if (root)
+            root->visible = 0u;
+    }
+}
+
+void Terminal::VisualRestoreNormalObjects()
+{
+    if (input_box.idx >= 0)
+    {
+        kgfx_obj *root = kgfx_obj_ref(ktextbox_root(input_box));
+        uint8_t visible = (window.idx >= 0 && kwindow_visible(window)) ? 1u : 0u;
+        if (root)
+            root->visible = visible;
+        ktextbox_set_enabled(input_box, visible);
+    }
+}
+
+void Terminal::VisualFillRect(uint32_t x0, uint32_t y0, uint32_t w, uint32_t h, kcolor color)
+{
+    if (!visual_argb || x0 >= visual_argb_w || y0 >= visual_argb_h)
+        return;
+    if (x0 + w > visual_argb_w)
+        w = visual_argb_w - x0;
+    if (y0 + h > visual_argb_h)
+        h = visual_argb_h - y0;
+
+    uint32_t px = VisualPackArgb(color);
+    for (uint32_t y = 0u; y < h; ++y)
+    {
+        uint32_t *row = visual_argb + (uint64_t)(y0 + y) * visual_argb_w + x0;
+        for (uint32_t x = 0u; x < w; ++x)
+            row[x] = px;
+    }
+}
+
+int Terminal::VisualEnsureSurface()
+{
+    if (visual_fullscreen)
+        return VisualEnsureFullscreenSurface();
+    return VisualEnsureInlineSurface();
+}
+
+int Terminal::VisualEnsureInlineSurface()
+{
+    int new_cols = 0;
+    int new_rows = visual_requested_rows > 0 ? visual_requested_rows : 16;
+
+    if (!font_ptr || window.idx < 0)
+        return 0;
+
+    (void)SyncLayoutFromWindow();
+    visual_cell_w = (int)ktext_scale_mul_px(font_ptr->w, scale) + 1;
+    visual_cell_h = line_height_px;
+    if (visual_cell_w < 1)
+        visual_cell_w = 1;
+    if (visual_cell_h < 1)
+        visual_cell_h = 1;
+
+    new_cols = content_width / visual_cell_w;
+    if (new_cols < 1)
+        new_cols = 1;
+    if (new_cols > VISUAL_MAX_COLS)
+        new_cols = VISUAL_MAX_COLS;
+    if (new_rows < 1)
+        new_rows = 1;
+    if (new_rows > VISUAL_MAX_ROWS)
+        new_rows = VISUAL_MAX_ROWS;
+
+    if (visual_cols != new_cols || visual_rows != new_rows)
+    {
+        visual_cols = new_cols;
+        visual_rows = new_rows;
+        VisualClear();
+    }
+
+    if (visual_start_line < 0)
+    {
+        line_open = 0;
+        while (line_count + new_rows >= LINE_HISTORY_MAX)
+            DropOldestLine();
+        visual_start_line = line_count;
+        visual_reserved_rows = new_rows;
+        for (int i = 0; i < new_rows && line_count < LINE_HISTORY_MAX; ++i)
+        {
+            TerminalLine *line = &lines[line_count++];
+            line->len = 0;
+            line->color = white;
+            line->text[0] = 0;
+        }
+        ScrollToBottom();
+    }
+
+    return visual_start_line >= 0;
+}
+
+int Terminal::VisualEnsureFullscreenSurface()
+{
+    kgfx_obj *root = 0;
+    int new_cols = 0;
+    int new_rows = 0;
+    int new_cell_w = 1;
+    int new_cell_h = 1;
+    uint32_t new_w = 0u;
+    uint32_t new_h = 0u;
+    uint64_t bytes = 0u;
+    uint64_t pages = 0u;
+
+    if (!font_ptr || window.idx < 0)
+        return 0;
+
+    root = kgfx_obj_ref(kwindow_root(window));
+    if (!root || root->kind != KGFX_OBJ_RECT)
+        return 0;
+
+    (void)SyncLayoutFromWindow();
+    new_cell_w = (int)ktext_scale_mul_px(font_ptr->w, scale) + 1;
+    new_cell_h = line_height_px;
+    if (new_cell_w < 1)
+        new_cell_w = 1;
+    if (new_cell_h < 1)
+        new_cell_h = 1;
+
+    new_cols = content_width / new_cell_w;
+    new_rows = content_height / new_cell_h;
+    if (new_cols < 1)
+        new_cols = 1;
+    if (new_rows < 1)
+        new_rows = 1;
+    if (new_cols > VISUAL_MAX_COLS)
+        new_cols = VISUAL_MAX_COLS;
+    if (new_rows > VISUAL_MAX_ROWS)
+        new_rows = VISUAL_MAX_ROWS;
+
+    new_w = (uint32_t)(new_cols * new_cell_w);
+    new_h = (uint32_t)(new_rows * new_cell_h);
+    bytes = (uint64_t)new_w * (uint64_t)new_h * 4u;
+    pages = (bytes + 4095u) / 4096u;
+    if (!pages)
+        return 0;
+
+    if (visual_argb_w != new_w || visual_argb_h != new_h)
+    {
+        if (visual_image.idx >= 0)
+        {
+            (void)kgfx_obj_destroy(visual_image);
+            visual_image.idx = -1;
+        }
+        if (visual_argb && visual_argb_pages)
+        {
+            pmem_free_pages(visual_argb, visual_argb_pages);
+            visual_argb = 0;
+            visual_argb_pages = 0u;
+        }
+        visual_argb = (uint32_t *)pmem_alloc_pages(pages);
+        if (!visual_argb)
+        {
+            visual_argb_w = 0u;
+            visual_argb_h = 0u;
+            return 0;
+        }
+        visual_argb_pages = pages;
+        visual_argb_w = new_w;
+        visual_argb_h = new_h;
+        visual_dirty = 1u;
+    }
+
+    if (visual_cols != new_cols || visual_rows != new_rows ||
+        visual_cell_w != new_cell_w || visual_cell_h != new_cell_h)
+    {
+        visual_cols = new_cols;
+        visual_rows = new_rows;
+        visual_cell_w = new_cell_w;
+        visual_cell_h = new_cell_h;
+        VisualClear();
+        if (visual_title[0])
+        {
+            int title_len = (int)strlen(visual_title);
+            int title_x = (visual_cols - title_len) / 2;
+            if (title_x < 0)
+                title_x = 0;
+            VisualText(title_x, 0, visual_title, green_yellow, window_style.body_fill);
+        }
+    }
+
+    if (visual_image.idx < 0)
+    {
+        visual_image = kgfx_obj_add_image(visual_argb, visual_argb_w, visual_argb_h,
+                                          content_x, content_y, visual_argb_w);
+        if (visual_image.idx < 0)
+            return 0;
+        kgfx_obj_set_parent(visual_image, kwindow_root(window));
+    }
+
+    {
+        kgfx_obj *obj = kgfx_obj_ref(visual_image);
+        if (obj && obj->kind == KGFX_OBJ_IMAGE)
+        {
+            obj->u.image.x = content_x;
+            obj->u.image.y = content_y;
+            obj->u.image.w = visual_argb_w;
+            obj->u.image.h = visual_argb_h;
+            obj->u.image.src_w = visual_argb_w;
+            obj->u.image.src_h = visual_argb_h;
+            obj->u.image.argb = visual_argb;
+            obj->u.image.stride_px = visual_argb_w;
+            obj->visible = visual_active ? 1u : 0u;
+            obj->clip_to_parent = 1u;
+        }
+    }
+
+    return 1;
+}
+
+void Terminal::VisualRenderToImage()
+{
+    char glyph[2];
+
+    if (!VisualEnsureSurface() || !visual_argb || !font_ptr)
+        return;
+
+    for (int row = 0; row < visual_rows; ++row)
+    {
+        for (int col = 0; col < visual_cols; ++col)
+        {
+            VisualCell *cell = &visual_cells[row * VISUAL_MAX_COLS + col];
+            uint32_t px = (uint32_t)(col * visual_cell_w);
+            uint32_t py = (uint32_t)(row * visual_cell_h);
+            VisualFillRect(px, py, (uint32_t)visual_cell_w, (uint32_t)visual_cell_h, cell->bg);
+        }
+    }
+
+    if (kgfx_target_argb_begin(visual_argb, visual_argb_w, visual_argb_h, visual_argb_w) == 0)
+    {
+        glyph[1] = 0;
+        for (int row = 0; row < visual_rows; ++row)
+        {
+            for (int col = 0; col < visual_cols; ++col)
+            {
+                VisualCell *cell = &visual_cells[row * VISUAL_MAX_COLS + col];
+                if (cell->ch == ' ' || cell->ch == 0)
+                    continue;
+                glyph[0] = cell->ch;
+                ktext_draw_str(font_ptr, col * visual_cell_w, row * visual_cell_h,
+                               glyph, cell->fg, 255u, scale);
+            }
+        }
+        kgfx_target_argb_end();
+    }
+
+    if (visual_image.idx >= 0)
+        kgfx_image_touch(visual_image);
+    visual_dirty = 0u;
+}
+
+void Terminal::VisualPresentInline()
+{
+    int was_at_bottom = IsAtBottom();
+
+    if (!VisualEnsureInlineSurface())
+        return;
+
+    for (int row = 0; row < visual_rows && row < visual_reserved_rows; ++row)
+    {
+        int line_idx = visual_start_line + row;
+        TerminalLine *line = 0;
+        if (line_idx < 0 || line_idx >= line_count)
+            continue;
+        line = &lines[line_idx];
+        line->len = 0;
+        line->color = white;
+        for (int col = 0; col < visual_cols && line->len + 1 < LINE_TEXT_CAP; ++col)
+        {
+            VisualCell *cell = &visual_cells[row * VISUAL_MAX_COLS + col];
+            line->text[line->len++] = cell->ch ? cell->ch : ' ';
+        }
+        while (line->len > 0 && line->text[line->len - 1u] == ' ')
+            --line->len;
+        line->text[line->len] = 0;
+    }
+
+    if (was_at_bottom)
+        ScrollToBottom();
+    visual_dirty = 0u;
+    RefreshVisibleLines();
+}
+
+void Terminal::VisualBegin(const char *title)
+{
+    VisualBeginEx(title, 0u, 0u);
+}
+
+void Terminal::VisualBeginEx(const char *title, uint32_t flags, uint32_t rows)
+{
+    visual_active = 1u;
+    visual_fullscreen = (flags & TERMINAL_VISUAL_FLAG_FULLSCREEN) ? 1u : 0u;
+    visual_requested_rows = rows ? (int)rows : (visual_fullscreen ? 0 : 16);
+    visual_start_line = -1;
+    visual_reserved_rows = 0;
+    strncpy(visual_title, title ? title : "", sizeof(visual_title) - 1u);
+    visual_title[sizeof(visual_title) - 1u] = 0;
+    if (visual_fullscreen && visual_title[0])
+        SetTitle(visual_title);
+    if (visual_fullscreen)
+        VisualHideNormalObjects();
+    else
+        VisualRestoreNormalObjects();
+    (void)VisualEnsureSurface();
+    VisualClear();
+    if (visual_title[0])
+    {
+        int title_len = (int)strlen(visual_title);
+        int title_x = (visual_cols - title_len) / 2;
+        if (title_x < 0)
+            title_x = 0;
+        VisualText(title_x, 0, visual_title, green_yellow, window_style.body_fill);
+    }
+    VisualPresent();
+}
+
+void Terminal::VisualEnd()
+{
+    uint8_t was_fullscreen = visual_fullscreen;
+    visual_active = 0u;
+    visual_fullscreen = 0u;
+    visual_start_line = -1;
+    visual_reserved_rows = 0;
+    if (was_fullscreen)
+        SetTitle("Terminal");
+    if (visual_image.idx >= 0)
+    {
+        kgfx_obj *obj = kgfx_obj_ref(visual_image);
+        if (obj)
+            obj->visible = 0u;
+    }
+    VisualRestoreNormalObjects();
+    RefreshVisibleLines();
+}
+
+void Terminal::VisualClear()
+{
+    int rows = visual_rows > 0 ? visual_rows : VISUAL_MAX_ROWS;
+    int cols = visual_cols > 0 ? visual_cols : VISUAL_MAX_COLS;
+
+    if (rows > VISUAL_MAX_ROWS)
+        rows = VISUAL_MAX_ROWS;
+    if (cols > VISUAL_MAX_COLS)
+        cols = VISUAL_MAX_COLS;
+
+    for (int y = 0; y < rows; ++y)
+    {
+        for (int x = 0; x < cols; ++x)
+        {
+            VisualCell *cell = &visual_cells[y * VISUAL_MAX_COLS + x];
+            cell->ch = ' ';
+            cell->fg = white;
+            cell->bg = window_style.body_fill;
+        }
+    }
+    visual_dirty = 1u;
+}
+
+void Terminal::VisualPut(int32_t grid_x, int32_t grid_y, char ch, kcolor fg, kcolor bg)
+{
+    if (grid_x < 0 || grid_y < 0 || grid_x >= visual_cols || grid_y >= visual_rows)
+        return;
+    VisualCell *cell = &visual_cells[grid_y * VISUAL_MAX_COLS + grid_x];
+    cell->ch = ch ? ch : ' ';
+    cell->fg = fg;
+    cell->bg = bg;
+    visual_dirty = 1u;
+}
+
+void Terminal::VisualText(int32_t grid_x, int32_t grid_y, const char *text, kcolor fg, kcolor bg)
+{
+    int32_t x = grid_x;
+    if (!text)
+        return;
+    while (*text)
+    {
+        if (*text == '\n')
+        {
+            ++grid_y;
+            x = grid_x;
+            ++text;
+            continue;
+        }
+        VisualPut(x, grid_y, *text, fg, bg);
+        ++x;
+        ++text;
+    }
+}
+
+void Terminal::VisualProgress(uint32_t id, int32_t grid_x, int32_t grid_y, int32_t grid_w,
+                              uint32_t percent, uint32_t style)
+{
+    (void)id;
+    char pct[16];
+    int bar_w = grid_w - 7;
+    int filled = 0;
+    char fill_ch = style == 1u ? '=' : '#';
+
+    if (percent > 100u)
+        percent = 100u;
+    if (bar_w < 3)
+        return;
+
+    filled = (bar_w * (int)percent) / 100;
+    VisualPut(grid_x, grid_y, '[', silver, window_style.body_fill);
+    for (int i = 0; i < bar_w; ++i)
+    {
+        kcolor fg = i < filled ? green_yellow : dim_gray;
+        kcolor bg = i < filled ? KCOLOR_RGB(32, 62, 42) : KCOLOR_RGB(25, 29, 36);
+        VisualPut(grid_x + 1 + i, grid_y, i < filled ? fill_ch : '.', fg, bg);
+    }
+    VisualPut(grid_x + 1 + bar_w, grid_y, ']', silver, window_style.body_fill);
+    terminal_i32_to_dec((int)percent, pct, sizeof(pct));
+    VisualText(grid_x + 3 + bar_w, grid_y, pct, white, window_style.body_fill);
+    VisualPut(grid_x + 3 + bar_w + (int32_t)strlen(pct), grid_y, '%', white, window_style.body_fill);
+}
+
+void Terminal::VisualSpinner(uint32_t id, int32_t grid_x, int32_t grid_y, uint32_t frame)
+{
+    static const char frames[] = "|/-\\";
+    char ch = frames[(frame + id) & 3u];
+    VisualPut(grid_x, grid_y, ch, cyan, window_style.body_fill);
+}
+
+void Terminal::VisualPresent()
+{
+    if (!visual_active)
+        return;
+    if (visual_fullscreen)
+    {
+        VisualHideNormalObjects();
+        VisualRenderToImage();
+    }
+    else
+    {
+        VisualPresentInline();
+    }
+}
+
+int Terminal::VisualCols() const
+{
+    return visual_cols;
+}
+
+int Terminal::VisualRows() const
+{
+    return visual_rows;
+}
+
 void Terminal::ToggleQuiet()
 {
     terminal_quiet = terminal_quiet ? 0 : 1;
@@ -1038,8 +1590,8 @@ void Terminal::Activate()
     if (input_box.idx >= 0)
         ktextbox_set_focus(input_box, 1);
 
-    if (SyncLayoutFromWindow())
-        RefreshVisibleLines();
+    (void)SyncLayoutFromWindow();
+    RefreshVisibleLines();
 }
 
 void Terminal::SetWindowVisible(uint32_t visible)
@@ -1052,6 +1604,8 @@ void Terminal::SetWindowVisible(uint32_t visible)
         program_window_expected_visible = visible ? 1u : 0u;
     if (input_box.idx >= 0)
         ktextbox_set_focus(input_box, visible ? 1u : 0u);
+    if (visible)
+        RefreshVisibleLines();
 }
 
 int Terminal::Visible() const
@@ -1345,6 +1899,16 @@ void Terminal::UpdateInput()
     if (layout_changed)
         RefreshVisibleLines();
 
+    if (visual_active && visual_fullscreen)
+    {
+        VisualHideNormalObjects();
+        if (VisualEnsureSurface() && visual_dirty)
+            VisualPresent();
+        kmouse_get_state(&mouse);
+        prev_mouse_buttons = mouse.buttons;
+        return;
+    }
+
     kmouse_get_state(&mouse);
     left_now = (mouse.buttons & 0x01u) ? 1 : 0;
     left_pressed = left_now && !(prev_mouse_buttons & 0x01u);
@@ -1362,7 +1926,7 @@ void Terminal::UpdateInput()
     top = root->u.rect.y + content_y;
     right = root->u.rect.x + (int32_t)root->u.rect.w - padding_x;
     client_bottom = root->u.rect.y + (int32_t)root->u.rect.h - padding_y;
-    accepts_pointer = kwindow_point_can_receive_input(window, mouse.x, mouse.y);
+    accepts_pointer = kwindow_point_can_receive_input(window, mouse.x, mouse.y) || kwindow_focused(window);
 
     if (left_pressed && accepts_pointer && input_box.idx >= 0 &&
         mouse.x >= left && mouse.y >= top &&

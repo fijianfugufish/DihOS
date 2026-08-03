@@ -6,6 +6,7 @@
 
 static FATFS g_fs;
 static blockdev_t *g_bd = 0;
+static int g_kfile_last_result = 0;
 
 /* from our glue */
 void fatfs_mount_blockdev(blockdev_t *dev);
@@ -14,6 +15,7 @@ int kfile_bind_blockdev(void *blockdev_ptr)
 {
     g_bd = (blockdev_t *)blockdev_ptr;
     fatfs_mount_blockdev(g_bd);
+    g_kfile_last_result = 0;
     return 0;
 }
 
@@ -84,6 +86,7 @@ int kfile_mount0(void)
 
     // Now mount
     FRESULT r = f_mount(&g_fs, "0:", 1);
+    g_kfile_last_result = (int)r;
 
     // FRESULT bits at 360..367
     dbg_byte_bits(360, (unsigned char)r);
@@ -91,7 +94,22 @@ int kfile_mount0(void)
     usbh_dbg_dot(368, (r == FR_OK) ? 0x00FF00u : 0xFF0000u);
     return (r == FR_OK) ? 0 : -1;
 }
-int kfile_umount0(void) { return (f_mount(0, "0:", 0) == FR_OK) ? 0 : -1; }
+int kfile_umount0(void)
+{
+    FRESULT r;
+    r = f_mount(0, "0:", 0);
+    return (r == FR_OK) ? 0 : -1;
+}
+
+int kfile_storage_writable(void)
+{
+    return (g_bd && g_bd->write) ? 1 : 0;
+}
+
+int kfile_last_result(void)
+{
+    return g_kfile_last_result;
+}
 
 static BYTE to_mode(uint32_t flags)
 {
@@ -109,13 +127,15 @@ static BYTE to_mode(uint32_t flags)
 
 int kfile_open(KFile *f, const char *path, uint32_t flags)
 {
+    FRESULT r;
     if (!f || !path)
         return -1;
-    FRESULT r = f_open(&f->fil, path, to_mode(flags));
+    r = f_open(&f->fil, path, to_mode(flags));
+    g_kfile_last_result = (int)r;
+    if (r == FR_OK && (flags & KFILE_APPEND))
+        r = f_lseek(&f->fil, f_size(&f->fil));
     if (r != FR_OK)
         return -1;
-    if (flags & KFILE_APPEND)
-        f_lseek(&f->fil, f_size(&f->fil));
     return 0;
 }
 
@@ -133,6 +153,7 @@ int kfile_read(KFile *f, void *dst, uint32_t len, uint32_t *out_read)
     {
         UINT br = 0;
         FRESULT r = f_read(&f->fil, p + total, (UINT)(len - total), &br);
+        g_kfile_last_result = (int)r;
 
         if (r != FR_OK)
             break;
@@ -155,17 +176,28 @@ int kfile_write(KFile *f, const void *buf, uint32_t n, uint32_t *out_written)
         return -1;
     UINT bw = 0;
     FRESULT r = f_write(&f->fil, buf, n, &bw);
+    g_kfile_last_result = (int)r;
     if (out_written)
         *out_written = (uint32_t)bw;
     return (r == FR_OK) ? 0 : -1;
 }
 int kfile_seek(KFile *f, uint64_t offs)
 {
+    FRESULT r;
     if (!f)
         return -1;
-    return (f_lseek(&f->fil, (FSIZE_t)offs) == FR_OK) ? 0 : -1;
+    r = f_lseek(&f->fil, (FSIZE_t)offs);
+    g_kfile_last_result = (int)r;
+    return (r == FR_OK) ? 0 : -1;
 }
-uint64_t kfile_size(KFile *f) { return (uint64_t)f_size(&f->fil); }
+uint64_t kfile_size(KFile *f)
+{
+    uint64_t size = 0u;
+    if (!f)
+        return 0u;
+    size = (uint64_t)f_size(&f->fil);
+    return size;
+}
 void kfile_close(KFile *f)
 {
     if (f)
@@ -176,12 +208,24 @@ int kfile_unlink(const char *p)
 {
     int rc;
     kbusy_begin();
-    rc = (f_unlink(p) == FR_OK) ? 0 : -1;
+    FRESULT r = f_unlink(p);
+    g_kfile_last_result = (int)r;
+    rc = (r == FR_OK) ? 0 : -1;
     kbusy_end();
     return rc;
 }
-int kfile_rename(const char *a, const char *b) { return (f_rename(a, b) == FR_OK) ? 0 : -1; }
-int kfile_mkdir(const char *p) { return (f_mkdir(p) == FR_OK) ? 0 : -1; }
+int kfile_rename(const char *a, const char *b)
+{
+    FRESULT r = f_rename(a, b);
+    g_kfile_last_result = (int)r;
+    return (r == FR_OK) ? 0 : -1;
+}
+int kfile_mkdir(const char *p)
+{
+    FRESULT r = f_mkdir(p);
+    g_kfile_last_result = (int)r;
+    return (r == FR_OK) ? 0 : -1;
+}
 
 /* dirs */
 int kdir_open(KDir *d, const char *path)
@@ -189,7 +233,9 @@ int kdir_open(KDir *d, const char *path)
     if (!d || !path)
         return -1;
     d->fi.fname[0] = 0;
-    return (f_opendir(&d->dir, path) == FR_OK) ? 0 : -1;
+    FRESULT r = f_opendir(&d->dir, path);
+    g_kfile_last_result = (int)r;
+    return (r == FR_OK) ? 0 : -1;
 }
 int kdir_next(KDir *d, kdirent *out)
 {
@@ -198,6 +244,7 @@ int kdir_next(KDir *d, kdirent *out)
     for (;;)
     {
         FRESULT r = f_readdir(&d->dir, &d->fi);
+        g_kfile_last_result = (int)r;
         if (r != FR_OK)
             return -1;
         if (d->fi.fname[0] == 0)

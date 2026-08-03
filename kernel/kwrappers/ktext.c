@@ -38,9 +38,29 @@ typedef struct
 
 static inline uint32_t ktext_scale_to_tenths(uint32_t scale)
 {
+    uint64_t fp;
+    uint32_t tenths;
+
     if (scale == 0)
         return 0;
+
+    if (scale & KTEXT_SCALE_FP_FLAG)
+    {
+        fp = (uint64_t)(scale & KTEXT_SCALE_FP_MASK);
+        tenths = (uint32_t)((fp * KTEXT_SCALE_BASE + (KTEXT_SCALE_FP_ONE / 2u)) / KTEXT_SCALE_FP_ONE);
+        return tenths ? tenths : 1u;
+    }
+
     return KTEXT_SCALE_BASE + (scale - 1u);
+}
+
+uint32_t ktext_scale_from_fp(uint32_t fp)
+{
+    if (fp == 0u)
+        fp = 1u;
+    if (fp > KTEXT_SCALE_FP_MASK)
+        fp = KTEXT_SCALE_FP_MASK;
+    return KTEXT_SCALE_FP_FLAG | fp;
 }
 
 uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale)
@@ -52,7 +72,10 @@ uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale)
         return 0;
 
     scaled = (uint64_t)px * (uint64_t)tenths;
-    return (uint32_t)((scaled + (KTEXT_SCALE_BASE / 2u)) / KTEXT_SCALE_BASE);
+    scaled = (scaled + (KTEXT_SCALE_BASE / 2u)) / KTEXT_SCALE_BASE;
+    if (scaled == 0u)
+        scaled = 1u;
+    return (uint32_t)scaled;
 }
 
 /* ------------ file -> pmem -------------- */
@@ -167,6 +190,34 @@ static void draw_glyph_tight_scaled(
 
     const uint32_t row_bytes = (f->w + 7) >> 3;
     const uint8_t *g = f->glyphs + (uint64_t)gi * f->bytes_per_glyph;
+
+    if (scale_tenths < KTEXT_SCALE_BASE)
+    {
+        uint32_t dst_w = ktext_scale_mul_px(tw, scale);
+        uint32_t dst_h = ktext_scale_mul_px(f->h, scale);
+
+        for (uint32_t dy = 0; dy < dst_h; ++dy)
+        {
+            uint32_t row = (uint32_t)(((uint64_t)dy * f->h + (dst_h / 2u)) / dst_h);
+            if (row >= f->h)
+                row = f->h - 1u;
+
+            const uint8_t *rowbits = g + row * row_bytes;
+            for (uint32_t dx = 0; dx < dst_w; ++dx)
+            {
+                uint32_t bit = (uint32_t)(((uint64_t)dx * tw + (dst_w / 2u)) / dst_w);
+                if (bit >= tw)
+                    bit = tw - 1u;
+
+                uint32_t xcol = (uint32_t)left + bit;
+                uint8_t b = rowbits[xcol >> 3];
+                uint8_t m = (uint8_t)(1u << (7 - (xcol & 7)));
+                if (b & m)
+                    plot(x + (int)dx, y + (int)dy, col, alpha);
+            }
+        }
+        return;
+    }
 
     for (uint32_t row = 0; row < f->h; ++row)
     {

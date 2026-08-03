@@ -10,6 +10,7 @@ extern "C"
     void text_editor_init(const kfont *font);
     void text_editor_update(void);
     void text_editor_activate(void);
+    void text_editor_hide(void);
     int text_editor_visible(void);
     int text_editor_open_path(const char *raw_path, const char *friendly_path);
 

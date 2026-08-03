@@ -21,6 +21,22 @@ extern "C"
     void asm_aa64_set_probe_trace(int enabled);
     int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value);
     int asm_aa64_try_write32(uint64_t addr, uint32_t value);
+    int asm_aa64_try_hvc(uint32_t immediate,
+                         uint64_t *x0,
+                         uint64_t *x1,
+                         uint64_t *x2,
+                         uint64_t *x3,
+                         uint64_t *out_esr);
+    int asm_aa64_try_smc(uint32_t immediate,
+                         uint64_t *x0,
+                         uint64_t *x1,
+                         uint64_t *x2,
+                         uint64_t *x3,
+                         uint64_t *out_esr);
+    int asm_aa64_try_hv_set_vpreg(uint32_t reg,
+                                  uint64_t value,
+                                  uint64_t *out_status,
+                                  uint64_t *out_esr);
 
 #ifdef __cplusplus
 }

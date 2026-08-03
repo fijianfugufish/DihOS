@@ -3,9 +3,10 @@
 #include "kwrappers/kimg.h"
 #include "kwrappers/kfile.h"
 #include "memory/pmem.h"
+#include "terminal/terminal_api.h"
 
 #define KIMG_FILE_READ_CHUNK_BYTES (64u * 1024u)
-#define KIMG_STBI_TEMP_BYTES (32u * 1024u * 1024u)
+#define KIMG_STBI_TEMP_BYTES (16u * 1024u * 1024u)
 
 typedef struct
 {
@@ -70,6 +71,11 @@ static int kimg_stbi_arena_prepare(void)
     g_kimg_stbi_arena.cap = pages << 12;
     g_kimg_stbi_arena.used = 0u;
     return 0;
+}
+
+int kimg_prepare_decoder(void)
+{
+    return kimg_stbi_arena_prepare();
 }
 
 static void kimg_stbi_arena_reset(void)
@@ -605,26 +611,39 @@ static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags
     out->h = 0u;
 
     if (kimg_stbi_arena_prepare() != 0)
+    {
+        terminal_warn("kimg: stbi arena unavailable");
         return -1;
+    }
     kimg_stbi_arena_reset();
 
     if (kimg_read_file_to_pmem(path, &file_buf, &file_size) != 0)
     {
+        terminal_print_inline("kimg: stbi file read failed rc=");
+        terminal_print_inline_hex32((uint32_t)kfile_last_result());
+        terminal_print("");
         kimg_stbi_arena_reset();
         return -1;
     }
+
+    terminal_print_inline("kimg: stbi decode input bytes=");
+    terminal_print_inline_hex32(file_size);
+    terminal_print("");
 
     decoded = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &comp, 4);
     pmem_free_pages(file_buf, ((uint64_t)file_size + 4095ull) >> 12);
 
     if (!decoded || w <= 0 || h <= 0)
     {
+        terminal_print_inline("kimg: stbi decode failed reason=");
+        terminal_print(stbi_failure_reason());
         kimg_stbi_arena_reset();
         return -1;
     }
 
     if ((uint32_t)w > 8192u || (uint32_t)h > 8192u)
     {
+        terminal_warn("kimg: image dimensions rejected");
         kimg_stbi_arena_reset();
         return -1;
     }
@@ -633,6 +652,7 @@ static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags
     uint64_t px_bytes = px_count * 4ull;
     if (px_count == 0ull || px_bytes > (256ull * 1024ull * 1024ull))
     {
+        terminal_warn("kimg: image byte size rejected");
         kimg_stbi_arena_reset();
         return -1;
     }
@@ -641,6 +661,7 @@ static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags
     dst = (uint32_t *)pmem_alloc_pages(px_pages);
     if (!dst)
     {
+        terminal_warn("kimg: output image allocation failed");
         kimg_stbi_arena_reset();
         return -1;
     }
