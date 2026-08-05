@@ -38,6 +38,7 @@
 #include "pci/pci_dump_mapped.h"
 #include "asm/asm.h"
 #include "wifi/kwifi.h"
+#include "usb/usb_ethernet.h"
 
 #include "terminal/terminal_api.h"
 
@@ -364,8 +365,36 @@ void kmain(boot_info *bi)
     }
 
     kinput_init_multi(xhci_mmio_bases, xhci_mmio_count, bi->acpi_rsdp);
+    {
+        const uint64_t usb_eth_a0_mmio = 0x000000000A000000ULL;
+        uint64_t usb_eth_hints[1] = {0};
+        uint32_t usb_eth_hint_count = 0u;
+
+        for (uint32_t i = 0u; i < xhci_mmio_count; ++i)
+        {
+            if ((xhci_mmio_bases[i] & ~0xFULL) == usb_eth_a0_mmio)
+            {
+                usb_eth_hints[0] = usb_eth_a0_mmio;
+                usb_eth_hint_count = 1u;
+                break;
+            }
+        }
+
+        if (usb_eth_hint_count)
+        {
+            terminal_print("usbnet: probing Ethernet adapters on xHCI A0 only");
+            if (usb_ethernet_probe_multi(usb_eth_hints, usb_eth_hint_count, bi->acpi_rsdp) != 0)
+                terminal_warn("usbnet: Ethernet unavailable on xHCI A0");
+        }
+        else
+        {
+            terminal_warn("usbnet: xHCI A0 not discovered; Ethernet probe skipped");
+        }
+        terminal_flush_log();
+    }
 
     terminal_print("^^ i sure hope this log is good ^^");
+    terminal_flush_log();
 
     terminal_clear();
     kgfx_render_all(black);

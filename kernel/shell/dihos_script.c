@@ -2035,7 +2035,7 @@ static void script_print_help(dihos_script_runner *runner)
         "  - `help` prints this reference",
         "",
         "Shell passthrough:",
-        "  - Unknown lines run as DIHOS shell commands (sys:/fs:/hw:/wifi:...).",
+        "  - Unknown lines run as DIHOS shell commands (sys:/fs:/hw:/wifi:/net:...).",
         "  - Example: `sys:echo \"hello\\nworld\"`",
     };
     uint32_t i = 0u;

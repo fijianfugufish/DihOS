@@ -3,6 +3,7 @@
 #include "kwrappers/kinput.h"
 #include "i2c/i2c1_hidi2c.h"
 #include "wifi/kwifi.h"
+#include "usb/usb_ethernet.h"
 
 extern const boot_info *k_bootinfo_ptr;
 
@@ -95,6 +96,7 @@ uint32_t device_inventory_snapshot(device_inventory_row *out_rows, uint32_t max_
     kinput_device_status input_status;
     const hidi2c_device *kbd = 0;
     const hidi2c_device *tpd = 0;
+    usb_ethernet_status eth_status;
     char detail[DEVICE_INVENTORY_DETAIL_CAP];
 
     if (!out_rows || max_rows == 0u)
@@ -164,6 +166,10 @@ uint32_t device_inventory_snapshot(device_inventory_row *out_rows, uint32_t max_
         }
         inv_add(out_rows, max_rows, &count, "Network", "Wi-Fi", kwifi_current_connected() ? "connected" : "present", detail);
     }
+
+    usb_ethernet_get_status(&eth_status);
+    if (eth_status.online)
+        inv_add(out_rows, max_rows, &count, "Network", eth_status.driver, "online", eth_status.detail);
 
     if (k_bootinfo_ptr && k_bootinfo_ptr->boot_volume_size_bytes)
     {

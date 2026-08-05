@@ -13,8 +13,10 @@
 #include "i2c/i2c1_hidi2c.h"
 #include "kwrappers/kfile.h"
 #include "kwrappers/string.h"
+#include "net/knet_usb.h"
 #include "system/dihos_time.h"
 #include "terminal/terminal_api.h"
+#include "usb/usb_ethernet.h"
 #include "wifi/kwifi.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -163,6 +165,10 @@ static int dihos_cmd_wifi_supplicant(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_get(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_rx(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_group(dihos_shell_stage *stage);
+static int dihos_cmd_net_status(dihos_shell_stage *stage);
+static int dihos_cmd_net_dhcp(dihos_shell_stage *stage);
+static int dihos_cmd_net_get(dihos_shell_stage *stage);
+static int dihos_cmd_net_group(dihos_shell_stage *stage);
 static int dihos_cmd_fs_pwd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_cd(dihos_shell_stage *stage);
 static int dihos_cmd_fs_list(dihos_shell_stage *stage);
@@ -217,8 +223,11 @@ static const dihos_shell_command G_commands[] = {
     {"wifi:connect", "wifi:connect ssid=NAME password=PASS [username=USER] [bssid=AA:BB:CC:DD:EE:FF] [channel=40|5200] [automate=yes|no]", "Save a WiFi connect request and optionally pin AP BSSID/channel; auth mode is chosen from scan when username is omitted.", 0u, dihos_cmd_wifi_connect},
     {"wifi:current", "wifi:current", "Show current WiFi connect target and state.", 0u, dihos_cmd_wifi_current},
     {"wifi:supplicant", "wifi:supplicant ready=yes|no", "Set enterprise supplicant readiness hint (does not by itself prove firmware key install).", 0u, dihos_cmd_wifi_supplicant},
-    {"wifi:get", "wifi:get [url] [max=8192]", "Fetch text content for file:// URLs; reports HTTP transport readiness for http(s).", 0u, dihos_cmd_wifi_get},
+    {"wifi:get", "wifi:get [url] [max=8192]", "Fetch file:// content or use USB Ethernet for plain HTTP.", 0u, dihos_cmd_wifi_get},
     {"wifi:rx", "wifi:rx [drain=yes|no] [max=4]", "Show WiFi RX queue state and optionally drain captured frames.", 0u, dihos_cmd_wifi_rx},
+    {"net:status", "net:status", "Show USB Ethernet IPv4 status.", 0u, dihos_cmd_net_status},
+    {"net:dhcp", "net:dhcp [rounds=4]", "Run DHCP over USB Ethernet.", 0u, dihos_cmd_net_dhcp},
+    {"net:get", "net:get [url] [max=8192]", "Fetch a plain HTTP URL through USB Ethernet.", 0u, dihos_cmd_net_get},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -287,6 +296,8 @@ static const dihos_shell_command G_commands[] = {
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
+    {"net", "net status|dhcp|get ...", "USB Ethernet network command group.", 0u, dihos_cmd_net_group},
+    {"eth", "eth status|dhcp|get ...", "USB Ethernet network command group.", 0u, dihos_cmd_net_group},
     {"hw", "hw acpi|touchpad|gpio ...", "Hardware command group.", 0u, dihos_cmd_hw_group},
 };
 
@@ -2154,6 +2165,11 @@ static int dihos_cmd_wifi_get(dihos_shell_stage *stage)
 
     if (!kwifi_current_connected())
     {
+        if (dihos_starts_with(url, "http://") || dihos_starts_with(url, "https://"))
+        {
+            terminal_warn("wifi:get: WiFi not connected; trying USB Ethernet");
+            return knet_usb_get_url(url, max_bytes);
+        }
         terminal_error("wifi:get requires an active WiFi connection");
         return -1;
     }
@@ -2227,12 +2243,119 @@ static int dihos_cmd_wifi_get(dihos_shell_stage *stage)
 
     if (dihos_starts_with(url, "http://") || dihos_starts_with(url, "https://"))
     {
-        terminal_error("wifi:get http(s) transport not ready");
-        terminal_print("note: WiFi auth is up, but DHCP/DNS/TCP/HTTP data path is not integrated yet");
-        return -1;
+        terminal_warn("wifi:get: using USB Ethernet HTTP transport");
+        return knet_usb_get_url(url, max_bytes);
     }
 
     terminal_error("wifi:get supports file://, http://, or https:// URLs");
+    return -1;
+}
+
+static void dihos_print_ip32(uint32_t ip)
+{
+    dihos_print_dec_value((ip >> 24) & 0xFFu);
+    terminal_print_inline(".");
+    dihos_print_dec_value((ip >> 16) & 0xFFu);
+    terminal_print_inline(".");
+    dihos_print_dec_value((ip >> 8) & 0xFFu);
+    terminal_print_inline(".");
+    dihos_print_dec_value(ip & 0xFFu);
+}
+
+static int dihos_cmd_net_status(dihos_shell_stage *stage)
+{
+    knet_usb_status st;
+    usb_ethernet_status usb_st;
+    (void)stage;
+    knet_usb_get_status(&st);
+    usb_ethernet_get_status(&usb_st);
+
+    terminal_print("net status:");
+    if (usb_st.detail[0])
+        terminal_print(usb_st.detail);
+    terminal_print_inline("  link=");
+    terminal_print_inline(st.link_online ? "online\n" : "offline\n");
+    terminal_print_inline("  configured=");
+    terminal_print_inline(st.configured ? "yes\n" : "no\n");
+    terminal_print_inline("  mac=");
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        if (i)
+            terminal_print_inline(":");
+        terminal_print_inline_hex8(st.mac[i]);
+    }
+    terminal_print_inline("\n");
+    terminal_print_inline("  ip=");
+    dihos_print_ip32(st.ip);
+    terminal_print_inline(" mask=");
+    dihos_print_ip32(st.mask);
+    terminal_print_inline("\n");
+    terminal_print_inline("  router=");
+    dihos_print_ip32(st.router);
+    terminal_print_inline(" dns=");
+    dihos_print_ip32(st.dns);
+    terminal_print_inline("\n");
+    terminal_print_inline("  router_mac=");
+    if (st.router_mac_valid)
+    {
+        for (uint32_t i = 0u; i < 6u; ++i)
+        {
+            if (i)
+                terminal_print_inline(":");
+            terminal_print_inline_hex8(st.router_mac[i]);
+        }
+        terminal_print_inline("\n");
+    }
+    else
+    {
+        terminal_print_inline("(unresolved)\n");
+    }
+    if (st.detail[0])
+        terminal_print(st.detail);
+    return st.link_online ? 0 : -1;
+}
+
+static int dihos_cmd_net_dhcp(dihos_shell_stage *stage)
+{
+    const char *rounds_text = dihos_stage_named(stage, "rounds");
+    uint32_t rounds = 4u;
+    if (!rounds_text && stage->positional_count > 0u)
+        rounds_text = stage->positional[0];
+    if (rounds_text && rounds_text[0])
+    {
+        if (dihos_parse_u32(rounds_text, &rounds) != 0)
+        {
+            terminal_error("net:dhcp rounds must be an integer");
+            return -1;
+        }
+    }
+    return knet_usb_dhcp(rounds);
+}
+
+static int dihos_cmd_net_get(dihos_shell_stage *stage)
+{
+    const char *url = dihos_stage_named(stage, "url");
+    const char *max_text = dihos_stage_named(stage, "max");
+    uint32_t max_bytes = 8192u;
+
+    if (!url && stage->positional_count > 0u)
+        url = stage->positional[0];
+    if (!url || !url[0])
+    {
+        terminal_error("net:get needs a URL");
+        return -1;
+    }
+    if (max_text && max_text[0])
+    {
+        if (dihos_parse_u32(max_text, &max_bytes) != 0)
+        {
+            terminal_error("net:get max must be an integer");
+            return -1;
+        }
+    }
+    if (dihos_starts_with(url, "http://") || dihos_starts_with(url, "https://"))
+        return knet_usb_get_url(url, max_bytes);
+    terminal_error("net:get supports http:// or https:// URLs");
     return -1;
 }
 
@@ -2411,6 +2534,24 @@ static int dihos_cmd_wifi_group(dihos_shell_stage *stage)
         return dihos_cmd_wifi_rx(&sub);
 
     terminal_error("wifi needs scan, current, connect, supplicant, get, or rx");
+    return -1;
+}
+
+static int dihos_cmd_net_group(dihos_shell_stage *stage)
+{
+    dihos_shell_stage sub;
+    const char *mode = stage->positional_count > 0u ? stage->positional[0] : "status";
+
+    dihos_stage_shift_positionals(&sub, stage, 1u);
+
+    if (strcmp(mode, "status") == 0 || strcmp(mode, "current") == 0)
+        return dihos_cmd_net_status(&sub);
+    if (strcmp(mode, "dhcp") == 0 || strcmp(mode, "up") == 0 || strcmp(mode, "online") == 0)
+        return dihos_cmd_net_dhcp(&sub);
+    if (strcmp(mode, "get") == 0 || strcmp(mode, "url") == 0)
+        return dihos_cmd_net_get(&sub);
+
+    terminal_error("net needs status, dhcp, or get");
     return -1;
 }
 

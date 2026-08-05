@@ -2150,6 +2150,7 @@ static uint8_t kgfx_scale_rows_parallel(const uint32_t *src_argb,
     uint32_t worker_jobs = 0u;
     uint32_t main_rows = 0u;
     uint32_t submitted = 0u;
+    uint32_t wait_spins = 0u;
     uint8_t opaque = 1u;
 
     smp_get_snapshot(&smp);
@@ -2219,6 +2220,19 @@ static uint8_t kgfx_scale_rows_parallel(const uint32_t *src_argb,
             break;
         smp_signal_workers();
         asm_relax();
+        if (++wait_spins > 1000000u)
+        {
+            for (uint32_t i = 0u; i < worker_jobs; ++i)
+            {
+                uint32_t status;
+                if (!jobs[i])
+                    continue;
+                status = kwork_status(jobs[i]);
+                if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+                    kgfx_scale_rows(&ctxs[i + 1u]);
+            }
+            break;
+        }
     }
 
     (void)submitted;

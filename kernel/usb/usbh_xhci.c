@@ -71,10 +71,12 @@
 
 #define DESC_DEV 1
 #define DESC_CONFIG 2
+#define DESC_STRING 3
 #define DESC_HID 0x21
 #define DESC_REPORT 0x22
 #define DESC_INTERFACE 4
 #define DESC_ENDPOINT 5
+#define DESC_CS_INTERFACE 0x24
 
 volatile uint32_t g_xhci_last_cc = 0;
 volatile uint32_t g_xhci_last_ev_epid = 0;
@@ -83,6 +85,9 @@ volatile uint32_t g_xhci_last_epout = 0;     // endpoint index/number if you hav
 volatile uint32_t g_xhci_last_epin = 0;      // endpoint index/number if you have it
 volatile uint32_t g_xhci_last_ev_ptr_lo = 0; // TRB pointer low (from Transfer Event)
 volatile uint32_t g_xhci_last_ev_len = 0;    // transfer length field (from Transfer Event)
+volatile uint32_t g_xhci_last_addr_cc = 0;
+volatile uint32_t g_xhci_last_addr_slot = 0;
+volatile uint32_t g_xhci_last_addr_portsc = 0;
 
 /* ---------- tiny on-screen dots ---------- */
 extern volatile uint32_t *g_fb32;
@@ -846,6 +851,9 @@ static int do_address_device(int bsr /* 0 or 1 */)
     if (wait_cmd_complete(12000, &evt))
     {
         uint32_t usbsts = G.R.op->USBSTS;
+        g_xhci_last_addr_cc = 0xFFFFFFFFu;
+        g_xhci_last_addr_slot = G.slot_id;
+        g_xhci_last_addr_portsc = G.R.ports[G.port_id - 1].PORTSC;
         dot(10, C_ER);
         dot(11, (usbsts & 1u) ? C_ER : C_OK);
         dot(12, (usbsts & (1u << 3)) ? C_OK : C_ER);
@@ -855,6 +863,9 @@ static int do_address_device(int bsr /* 0 or 1 */)
 
     uint32_t cc = (evt.d2 >> 24) & 0xFF;
     uint8_t evt_slot = (evt.d3 >> 24) & 0xFF;
+    g_xhci_last_addr_cc = cc;
+    g_xhci_last_addr_slot = evt_slot;
+    g_xhci_last_addr_portsc = G.R.ports[G.port_id - 1].PORTSC;
 
     dot(30, ((cc >> 4) ? C_ER : C_OK));
     dot(31, (cc == 1) ? C_OK : C_ER);
@@ -1977,7 +1988,12 @@ static void issue_disable_slot(uint8_t slot_id)
 }
 
 /* Single-step Address Device (BSR=0) with correct ICC=64B layout */
-static int address_device(void)
+static int address_device_routed(uint32_t route_string,
+                                 uint8_t root_port,
+                                 uint8_t speed_hint,
+                                 uint16_t mps0_hint,
+                                 uint8_t parent_hub_slot,
+                                 uint8_t parent_port)
 {
     uint8_t *in = (uint8_t *)pmem_alloc_pages_lowdma(1);
     void *dev = pmem_alloc_pages_lowdma(1);
@@ -2001,10 +2017,10 @@ static int address_device(void)
     uint32_t *slot = (uint32_t *)(in + ICC_BYTES);
     uint32_t *ep0 = (uint32_t *)(in + ICC_BYTES + (1u * G_ctx_stride));
 
-    uint32_t portsc = G.R.ports[G.port_id - 1].PORTSC;
-    uint32_t spd = (portsc >> 10) & 0xF;
-    uint16_t mps0 = (spd >= 4) ? 512 : (spd == 3) ? 64
-                                                  : 8;
+    uint32_t portsc = G.R.ports[root_port - 1u].PORTSC;
+    uint32_t spd = speed_hint ? speed_hint : ((portsc >> 10) & 0xF);
+    uint16_t mps0 = mps0_hint ? mps0_hint : ((spd >= 4) ? 512 : (spd == 3) ? 64
+                                                                          : 8);
 
     dot(16, 0x00FF00);
     dot(17, (spd << 16) | 0x00FF00);
@@ -2018,10 +2034,13 @@ static int address_device(void)
     /* Slot Context:
        - Context Entries = 1 (bit 27)
        - Speed in bits 23:20
-       - Root Hub Port Number in DW1 bits 23:16  (<<16)  */
-    slot[0] = (1u << 27) | ((spd & 0xFu) << 20);
-    slot[1] = ((uint32_t)(G.port_id & 0xFF) << 16); /* <-- IMPORTANT */
-    slot[2] = 0;
+       - Root Hub Port Number in DW1 bits 23:16  (<<16)
+       - DW2 is TT info, used only for LS/FS devices behind a high-speed hub TT. */
+    slot[0] = (route_string & 0xFFFFFu) | (1u << 27) | ((spd & 0xFu) << 20);
+    slot[1] = ((uint32_t)(root_port & 0xFFu) << 16); /* <-- IMPORTANT */
+    slot[2] = (spd < 3u) ? (((uint32_t)(parent_hub_slot & 0xFFu)) |
+                            ((uint32_t)(parent_port & 0xFFu) << 8))
+                         : 0u;
     slot[3] = 0;
 
     dot(22, 0x00FF00);
@@ -2059,6 +2078,11 @@ static int address_device(void)
 
     dot(10, C_YL);
     return 0;
+}
+
+static int address_device(void)
+{
+    return address_device_routed(0u, (uint8_t)G.port_id, 0u, 0u, 0u, 0u);
 }
 
 /* ===== control transfer on EP0 → dots 11..13 ===== */
@@ -2173,7 +2197,7 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
     dot(44, ((cc & 0xF0) << 16) | 0x00FF00); /* hi nibble */
     dot(45, ((cc & 0x0F) << 20) | 0x0000FF); /* lo nibble */
 
-    if (cc != 1)
+    if (cc != 1 && cc != 13u)
     {
         dot(43, C_ER); /* transfer completed but not SUCCESS */
         return -1;
@@ -2224,6 +2248,24 @@ typedef struct
     uint8_t ep_in_num, ep_out_num;
     uint16_t mps_in, mps_out;
 } msc_eps_t;
+
+typedef struct
+{
+    uint8_t comm_if_num;
+    uint8_t data_if_num;
+    uint8_t data_alt;
+    uint8_t subclass;
+    uint8_t protocol;
+    uint8_t mac_string_index;
+    uint16_t mtu;
+    uint8_t ep_in_num, ep_out_num;
+    uint16_t mps_in, mps_out;
+} net_eps_t;
+
+#define ASIX_VID 0x0B95u
+#define ASIX_AX88179_PID 0x1790u
+#define AX_ACCESS_MAC 0x01u
+#define AX_NODE_ID 0x10u
 
 typedef struct
 {
@@ -2748,6 +2790,226 @@ static int parse_config_for_msc(const uint8_t *cfg, uint16_t len, msc_eps_t *out
     }
 
     return -1; // <-- ONLY after scanning entire config
+}
+
+static int parse_config_for_cdc_ethernet(const uint8_t *cfg, uint16_t len, net_eps_t *out)
+{
+    uint8_t found_comm = 0u;
+    uint8_t found_data = 0u;
+    uint8_t current_if = 0u;
+    uint8_t current_alt = 0u;
+    uint8_t current_cls = 0u;
+
+    if (!cfg || !out)
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+    out->mps_in = 512u;
+    out->mps_out = 512u;
+    out->mtu = 1500u;
+
+    uint16_t off = 0;
+    while (off + 2 <= len)
+    {
+        uint8_t L = cfg[off], T = cfg[off + 1];
+        if (!L || off + L > len)
+            break;
+
+        if (T == DESC_INTERFACE && L >= 9)
+        {
+            current_if = cfg[off + 2];
+            current_alt = cfg[off + 3];
+            current_cls = cfg[off + 5];
+
+            if (cfg[off + 5] == 0x02u && (cfg[off + 6] == 0x06u || cfg[off + 6] == 0x0Du))
+            {
+                found_comm = 1u;
+                out->comm_if_num = current_if;
+                out->subclass = cfg[off + 6];
+                out->protocol = cfg[off + 7];
+            }
+            else if (found_comm && cfg[off + 5] == 0x0Au)
+            {
+                current_cls = 0x0Au;
+                out->data_if_num = current_if;
+                out->data_alt = current_alt;
+                out->ep_in_num = 0u;
+                out->ep_out_num = 0u;
+                out->mps_in = 512u;
+                out->mps_out = 512u;
+            }
+        }
+        else if (T == DESC_CS_INTERFACE && L >= 4 && found_comm)
+        {
+            uint8_t subtype = cfg[off + 2];
+            if (subtype == 0x0Fu && L >= 10)
+            {
+                out->mac_string_index = cfg[off + 3];
+                out->mtu = (uint16_t)cfg[off + 8] | ((uint16_t)cfg[off + 9] << 8);
+                if (!out->mtu)
+                    out->mtu = 1500u;
+            }
+        }
+        else if (T == DESC_ENDPOINT && L >= 7 && found_comm && current_cls == 0x0Au)
+        {
+            uint8_t addr = cfg[off + 2];
+            uint8_t attr = cfg[off + 3] & 0x3u;
+            uint16_t mps = (uint16_t)cfg[off + 4] | ((uint16_t)cfg[off + 5] << 8);
+
+            if (attr == 2u)
+            {
+                if (addr & 0x80u)
+                {
+                    out->ep_in_num = addr & 0x0Fu;
+                    out->mps_in = mps;
+                }
+                else
+                {
+                    out->ep_out_num = addr & 0x0Fu;
+                    out->mps_out = mps;
+                }
+                if (out->ep_in_num && out->ep_out_num)
+                    found_data = 1u;
+            }
+        }
+
+        off += L;
+    }
+
+    return (found_comm && found_data && out->ep_in_num && out->ep_out_num) ? 0 : -1;
+}
+
+static int parse_config_for_ax88179(const uint8_t *cfg, uint16_t len, net_eps_t *out)
+{
+    uint8_t current_if = 0u;
+    uint8_t in_found = 0u;
+    uint8_t out_found = 0u;
+
+    if (!cfg || !out)
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+    out->mps_in = 1024u;
+    out->mps_out = 1024u;
+    out->mtu = 1500u;
+
+    uint16_t off = 0;
+    while (off + 2u <= len)
+    {
+        uint8_t L = cfg[off], T = cfg[off + 1u];
+        if (!L || off + L > len)
+            break;
+
+        if (T == DESC_INTERFACE && L >= 9u)
+        {
+            current_if = cfg[off + 2u];
+            out->data_if_num = current_if;
+            out->data_alt = cfg[off + 3u];
+            in_found = 0u;
+            out_found = 0u;
+            out->ep_in_num = 0u;
+            out->ep_out_num = 0u;
+        }
+        else if (T == DESC_ENDPOINT && L >= 7u)
+        {
+            uint8_t addr = cfg[off + 2u];
+            uint8_t attr = cfg[off + 3u] & 0x3u;
+            uint16_t mps = (uint16_t)cfg[off + 4u] | ((uint16_t)cfg[off + 5u] << 8);
+
+            if (attr == 2u)
+            {
+                if (addr & 0x80u)
+                {
+                    out->ep_in_num = addr & 0x0Fu;
+                    out->mps_in = mps ? mps : out->mps_in;
+                    in_found = 1u;
+                }
+                else
+                {
+                    out->ep_out_num = addr & 0x0Fu;
+                    out->mps_out = mps ? mps : out->mps_out;
+                    out_found = 1u;
+                }
+
+                if (in_found && out_found)
+                {
+                    out->comm_if_num = current_if;
+                    return 0;
+                }
+            }
+        }
+
+        off += L;
+    }
+
+    return -1;
+}
+
+static int ax88179_read_mac(uint8_t mac[6])
+{
+    if (!mac)
+        return -1;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        mac[i] = 0u;
+    return control_xfer(0xC0u, AX_ACCESS_MAC, AX_NODE_ID, 6u, mac, 6u);
+}
+
+static int hex_nibble(uint8_t c)
+{
+    if (c >= '0' && c <= '9')
+        return (int)(c - '0');
+    if (c >= 'a' && c <= 'f')
+        return (int)(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F')
+        return (int)(c - 'A' + 10);
+    return -1;
+}
+
+static int get_cdc_mac_string(uint8_t string_index, uint8_t mac[6])
+{
+    uint8_t *buf;
+    uint8_t ascii[16];
+    uint32_t n = 0u;
+
+    if (!string_index || !mac)
+        return -1;
+
+    buf = (uint8_t *)alloc_dma(128);
+    if (!buf)
+        return -1;
+    for (uint32_t i = 0u; i < 128u; ++i)
+        buf[i] = 0u;
+
+    if (control_xfer(0x80, 6, (DESC_STRING << 8) | string_index, 0x0409u, buf, 128) != 0)
+    {
+        for (uint32_t i = 0u; i < 128u; ++i)
+            buf[i] = 0u;
+        if (control_xfer(0x80, 6, (DESC_STRING << 8) | string_index, 0u, buf, 128) != 0)
+            return -1;
+    }
+    if (buf[0] < 2u || buf[1] != DESC_STRING)
+        return -1;
+
+    for (uint32_t i = 2u; i + 1u < buf[0] && n < sizeof(ascii); i += 2u)
+    {
+        uint8_t c = buf[i];
+        if (hex_nibble(c) >= 0)
+            ascii[n++] = c;
+    }
+
+    if (n < 12u)
+        return -1;
+
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        int hi = hex_nibble(ascii[i * 2u]);
+        int lo = hex_nibble(ascii[i * 2u + 1u]);
+        if (hi < 0 || lo < 0)
+            return -1;
+        mac[i] = (uint8_t)((hi << 4) | lo);
+    }
+
+    return 0;
 }
 
 static int configure_bulk_endpoints(uint8_t ep_in, uint16_t mps_in, uint8_t ep_out, uint16_t mps_out)
@@ -3322,6 +3584,672 @@ static void usbh_dev_clear(usbh_dev_t *D)
         *D = (usbh_dev_t){0};
 }
 
+static uint16_t usb_ep0_mps_from_desc(uint8_t raw, uint8_t speed)
+{
+    if (speed >= 4u)
+    {
+        if (raw <= 9u)
+            return (uint16_t)(1u << raw);
+        return 512u;
+    }
+
+    if (raw == 8u || raw == 16u || raw == 32u || raw == 64u)
+        return raw;
+    return (speed == 3u) ? 64u : 8u;
+}
+
+static int parse_config_is_hub(const uint8_t *cfg, uint16_t len, uint8_t *out_if_num, uint8_t *out_proto)
+{
+    uint16_t off = 0;
+
+    while (cfg && off + 2u <= len)
+    {
+        uint8_t L = cfg[off], T = cfg[off + 1u];
+        if (!L || off + L > len)
+            break;
+        if (T == DESC_INTERFACE && L >= 9u && cfg[off + 5u] == 0x09u)
+        {
+            if (out_if_num)
+                *out_if_num = cfg[off + 2u];
+            if (out_proto)
+                *out_proto = cfg[off + 7u];
+            return 1;
+        }
+        off += L;
+    }
+
+    return 0;
+}
+
+static void hub_log_control_fail(void)
+{
+    terminal_print_inline("hub enum: control fail cc=");
+    terminal_print_inline_hex32(g_xhci_last_cc);
+    terminal_print_inline(" rem=");
+    terminal_print_inline_hex32(g_xhci_last_ev_len);
+    terminal_print_inline(" slot=");
+    terminal_print_inline_hex32(g_xhci_last_ev_slot);
+    terminal_print_inline(" ep=");
+    terminal_print_inline_hex32(g_xhci_last_ev_epid);
+    terminal_print("");
+}
+
+static int hub_read_descriptor_variant(uint8_t dtype,
+                                       uint8_t req_type,
+                                       uint16_t index,
+                                       uint8_t *hub_desc,
+                                       uint8_t *out_len,
+                                       uint8_t *out_ports)
+{
+    uint8_t len;
+
+    for (uint32_t i = 0u; i < 32u; ++i)
+        hub_desc[i] = 0u;
+
+    terminal_print_inline("hub enum: descriptor hdr type ");
+    terminal_print_inline_hex8(dtype);
+    terminal_print_inline(" req ");
+    terminal_print_inline_hex8(req_type);
+    terminal_print("");
+
+    if (control_xfer(req_type, 6u, (uint16_t)(dtype << 8), index, hub_desc, 3u) != 0)
+    {
+        terminal_warn("hub enum: descriptor header failed");
+        hub_log_control_fail();
+        return -1;
+    }
+
+    terminal_print_inline("hub enum: descriptor hdr bytes ");
+    terminal_print_inline_hex8(hub_desc[0]);
+    terminal_print_inline(" ");
+    terminal_print_inline_hex8(hub_desc[1]);
+    terminal_print_inline(" ");
+    terminal_print_inline_hex8(hub_desc[2]);
+    terminal_print("");
+
+    if (hub_desc[0] < 3u || hub_desc[1] != dtype || hub_desc[2] == 0u)
+        return -1;
+
+    len = hub_desc[0];
+    if (len > 32u)
+        len = 32u;
+
+    for (uint32_t i = 0u; i < 32u; ++i)
+        hub_desc[i] = 0u;
+
+    terminal_print_inline("hub enum: descriptor full len ");
+    terminal_print_inline_hex8(len);
+    terminal_print("");
+
+    if (control_xfer(req_type, 6u, (uint16_t)(dtype << 8), index, hub_desc, len) != 0)
+    {
+        terminal_warn("hub enum: descriptor full failed");
+        hub_log_control_fail();
+        return -1;
+    }
+
+    terminal_print_inline("hub enum: descriptor bytes ");
+    terminal_print_inline_hex8(hub_desc[0]);
+    terminal_print_inline(" ");
+    terminal_print_inline_hex8(hub_desc[1]);
+    terminal_print_inline(" ");
+    terminal_print_inline_hex8(hub_desc[2]);
+    terminal_print("");
+
+    if (hub_desc[0] < 3u || hub_desc[1] != dtype || hub_desc[2] == 0u)
+        return -1;
+
+    if (out_len)
+        *out_len = len;
+    if (out_ports)
+        *out_ports = hub_desc[2];
+    return 0;
+}
+
+static int hub_get_descriptor_ports(uint8_t hub_proto, uint8_t hub_if_num, uint8_t hub_speed, uint8_t *out_ports)
+{
+    uint8_t *hub_desc = (uint8_t *)alloc_dma(32u);
+    if (!hub_desc || !out_ports)
+        return -1;
+
+    for (uint32_t i = 0u; i < 32u; ++i)
+        hub_desc[i] = 0u;
+
+    for (uint32_t attempt = 0u; attempt < 4u; ++attempt)
+    {
+        uint8_t dtype = (hub_proto == 3u || hub_speed >= 4u) ? 0x2Au : 0x29u;
+        uint8_t req_type = (attempt & 1u) ? 0xA1u : 0xA0u;
+        uint16_t index = (req_type == 0xA1u) ? hub_if_num : 0u;
+        uint8_t len = 0u;
+        uint8_t ports = 0u;
+
+        if (attempt >= 2u)
+            dtype = (dtype == 0x2Au) ? 0x29u : 0x2Au;
+
+        if (hub_read_descriptor_variant(dtype, req_type, index, hub_desc, &len, &ports) == 0)
+        {
+            (void)len;
+            *out_ports = ports;
+            if (*out_ports > 15u)
+                *out_ports = 15u;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int hub_port_get_status(usbh_dev_t *hub, uint8_t port, uint32_t *out_status)
+{
+    uint8_t *st = (uint8_t *)alloc_dma(4u);
+    if (!hub || !st || !out_status)
+        return -1;
+
+    for (uint32_t i = 0u; i < 4u; ++i)
+        st[i] = 0u;
+
+    if (usbh_control_xfer(hub, 0xA3u, 0u, 0u, port, st, 4u) != 0)
+        return -1;
+
+    *out_status = (uint32_t)st[0] |
+                  ((uint32_t)st[1] << 8) |
+                  ((uint32_t)st[2] << 16) |
+                  ((uint32_t)st[3] << 24);
+    return 0;
+}
+
+static int hub_port_set_feature(usbh_dev_t *hub, uint8_t port, uint16_t feature)
+{
+    return usbh_control_xfer(hub, 0x23u, 3u, feature, port, 0, 0);
+}
+
+static int hub_port_clear_feature(usbh_dev_t *hub, uint8_t port, uint16_t feature)
+{
+    return usbh_control_xfer(hub, 0x23u, 1u, feature, port, 0, 0);
+}
+
+static int hub_set_depth(usbh_dev_t *hub, uint8_t depth)
+{
+    if (!hub || depth > 4u)
+        return -1;
+    return usbh_control_xfer(hub, 0x20u, 0x0Cu, depth, 0u, 0, 0);
+}
+
+static uint8_t hub_child_speed_from_status(uint8_t hub_speed, uint32_t status)
+{
+    uint8_t port_speed = (uint8_t)((status >> 10) & 0xFu);
+
+    if (port_speed)
+        return port_speed;
+    if (hub_speed >= 4u)
+        return 4u;
+    return hub_speed ? hub_speed : 3u;
+}
+
+static int hub_power_reset_port(usbh_dev_t *hub, uint8_t port, uint32_t *out_status)
+{
+    uint32_t st = 0u;
+
+    xhci_dbg("hub enum: power/reset downstream port");
+    terminal_print_inline("hub enum: power port ");
+    terminal_print_inline_hex8(port);
+    terminal_print("");
+
+    (void)hub_port_set_feature(hub, port, 8u); /* PORT_POWER */
+    mdelay(120);
+
+    if (hub_port_get_status(hub, port, &st) != 0)
+    {
+        terminal_warn("hub enum: port status failed");
+        return -1;
+    }
+    terminal_print_inline("hub enum: status before reset ");
+    terminal_print_inline_hex32(st);
+    terminal_print("");
+
+    if ((st & 1u) == 0u)
+    {
+        terminal_warn("hub enum: port not connected");
+        return -1;
+    }
+
+    if (hub_port_set_feature(hub, port, 4u) != 0) /* PORT_RESET */
+        return -1;
+
+    for (uint32_t i = 0u; i < 500u; ++i)
+    {
+        if (hub_port_get_status(hub, port, &st) != 0)
+            return -1;
+        if ((st & (1u << 20)) || ((st & (1u << 4)) == 0u && (st & 2u)))
+            break;
+        mdelay(2);
+    }
+
+    terminal_print_inline("hub enum: status after reset ");
+    terminal_print_inline_hex32(st);
+    terminal_print("");
+
+    (void)hub_port_clear_feature(hub, port, 20u); /* C_PORT_RESET */
+    (void)hub_port_clear_feature(hub, port, 17u); /* C_PORT_ENABLE */
+    (void)hub_port_clear_feature(hub, port, 16u); /* C_PORT_CONNECTION */
+    (void)hub_port_clear_feature(hub, port, 25u); /* C_PORT_LINK_STATE */
+    (void)hub_port_clear_feature(hub, port, 26u); /* C_PORT_CONFIG_ERROR */
+    (void)hub_port_clear_feature(hub, port, 29u); /* C_BH_PORT_RESET */
+    mdelay(80);
+
+    if (hub_port_get_status(hub, port, &st) == 0)
+    {
+        terminal_print_inline("hub enum: status settled ");
+        terminal_print_inline_hex32(st);
+        terminal_print("");
+    }
+
+    if (out_status)
+        *out_status = st;
+    return ((st & 1u) && (st & 2u)) ? 0 : -1;
+}
+
+static int enumerate_cdc_ethernet_downstream(usbh_dev_t *D,
+                                             usbh_dev_t *hub,
+                                             uint8_t root_port,
+                                             uint8_t hub_port,
+                                             uint8_t speed_hint)
+{
+    uint32_t route = (uint32_t)(hub_port & 0x0Fu);
+    uint8_t *dd8;
+    uint8_t *dd18;
+    uint8_t *cfg9;
+    uint8_t *cfg;
+    uint16_t tot;
+    uint16_t vid = 0u;
+    uint16_t pid = 0u;
+    uint32_t downstream_status = 0u;
+    uint8_t child_speed;
+    net_eps_t ep;
+
+    if (!D || !hub || !root_port || !hub_port)
+        return -1;
+
+    if (hub_power_reset_port(hub, hub_port, &downstream_status) != 0)
+        return -1;
+
+    terminal_print_inline("hub enum: downstream route ");
+    terminal_print_inline_hex32(route);
+    terminal_print("");
+    child_speed = hub_child_speed_from_status(speed_hint, downstream_status);
+    terminal_print_inline("hub enum: downstream speed ");
+    terminal_print_inline_hex8(child_speed);
+    terminal_print("");
+    terminal_print_inline("hub enum: parent slot:port ");
+    terminal_print_inline_hex8(hub->slot_id);
+    terminal_print_inline(":");
+    terminal_print_inline_hex8(hub_port);
+    terminal_print("");
+
+    G.port_id = root_port;
+    if (issue_enable_slot(&G.slot_id))
+    {
+        terminal_warn("hub enum: downstream enable slot failed");
+        return -1;
+    }
+
+    if (address_device_routed(route,
+                              root_port,
+                              child_speed,
+                              (child_speed >= 4u) ? 512u : 64u,
+                              hub->slot_id,
+                              hub_port) != 0)
+    {
+        terminal_warn("hub enum: downstream address failed");
+        terminal_print_inline("hub enum: addr cc ");
+        terminal_print_inline_hex32(g_xhci_last_addr_cc);
+        terminal_print_inline(" slot ");
+        terminal_print_inline_hex32(g_xhci_last_addr_slot);
+        terminal_print_inline(" portsc ");
+        terminal_print_inline_hex32(g_xhci_last_addr_portsc);
+        terminal_print("");
+        issue_disable_slot((uint8_t)G.slot_id);
+        return -1;
+    }
+
+    dd8 = (uint8_t *)alloc_dma(8u);
+    if (!dd8)
+        return -1;
+    for (uint32_t i = 0u; i < 8u; ++i)
+        dd8[i] = 0u;
+
+    if (control_xfer(0x80u, 6u, (DESC_DEV << 8) | 0, 0, dd8, 8u) != 0)
+        return -1;
+
+    {
+        uint16_t mps0 = usb_ep0_mps_from_desc(dd8[7], child_speed);
+        if (ep0_evaluate_context_set_mps(mps0) != 0)
+            return -1;
+    }
+
+    dd18 = (uint8_t *)alloc_dma(18u);
+    if (!dd18)
+        return -1;
+    for (uint32_t i = 0u; i < 18u; ++i)
+        dd18[i] = 0u;
+    if (control_xfer(0x80u, 6u, (DESC_DEV << 8) | 0, 0, dd18, 18u) == 0)
+    {
+        vid = (uint16_t)dd18[8u] | ((uint16_t)dd18[9u] << 8);
+        pid = (uint16_t)dd18[10u] | ((uint16_t)dd18[11u] << 8);
+        terminal_print_inline("hub enum: downstream vid:pid ");
+        terminal_print_inline_hex32(((uint32_t)vid << 16) | pid);
+        terminal_print("");
+    }
+
+    cfg9 = (uint8_t *)alloc_dma(9u);
+    if (!cfg9)
+        return -1;
+    for (uint32_t i = 0u; i < 9u; ++i)
+        cfg9[i] = 0u;
+
+    if (control_xfer(0x80u, 6u, (DESC_CONFIG << 8) | 0, 0, cfg9, 9u) != 0)
+        return -1;
+
+    tot = (uint16_t)cfg9[2] | ((uint16_t)cfg9[3] << 8);
+    if (tot < 9u || tot > 4096u)
+        return -1;
+
+    cfg = (uint8_t *)alloc_dma(tot);
+    if (!cfg)
+        return -1;
+    for (uint32_t i = 0u; i < tot; ++i)
+        cfg[i] = 0u;
+
+    if (control_xfer(0x80u, 6u, (DESC_CONFIG << 8) | 0, 0, cfg, tot) != 0)
+        return -1;
+
+    xhci_dbg("hub enum: dumping downstream config");
+    xhci_dbg_dump_cfg_brief(cfg, tot);
+
+    if (vid == ASIX_VID && pid == ASIX_AX88179_PID)
+    {
+        xhci_dbg("hub enum: ASIX AX88179 found");
+        if (parse_config_for_ax88179(cfg, tot, &ep) != 0)
+            return -1;
+    }
+    else if (parse_config_for_cdc_ethernet(cfg, tot, &ep) != 0)
+    {
+        return -1;
+    }
+
+    if (control_xfer(0x00u, 9u, cfg9[5], 0, 0, 0) != 0)
+        return -1;
+
+    if (ep.data_alt)
+    {
+        if (control_xfer(0x01u, 0x0Bu, ep.data_alt, ep.data_if_num, 0, 0) != 0)
+            return -1;
+    }
+
+    if (configure_bulk_endpoints(ep.ep_in_num, ep.mps_in, ep.ep_out_num, ep.mps_out) != 0)
+        return -1;
+
+    D->configured = 1;
+    D->addr = (uint8_t)G.slot_id;
+    D->slot_id = (uint8_t)G.slot_id;
+    D->port_id = root_port;
+    D->ep_bulk_in = ep.ep_in_num;
+    D->ep_bulk_out = ep.ep_out_num;
+    D->mps_bulk_in = ep.mps_in;
+    D->mps_bulk_out = ep.mps_out;
+    D->net_comm_if_num = ep.comm_if_num;
+    D->net_data_if_num = ep.data_if_num;
+    D->net_data_alt = ep.data_alt;
+    D->net_subclass = ep.subclass;
+    D->net_protocol = ep.protocol;
+    D->net_vid = vid;
+    D->net_pid = pid;
+    D->net_driver = (vid == ASIX_VID && pid == ASIX_AX88179_PID) ? USB_NET_DRIVER_ASIX_AX88179 : USB_NET_DRIVER_CDC;
+    D->net_mtu = ep.mtu ? ep.mtu : 1500u;
+    if (D->net_driver == USB_NET_DRIVER_ASIX_AX88179)
+        D->net_mac_valid = (ax88179_read_mac(D->net_mac) == 0) ? 1u : 0u;
+    else
+        D->net_mac_valid = (get_cdc_mac_string(ep.mac_string_index, D->net_mac) == 0) ? 1u : 0u;
+
+    dev_state_save(D);
+    port_claim(root_port);
+    if (D->net_driver == USB_NET_DRIVER_ASIX_AX88179)
+        xhci_dbg("hub enum: downstream ASIX AX88179 online");
+    else
+        xhci_dbg("hub enum: downstream CDC Ethernet online");
+    return 0;
+}
+
+static int enumerate_cdc_ethernet_via_hub(usbh_dev_t *D,
+                                          uint8_t root_port,
+                                          uint8_t hub_speed,
+                                          uint8_t hub_if_num,
+                                          uint8_t hub_proto)
+{
+    usbh_dev_t hub = (usbh_dev_t){0};
+    uint8_t ports = 0u;
+
+    hub.configured = 1;
+    hub.addr = (uint8_t)G.slot_id;
+    hub.slot_id = (uint8_t)G.slot_id;
+    hub.port_id = root_port;
+
+    if (hub_get_descriptor_ports(hub_proto, hub_if_num, hub_speed, &ports) != 0)
+    {
+        terminal_warn("hub enum: descriptor failed");
+        return -1;
+    }
+    dev_state_save(&hub);
+
+    if (hub_speed >= 4u)
+    {
+        terminal_print("hub enum: set superspeed hub depth 0");
+        if (hub_set_depth(&hub, 0u) != 0)
+        {
+            terminal_warn("hub enum: set hub depth failed");
+            return -1;
+        }
+    }
+
+    terminal_print_inline("hub enum: downstream ports ");
+    terminal_print_inline_hex8(ports);
+    terminal_print("");
+
+    for (uint8_t port = 1u; port <= ports; ++port)
+    {
+        xhci_dbg("hub enum: scan downstream port");
+        terminal_print_inline("hub enum: scan port ");
+        terminal_print_inline_hex8(port);
+        terminal_print("");
+        if (enumerate_cdc_ethernet_downstream(D, &hub, root_port, port, hub_speed) == 0)
+            return 0;
+        (void)dev_state_load(&hub);
+    }
+
+    terminal_warn("hub enum: no downstream CDC/ASIX Ethernet");
+    return -1;
+}
+
+static int enumerate_cdc_ethernet_on_port(usbh_dev_t *D, int port_id)
+{
+    uint32_t portsc;
+    uint32_t pls;
+
+    if (!D || port_id <= 0)
+        return -1;
+
+    xhci_dbg("net enum: reset candidate port");
+    G.port_id = port_id;
+    portsc = G.R.ports[G.port_id - 1].PORTSC;
+    pls = (portsc & PORTSC_PLS_MASK) >> 5;
+    if ((portsc & PORTSC_CCS) && (portsc & PORTSC_PED) && pls == 0u)
+    {
+        xhci_dbg("net enum: port already enabled; skipping reset");
+    }
+    else
+    {
+        if (reset_specific_connected_port(G.port_id))
+            return -1;
+    }
+
+    xhci_dbg("net enum: enable slot");
+    if (issue_enable_slot(&G.slot_id))
+        return -1;
+
+    if (!(G.R.ports[G.port_id - 1].PORTSC & PORTSC_CCS))
+        return -1;
+
+    xhci_dbg("net enum: address device");
+    if (address_device())
+        return -1;
+
+    uint8_t *dd8 = (uint8_t *)alloc_dma(8);
+    uint8_t *dd18 = 0;
+    uint16_t vid = 0u;
+    uint16_t pid = 0u;
+    if (!dd8)
+        return -1;
+    for (int i = 0; i < 8; i++)
+        dd8[i] = 0;
+
+    if (control_xfer(0x80, 6, (DESC_DEV << 8) | 0, 0, dd8, 8))
+        return -1;
+
+    {
+        uint32_t portsc = G.R.ports[G.port_id - 1].PORTSC;
+        uint8_t speed = (uint8_t)((portsc >> PORTSC_SPEED_SHIFT) & 0xFu);
+        uint16_t mps0 = usb_ep0_mps_from_desc(dd8[7], speed);
+        if (ep0_evaluate_context_set_mps(mps0))
+            return -1;
+    }
+
+    dd18 = (uint8_t *)alloc_dma(18u);
+    if (!dd18)
+        return -1;
+    for (uint32_t i = 0u; i < 18u; ++i)
+        dd18[i] = 0u;
+    if (control_xfer(0x80, 6, (DESC_DEV << 8) | 0, 0, dd18, 18u) == 0)
+    {
+        vid = (uint16_t)dd18[8u] | ((uint16_t)dd18[9u] << 8);
+        pid = (uint16_t)dd18[10u] | ((uint16_t)dd18[11u] << 8);
+        terminal_print_inline("net enum: root vid:pid ");
+        terminal_print_inline_hex32(((uint32_t)vid << 16) | pid);
+        terminal_print("");
+    }
+
+    uint8_t *cfg9 = (uint8_t *)alloc_dma(9);
+    if (!cfg9)
+        return -1;
+    for (int i = 0; i < 9; i++)
+        cfg9[i] = 0;
+
+    if (control_xfer(0x80, 6, (DESC_CONFIG << 8) | 0, 0, cfg9, 9))
+        return -1;
+
+    uint16_t tot = (uint16_t)cfg9[2] | ((uint16_t)cfg9[3] << 8);
+    if (tot < 9 || tot > 4096)
+        return -1;
+
+    uint8_t *cfg = (uint8_t *)alloc_dma(tot);
+    if (!cfg)
+        return -1;
+    for (uint32_t i = 0; i < tot; i++)
+        cfg[i] = 0;
+
+    if (control_xfer(0x80, 6, (DESC_CONFIG << 8) | 0, 0, cfg, tot))
+        return -1;
+
+    xhci_dbg("net enum: dumping config");
+    xhci_dbg_dump_cfg_brief(cfg, tot);
+
+    net_eps_t ep;
+    if (parse_config_for_cdc_ethernet(cfg, tot, &ep))
+    {
+        uint8_t hub_if_num = 0u;
+        uint8_t hub_proto = 0u;
+        if (parse_config_is_hub(cfg, tot, &hub_if_num, &hub_proto))
+        {
+            uint8_t cfgval = cfg9[5];
+            uint32_t portsc = G.R.ports[G.port_id - 1].PORTSC;
+            uint8_t hub_speed = (uint8_t)((portsc >> PORTSC_SPEED_SHIFT) & 0xFu);
+
+            xhci_dbg("net enum: hub found; configuring");
+            if (control_xfer(0x00, 9, cfgval, 0, 0, 0) == 0)
+            {
+                if (enumerate_cdc_ethernet_via_hub(D, (uint8_t)G.port_id, hub_speed, hub_if_num, hub_proto) == 0)
+                    return 0;
+            }
+        }
+        xhci_dbg("net enum: no CDC Ethernet; checking vendor USB Ethernet");
+        if (!(vid == ASIX_VID && pid == ASIX_AX88179_PID && parse_config_for_ax88179(cfg, tot, &ep) == 0))
+            return -1;
+        xhci_dbg("net enum: ASIX AX88179 found");
+    }
+
+    uint8_t cfgval = cfg9[5];
+    if (control_xfer(0x00, 9, cfgval, 0, 0, 0))
+        return -1;
+
+    if (ep.data_alt)
+    {
+        if (control_xfer(0x01, 0x0B, ep.data_alt, ep.data_if_num, 0, 0))
+            return -1;
+    }
+
+    if (configure_bulk_endpoints(ep.ep_in_num, ep.mps_in, ep.ep_out_num, ep.mps_out))
+        return -1;
+
+    D->configured = 1;
+    D->addr = (uint8_t)G.slot_id;
+    D->slot_id = (uint8_t)G.slot_id;
+    D->port_id = (uint8_t)G.port_id;
+    D->ep_bulk_in = ep.ep_in_num;
+    D->ep_bulk_out = ep.ep_out_num;
+    D->mps_bulk_in = ep.mps_in;
+    D->mps_bulk_out = ep.mps_out;
+    D->net_comm_if_num = ep.comm_if_num;
+    D->net_data_if_num = ep.data_if_num;
+    D->net_data_alt = ep.data_alt;
+    D->net_subclass = ep.subclass;
+    D->net_protocol = ep.protocol;
+    D->net_vid = vid;
+    D->net_pid = pid;
+    D->net_driver = (vid == ASIX_VID && pid == ASIX_AX88179_PID) ? USB_NET_DRIVER_ASIX_AX88179 : USB_NET_DRIVER_CDC;
+    D->net_mtu = ep.mtu ? ep.mtu : 1500u;
+    if (D->net_driver == USB_NET_DRIVER_ASIX_AX88179)
+        D->net_mac_valid = (ax88179_read_mac(D->net_mac) == 0) ? 1u : 0u;
+    else
+        D->net_mac_valid = (get_cdc_mac_string(ep.mac_string_index, D->net_mac) == 0) ? 1u : 0u;
+
+    dev_state_save(D);
+    port_claim((uint8_t)G.port_id);
+    if (D->net_driver == USB_NET_DRIVER_ASIX_AX88179)
+        xhci_dbg("net enum: ASIX AX88179 online");
+    else
+        xhci_dbg("net enum: CDC Ethernet online");
+    return 0;
+}
+
+int usbh_enumerate_first_cdc_ethernet(usbh_dev_t *D)
+{
+    if (!D)
+        return -1;
+
+    usbh_dev_clear(D);
+
+    for (int port_id = 1; port_id <= (int)G.n_ports; ++port_id)
+    {
+        if (port_is_claimed((uint8_t)port_id))
+            continue;
+        if (!(G.R.ports[port_id - 1].PORTSC & PORTSC_CCS))
+            continue;
+        if (enumerate_cdc_ethernet_on_port(D, port_id) == 0)
+            return 0;
+    }
+
+    return -1;
+}
+
 static uint32_t xhci_power_port_and_read(int port_id)
 {
     if (port_id <= 0 || port_id > (int)G.n_ports)
@@ -3630,9 +4558,11 @@ int usbh_bulk_out(usbh_dev_t *d, const void *buf, uint32_t len)
 // Bulk IN (with got) + legacy wrapper
 // ============================================================
 
-int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
+int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got,
+                             uint32_t timeout_ms)
 {
     int rc = -1;
+    uint8_t posted_now = 0u;
 
     usbh_dbg_dot(170, 0x00FF00u); // bulk_in_got entered
 
@@ -3651,31 +4581,61 @@ int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
         return -1;
     }
 
-    dma_invalidate(buf, len);
-    usbh_dbg_dot(171, 0xFFFF00u);
+    if (d->bulk_in_pending_active)
+    {
+        if (d->bulk_in_pending_buf != buf || d->bulk_in_pending_len != len)
+            goto out;
+    }
+    else
+    {
+        trb_t *t;
+        dma_invalidate(buf, len);
+        usbh_dbg_dot(171, 0xFFFF00u);
 
-    trb_t *t = post_normal_trb((uint64_t)G.bulk_in_tr, &G.bin_enq, &G.bin_cycle, buf, len);
-    dma_flush((void *)(uintptr_t)G.bulk_in_tr, 256 * sizeof(trb_t));
-    usbh_dbg_dot(172, 0xFFFF00u);
+        t = post_normal_trb((uint64_t)G.bulk_in_tr, &G.bin_enq, &G.bin_cycle, buf, len);
+        dma_flush((void *)(uintptr_t)G.bulk_in_tr, 256 * sizeof(trb_t));
+        usbh_dbg_dot(172, 0xFFFF00u);
 
-    g_expect_trbptr = (uint64_t)(uintptr_t)t;
+        d->bulk_in_pending_buf = buf;
+        d->bulk_in_pending_len = len;
+        d->bulk_in_pending_trbptr = (uint64_t)(uintptr_t)t;
+        d->bulk_in_pending_active = 1u;
+        posted_now = 1u;
+    }
+
+    g_expect_trbptr = d->bulk_in_pending_trbptr;
     g_expect_slot = (uint8_t)G.slot_id;
     g_expect_epid = dci_from_ep(d->ep_bulk_in, 1);
+    g_expect_valid = 1u;
 
-    g_expect_valid = 1;
+    if (posted_now)
+        ring_ep_db((uint8_t)G.slot_id, g_expect_epid);
 
-    ring_ep_db((uint8_t)G.slot_id, g_expect_epid);
-
-    int r = wait_xfer_complete(12000);
+    int r = wait_xfer_complete(timeout_ms ? timeout_ms : 1u);
 
     // ALWAYS clear expectation before any return path
     g_expect_valid = 0;
 
-    if (r != 0)
+    if (r > 0)
     {
+        usbh_dbg_dot(176, 0xFF0000u);
+        rc = 1;
+        goto out;
+    }
+    if (r < 0)
+    {
+        d->bulk_in_pending_active = 0u;
+        d->bulk_in_pending_trbptr = 0u;
+        d->bulk_in_pending_buf = 0;
+        d->bulk_in_pending_len = 0u;
         usbh_dbg_dot(176, 0xFF0000u);
         goto out;
     }
+
+    d->bulk_in_pending_active = 0u;
+    d->bulk_in_pending_trbptr = 0u;
+    d->bulk_in_pending_buf = 0;
+    d->bulk_in_pending_len = 0u;
 
     uint32_t rem = g_last_xfer_rem;
 
@@ -3705,6 +4665,11 @@ int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 out:
     dev_state_save(d);
     return rc;
+}
+
+int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
+{
+    return usbh_bulk_in_got_timeout(d, buf, len, got, 12000u);
 }
 
 // Legacy API: strict exact-length

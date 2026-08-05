@@ -8,6 +8,10 @@ typedef enum
     USB_SUPER = 3
 } usb_speed_t;
 
+#define USB_NET_DRIVER_NONE 0u
+#define USB_NET_DRIVER_CDC 1u
+#define USB_NET_DRIVER_ASIX_AX88179 2u
+
 typedef struct
 {
     int configured;
@@ -21,6 +25,19 @@ typedef struct
     uint8_t ep_bulk_out;
     uint16_t mps_bulk_in;
     uint16_t mps_bulk_out;
+
+    // CDC Ethernet / USB network
+    uint8_t net_comm_if_num;
+    uint8_t net_data_if_num;
+    uint8_t net_data_alt;
+    uint8_t net_subclass;
+    uint8_t net_protocol;
+    uint16_t net_vid;
+    uint16_t net_pid;
+    uint8_t net_driver;
+    uint16_t net_mtu;
+    uint8_t net_mac[6];
+    uint8_t net_mac_valid;
 
     // HID
     uint8_t ep_intr_in;   // interrupt IN endpoint number (1..15)
@@ -48,6 +65,10 @@ typedef struct
     void *ctrl_tr;
     void *bulk_in_tr;
     void *bulk_out_tr;
+    void *bulk_in_pending_buf;
+    uint32_t bulk_in_pending_len;
+    uint64_t bulk_in_pending_trbptr;
+    uint8_t bulk_in_pending_active;
     void *intr_in_tr;
     void *intr_buf;
     uint32_t intr_buf_len;
@@ -74,6 +95,7 @@ int usbh_enumerate_first_msc(usbh_dev_t *d);
 int usbh_enumerate_first_hid(usbh_dev_t *d);
 int usbh_enumerate_first_hid_keyboard(usbh_dev_t *d);
 int usbh_enumerate_first_hid_mouse(usbh_dev_t *d);
+int usbh_enumerate_first_cdc_ethernet(usbh_dev_t *d);
 
 /* DMA helper */
 void *usbh_alloc_dma(uint32_t bytes);
@@ -86,6 +108,10 @@ int usbh_control_xfer(usbh_dev_t *d,
 
 int usbh_bulk_out(usbh_dev_t *d, const void *buf, uint32_t len);
 int usbh_bulk_in(usbh_dev_t *d, void *buf, uint32_t len);
+int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *got);
+int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got);
+int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got,
+                             uint32_t timeout_ms);
 
 int usbh_intr_in(usbh_dev_t *d, void *buf, uint32_t len);
 int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got);
