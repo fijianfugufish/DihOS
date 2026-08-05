@@ -63,6 +63,10 @@ $SrcDir = Join-Path $ProjectRoot "src"
 $IncDir = Join-Path $ProjectRoot "include"
 $KerDir = Join-Path $ProjectRoot "kernel"
 $KerInc = Join-Path $KerDir "include"
+$BearDir = Join-Path $ProjectRoot "third_party\BearSSL"
+$BearSrc = Join-Path $BearDir "src"
+$BearInc = Join-Path $BearDir "inc"
+$BearCompat = Join-Path $BearDir "compat"
 
 $bootSrc  = Get-ChildItem -Recurse -Path $SrcDir -Filter "boot.c" -File | Select-Object -First 1
 $stageSrc = Get-ChildItem -Recurse -Path $SrcDir -Filter "*.c" -File | Where-Object { $_.Name -ne "boot.c" }
@@ -93,7 +97,8 @@ function Kernel-Include-Dirs {
     (Join-Path $KerInc "arch\$Arch"),
     (Join-Path $KerDir "asm\$Arch"),
     $IncDir,
-    $KerInc
+    $KerInc,
+    $BearInc
   )
 }
 
@@ -277,8 +282,25 @@ function Build-Kernel {
   $cppflags = New-Kernel-CppFlags -Arch $Arch -Target $Target
   $objs = Compile-C -Sources $sources -ObjDir $ObjDir -CFlags $cflags -CppFlags $cppflags
 
+  if (Test-Path -LiteralPath $BearSrc) {
+    $bearSources = Get-ChildItem -Recurse -Path $BearSrc -Filter "*.c" -File
+    $bearFlags = @($cflags) + (Include-Flags -Dirs @($BearCompat, $BearSrc, $BearInc)) + @(
+      "-DBR_USE_GETENTROPY=0",
+      "-DBR_USE_URANDOM=0",
+      "-DBR_USE_WIN32_RAND=0",
+      "-DBR_RDRAND=0"
+    )
+    $objs += Compile-C -Sources ($bearSources.FullName) -ObjDir $ObjDir -CFlags $bearFlags
+  }
+
   Remove-ExistingOutput -Path $OutFile
-  & $ldelf -o $OutFile -T $LinkerScript -pie -nostdlib $objs
+  $linkRsp = Join-Path $ObjDir "kernel_link.rsp"
+  $linkArgs = @("-o", $OutFile, "-T", $LinkerScript, "-pie", "-nostdlib") + @($objs)
+  $linkRspLines = @($linkArgs | ForEach-Object {
+    '"' + ([string]$_).Replace('"', '\"') + '"'
+  })
+  [IO.File]::WriteAllLines($linkRsp, $linkRspLines, [Text.UTF8Encoding]::new($false))
+  & $ldelf "@$linkRsp"
   if ($LASTEXITCODE) { throw "ld.lld (kernel $Arch) failed" }
 
   Write-Host "Built: $OutFile" -ForegroundColor Green

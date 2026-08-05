@@ -2,6 +2,8 @@
 #include "usb/usb_ethernet.h"
 #include "terminal/terminal_api.h"
 #include "kwrappers/string.h"
+#include "system/dihos_time.h"
+#include "bearssl.h"
 
 #define KNET_ETH_TYPE_IPV4 0x0800u
 #define KNET_ETH_TYPE_ARP 0x0806u
@@ -16,6 +18,111 @@ static knet_usb_status g_knet;
 static uint8_t g_tx[1536];
 static uint8_t g_rx[32768];
 static uint16_t g_ip_id = 1u;
+
+typedef struct knet_x509_noanchor_context
+{
+    const br_x509_class *vtable;
+    const br_x509_class **inner;
+} knet_x509_noanchor_context;
+
+static br_ssl_client_context g_tls_client;
+static br_x509_minimal_context g_tls_x509;
+static knet_x509_noanchor_context g_tls_noanchor;
+static uint8_t g_tls_iobuf[BR_SSL_BUFSIZE_BIDI];
+static uint8_t g_tls_pending[2048];
+
+static void knet_x509_start_chain(const br_x509_class **ctx, const char *server_name)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    (*x->inner)->start_chain(x->inner, server_name);
+}
+
+static void knet_x509_start_cert(const br_x509_class **ctx, uint32_t length)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    (*x->inner)->start_cert(x->inner, length);
+}
+
+static void knet_x509_append(const br_x509_class **ctx, const unsigned char *buf, size_t len)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    (*x->inner)->append(x->inner, buf, len);
+}
+
+static void knet_x509_end_cert(const br_x509_class **ctx)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    (*x->inner)->end_cert(x->inner);
+}
+
+static unsigned knet_x509_end_chain(const br_x509_class **ctx)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    unsigned result = (*x->inner)->end_chain(x->inner);
+    return result == BR_ERR_X509_NOT_TRUSTED ? 0u : result;
+}
+
+static const br_x509_pkey *knet_x509_get_pkey(const br_x509_class *const *ctx,
+                                               unsigned *usages)
+{
+    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
+    return (*x->inner)->get_pkey(x->inner, usages);
+}
+
+static const br_x509_class g_knet_x509_noanchor_vtable = {
+    sizeof(knet_x509_noanchor_context),
+    knet_x509_start_chain,
+    knet_x509_start_cert,
+    knet_x509_append,
+    knet_x509_end_cert,
+    knet_x509_end_chain,
+    knet_x509_get_pkey};
+
+static uint64_t knet_cycle_counter(void)
+{
+#if defined(DIHOS_ARCH_AARCH64)
+    uint64_t value;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+#elif defined(DIHOS_ARCH_X64)
+    uint32_t lo;
+    uint32_t hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+#else
+    return dihos_time_ticks();
+#endif
+}
+
+static uint64_t knet_now_ms(void)
+{
+#if defined(DIHOS_ARCH_AARCH64)
+    uint64_t counter;
+    uint64_t frequency;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(counter));
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    if (frequency)
+        return (counter / frequency) * 1000u +
+               ((counter % frequency) * 1000u) / frequency;
+#endif
+    return (dihos_time_ticks() * 1000u) / DIHOS_TIME_TICKS_PER_SECOND;
+}
+
+static void knet_tls_entropy(uint8_t out[48])
+{
+    uint64_t x = knet_cycle_counter() ^ dihos_time_ticks() ^ ((uint64_t)g_knet.ip << 17) ^
+                 (uint64_t)(uintptr_t)&g_tls_client ^ 0x9E3779B97F4A7C15ull;
+    for (uint32_t i = 0u; i < 6u; ++i)
+        x ^= (uint64_t)g_knet.mac[i] << ((i * 9u) & 63u);
+    for (uint32_t i = 0u; i < 48u; ++i)
+    {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x += knet_cycle_counter() ^ dihos_time_ticks() ^ ((uint64_t)i << 32);
+        out[i] = (uint8_t)(x >> ((i & 7u) * 8u));
+    }
+}
 
 static void knet_copy(char *dst, uint32_t cap, const char *src)
 {
@@ -372,8 +479,10 @@ static int dhcp_wait(uint8_t want_type, dhcp_parse_result *out, uint32_t rounds)
     uint32_t last_src_ip = 0u;
     uint32_t usb_polls = 0u;
     uint32_t scanned = 0u;
+    uint64_t wait_started = knet_now_ms();
+    uint64_t deadline = wait_started + (uint64_t)(rounds ? rounds : 1u) * 1000u;
 
-    while (usb_polls < rounds && scanned < 256u)
+    while (knet_now_ms() < deadline && scanned < 256u)
     {
         uint32_t got = 0u;
         uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
@@ -451,6 +560,8 @@ static int dhcp_wait(uint8_t want_type, dhcp_parse_result *out, uint32_t rounds)
     print_dec_inline(usb_polls);
     terminal_print_inline(" scanned=");
     print_dec_inline(scanned);
+    terminal_print_inline(" wait_ms=");
+    print_dec_inline((uint32_t)(knet_now_ms() - wait_started));
     terminal_print("");
     return -1;
 }
@@ -502,6 +613,7 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
 {
     uint32_t usb_polls = 0u;
     uint32_t scanned = 0u;
+    uint64_t deadline = knet_now_ms() + (uint64_t)(rounds ? rounds : 1u) * 1000u;
     if (!target_ip || !out_mac)
         return -1;
     terminal_print_inline("net: ARP request ");
@@ -509,7 +621,7 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
     terminal_print("");
     if (arp_send_request(target_ip) != 0)
         return -1;
-    while (usb_polls < rounds && scanned < 256u)
+    while (knet_now_ms() < deadline && scanned < 256u)
     {
         uint32_t got = 0u;
         uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
@@ -631,7 +743,9 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
     uint8_t request[768];
     uint8_t next_mac[6];
     uint32_t server_ip = 0u;
+    uint16_t server_port = 80u;
     uint16_t local_port = 49153u;
+    uint8_t use_tls = 0u;
     uint32_t tx_seq = 0x44494831u;
     uint32_t rx_seq = 0u;
     uint32_t request_len = 0u;
@@ -649,16 +763,19 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
     }
     if (knet_starts_with(url, "https://"))
     {
-        terminal_error("net:get HTTPS needs TLS; use an http:// URL for this transport test");
-        return -1;
+        use_tls = 1u;
+        server_port = 443u;
+        p = url + 8u;
     }
-    if (!knet_starts_with(url, "http://"))
+    else if (knet_starts_with(url, "http://"))
     {
-        terminal_error("net:get supports http:// URLs");
+        p = url + 7u;
+    }
+    else
+    {
+        terminal_error("net:get supports http:// or https:// URLs");
         return -1;
     }
-
-    p = url + 7u;
     i = 0u;
     while (*p && *p != '/' && *p != ':' && i + 1u < sizeof(host))
         host[i++] = *p++;
@@ -670,13 +787,18 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
     }
     if (*p == ':')
     {
+        uint16_t wanted_port = use_tls ? 443u : 80u;
         ++p;
-        if (!(p[0] == '8' && p[1] == '0' && (p[2] == '/' || p[2] == 0)))
+        if (wanted_port == 80u && knet_starts_with(p, "80") && (p[2] == '/' || p[2] == 0))
+            p += 2u;
+        else if (wanted_port == 443u && knet_starts_with(p, "443") &&
+                 (p[3] == '/' || p[3] == 0))
+            p += 3u;
+        else
         {
-            terminal_error("net:get currently supports HTTP port 80");
+            terminal_error("net:get supports default HTTP/HTTPS ports only");
             return -1;
         }
-        p += 2u;
     }
     i = 0u;
     if (!*p)
@@ -690,7 +812,7 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         max_bytes = 128u;
     if (max_bytes > 65536u)
         max_bytes = 65536u;
-    if (!g_knet.configured && knet_usb_dhcp(12u) != 0)
+    if (!g_knet.configured && knet_usb_dhcp(4u) != 0)
         return -1;
 
     /* Parse a dotted IPv4 host, otherwise perform a minimal DNS A query. */
@@ -742,7 +864,7 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         }
         if (next_hop == g_knet.router && g_knet.router_mac_valid)
             memcpy(next_mac, g_knet.router_mac, 6u);
-        else if (arp_resolve(next_hop, next_mac, 16u) != 0)
+        else if (arp_resolve(next_hop, next_mac, 4u) != 0)
         {
             terminal_error("net:get could not resolve DNS next-hop MAC");
             return -1;
@@ -791,7 +913,8 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         {
         uint32_t dns_polls = 0u;
         uint32_t dns_scanned = 0u;
-        while (dns_polls < 24u && !server_ip && dns_scanned < 512u)
+        uint64_t dns_deadline = knet_now_ms() + 8000u;
+        while (knet_now_ms() < dns_deadline && !server_ip && dns_scanned < 1024u)
         {
             uint32_t got = 0u;
             uint32_t ip_off = 14u;
@@ -883,7 +1006,7 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         }
         if (next_hop == g_knet.router && g_knet.router_mac_valid)
             memcpy(next_mac, g_knet.router_mac, 6u);
-        else if (arp_resolve(next_hop, next_mac, 16u) != 0)
+        else if (arp_resolve(next_hop, next_mac, 4u) != 0)
         {
             terminal_error("net:get next-hop ARP timeout");
             return -1;
@@ -909,7 +1032,7 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         g_tx[22u] = 64u; g_tx[23u] = KNET_IP_PROTO_TCP; put_be16(g_tx + 24u, 0u); \
         put_be32(g_tx + 26u, g_knet.ip); put_be32(g_tx + 30u, server_ip); \
         put_be16(g_tx + 24u, ip_checksum(g_tx + 14u, 20u)); \
-        put_be16(g_tx + 34u, local_port); put_be16(g_tx + 36u, 80u); \
+        put_be16(g_tx + 34u, local_port); put_be16(g_tx + 36u, server_port); \
         put_be32(g_tx + 38u, (seq_)); put_be32(g_tx + 42u, (ack_)); \
         g_tx[46u] = (uint8_t)((tcp_hlen_ / 4u) << 4); g_tx[47u] = (uint8_t)(flags_); \
         put_be16(g_tx + 48u, 64240u); put_be16(g_tx + 50u, 0u); put_be16(g_tx + 52u, 0u); \
@@ -933,7 +1056,7 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
             get_be16(g_rx + 12u) == KNET_ETH_TYPE_IPV4 && g_rx[23u] == KNET_IP_PROTO_TCP && \
             get_be32(g_rx + 26u) == server_ip && get_be32(g_rx + 30u) == g_knet.ip) { \
             ihl_ = (uint32_t)(g_rx[14u] & 0x0Fu) * 4u; to_ = 14u + ihl_; total_ = get_be16(g_rx + 16u); \
-            if (to_ + 20u <= got_ && get_be16(g_rx + to_) == 80u && get_be16(g_rx + to_ + 2u) == local_port) { \
+            if (to_ + 20u <= got_ && get_be16(g_rx + to_) == server_port && get_be16(g_rx + to_ + 2u) == local_port) { \
                 thl_ = (uint32_t)(g_rx[to_ + 12u] >> 4) * 4u; \
                 if (thl_ >= 20u && ihl_ + thl_ <= total_ && 14u + total_ <= got_) { \
                     (packet_).seq = get_be32(g_rx + to_ + 4u); (packet_).ack = get_be32(g_rx + to_ + 8u); \
@@ -946,12 +1069,15 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
 
     terminal_print_inline("net: TCP connect ");
     print_ip_inline(server_ip);
-    terminal_print(":80");
+    terminal_print_inline(":");
+    print_dec_inline(server_port);
+    terminal_print("");
     KNET_SEND_TCP(tx_seq, 0u, tcp_syn, 0, 0u, 1u);
     {
     uint32_t tcp_polls = 0u;
     uint32_t tcp_scanned = 0u;
-    while (tcp_polls < 24u && tcp_scanned < 512u)
+    uint64_t tcp_deadline = knet_now_ms() + 8000u;
+    while (knet_now_ms() < tcp_deadline && tcp_scanned < 1024u)
     {
         tcp_packet packet;
         uint8_t ok;
@@ -996,6 +1122,217 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
         terminal_error("net:get HTTP request is too long");
         return -1;
     }
+
+    if (use_tls)
+    {
+        uint8_t entropy[48];
+        uint32_t request_off = 0u;
+        uint32_t pending_len = 0u;
+        uint32_t pending_off = 0u;
+        uint64_t tls_deadline = knet_now_ms() + 30000u;
+        uint8_t request_flushed = 0u;
+        uint8_t tcp_fin_seen = 0u;
+
+        terminal_warn("net: TLS root trust store not installed; chain and hostname checks only");
+        terminal_warn("net: TLS entropy is provisional until a hardware RNG driver is available");
+        terminal_warn("net: TLS certificate time is temporarily pinned to 2026-08-05");
+
+        br_ssl_client_init_full(&g_tls_client, &g_tls_x509, 0, 0u);
+        br_x509_minimal_set_time(&g_tls_x509, 740198u,
+                                 (uint32_t)(dihos_time_seconds() % 86400u));
+        g_tls_noanchor.vtable = &g_knet_x509_noanchor_vtable;
+        g_tls_noanchor.inner = &g_tls_x509.vtable;
+        br_ssl_engine_set_x509(&g_tls_client.eng, &g_tls_noanchor.vtable);
+        br_ssl_engine_set_versions(&g_tls_client.eng, BR_TLS12, BR_TLS12);
+        br_ssl_engine_set_buffer(&g_tls_client.eng, g_tls_iobuf, sizeof(g_tls_iobuf), 1);
+        knet_tls_entropy(entropy);
+        br_ssl_engine_inject_entropy(&g_tls_client.eng, entropy, sizeof(entropy));
+        memset(entropy, 0, sizeof(entropy));
+        if (!br_ssl_client_reset(&g_tls_client, host, 0))
+        {
+            terminal_error("net:get TLS client reset failed");
+            return -1;
+        }
+
+        terminal_print_inline("net: TLS 1.2 handshake ");
+        terminal_print(host);
+        for (uint32_t guard = 0u; guard < 8192u; ++guard)
+        {
+            unsigned state = br_ssl_engine_current_state(&g_tls_client.eng);
+            size_t tls_len = 0u;
+            unsigned char *tls_buf;
+
+            if (state == BR_SSL_CLOSED)
+            {
+                int err = br_ssl_engine_last_error(&g_tls_client.eng);
+                if (err != 0)
+                {
+                    terminal_print_inline("net:get TLS error ");
+                    print_dec_inline((uint32_t)err);
+                    terminal_print("");
+                    return -1;
+                }
+                terminal_print("");
+                terminal_success("net:get HTTPS response complete");
+                return 0;
+            }
+
+            if (state & BR_SSL_SENDREC)
+            {
+                uint32_t take;
+                tls_buf = br_ssl_engine_sendrec_buf(&g_tls_client.eng, &tls_len);
+                take = (uint32_t)tls_len;
+                if (take > 1300u)
+                    take = 1300u;
+                if (tls_buf && take)
+                {
+                    KNET_SEND_TCP(tx_seq, rx_seq, tcp_psh | tcp_ack, tls_buf, take, 0u);
+                    tx_seq += take;
+                    br_ssl_engine_sendrec_ack(&g_tls_client.eng, take);
+                    tls_deadline = knet_now_ms() + 30000u;
+                    continue;
+                }
+            }
+
+            if ((state & BR_SSL_SENDAPP) && request_off < request_len)
+            {
+                uint32_t take;
+                tls_buf = br_ssl_engine_sendapp_buf(&g_tls_client.eng, &tls_len);
+                take = request_len - request_off;
+                if (take > tls_len)
+                    take = (uint32_t)tls_len;
+                if (tls_buf && take)
+                {
+                    memcpy(tls_buf, request + request_off, take);
+                    request_off += take;
+                    br_ssl_engine_sendapp_ack(&g_tls_client.eng, take);
+                    if (request_off == request_len && !request_flushed)
+                    {
+                        br_ssl_engine_flush(&g_tls_client.eng, 0);
+                        request_flushed = 1u;
+                        terminal_success("net: TLS connected");
+                        terminal_print_inline("net: HTTPS GET ");
+                        terminal_print(path);
+                    }
+                    continue;
+                }
+            }
+
+            if (state & BR_SSL_RECVAPP)
+            {
+                uint32_t take;
+                uint32_t off = 0u;
+                tls_buf = br_ssl_engine_recvapp_buf(&g_tls_client.eng, &tls_len);
+                take = (uint32_t)tls_len;
+                if (take > max_bytes - printed)
+                    take = max_bytes - printed;
+                while (off < take)
+                {
+                    char chunk[257];
+                    uint32_t n = take - off;
+                    if (n > 256u)
+                        n = 256u;
+                    memcpy(chunk, tls_buf + off, n);
+                    chunk[n] = 0;
+                    terminal_print_inline(chunk);
+                    off += n;
+                }
+                if (tls_len)
+                    br_ssl_engine_recvapp_ack(&g_tls_client.eng, tls_len);
+                printed += take;
+                tls_deadline = knet_now_ms() + 30000u;
+                if (printed >= max_bytes)
+                {
+                    terminal_warn("net:get output truncated by max= limit");
+                    KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
+                    return 0;
+                }
+                continue;
+            }
+
+            if (state & BR_SSL_RECVREC)
+            {
+                if (pending_off < pending_len)
+                {
+                    uint32_t take = pending_len - pending_off;
+                    tls_buf = br_ssl_engine_recvrec_buf(&g_tls_client.eng, &tls_len);
+                    if (take > tls_len)
+                        take = (uint32_t)tls_len;
+                    if (tls_buf && take)
+                    {
+                        memcpy(tls_buf, g_tls_pending + pending_off, take);
+                        pending_off += take;
+                        br_ssl_engine_recvrec_ack(&g_tls_client.eng, take);
+                        tls_deadline = knet_now_ms() + 30000u;
+                        if (pending_off == pending_len)
+                            pending_off = pending_len = 0u;
+                        continue;
+                    }
+                }
+                else if (tcp_fin_seen)
+                {
+                    if (printed)
+                    {
+                        terminal_print("");
+                        terminal_success("net:get HTTPS response complete (peer closed TCP)");
+                        return 0;
+                    }
+                    terminal_error("net:get TLS peer closed before an HTTPS response");
+                    return -1;
+                }
+                else
+                {
+                    tcp_packet packet;
+                    uint8_t ok;
+                    KNET_PARSE_TCP(packet, ok);
+                    if (!ok)
+                    {
+                        if (knet_now_ms() >= tls_deadline)
+                            break;
+                        continue;
+                    }
+                    if (packet.flags & tcp_rst)
+                    {
+                        terminal_error("net:get TLS TCP connection reset");
+                        return -1;
+                    }
+                    if (packet.payload_len && packet.seq == rx_seq)
+                    {
+                        if (packet.payload_len > sizeof(g_tls_pending))
+                        {
+                            terminal_error("net:get TLS TCP segment too large");
+                            return -1;
+                        }
+                        memcpy(g_tls_pending, packet.payload, packet.payload_len);
+                        pending_len = packet.payload_len;
+                        pending_off = 0u;
+                        rx_seq += packet.payload_len;
+                        tls_deadline = knet_now_ms() + 30000u;
+                        KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
+                    }
+                    else if (packet.payload_len)
+                    {
+                        KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
+                    }
+                    if (packet.flags & tcp_fin)
+                    {
+                        if (packet.seq + packet.payload_len == rx_seq)
+                            ++rx_seq;
+                        tcp_fin_seen = 1u;
+                        KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
+                    }
+                    continue;
+                }
+            }
+        }
+
+        terminal_print_inline("net:get TLS/HTTPS timeout, engine error ");
+        print_dec_inline((uint32_t)br_ssl_engine_last_error(&g_tls_client.eng));
+        terminal_print("");
+        KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
+        return -1;
+    }
+
     terminal_print_inline("net: HTTP GET ");
     terminal_print(path);
     KNET_SEND_TCP(tx_seq, rx_seq, tcp_psh | tcp_ack, request, request_len, 0u);
@@ -1004,7 +1341,8 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
     {
     uint32_t http_polls = 0u;
     uint32_t http_scanned = 0u;
-    while (http_polls < 96u && http_scanned < 1024u)
+    uint64_t http_deadline = knet_now_ms() + 30000u;
+    while (knet_now_ms() < http_deadline && http_scanned < 4096u)
     {
         tcp_packet packet;
         uint8_t ok;

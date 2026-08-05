@@ -58,7 +58,7 @@ extern "C"
         char prompt[DIHOS_SHELL_PROMPT_CAP];
         char history[DIHOS_SHELL_HISTORY_MAX][DIHOS_SHELL_HISTORY_ENTRY_CAP];
         char history_draft[DIHOS_SHELL_HISTORY_ENTRY_CAP];
-        uint8_t history_count;
+        uint16_t history_count;
         int history_browse_index;
         dihos_shell_io io;
         dihos_shell_capture_sink_fn capture_sink;
