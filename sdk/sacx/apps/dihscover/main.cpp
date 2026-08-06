@@ -24,7 +24,7 @@ static uint32_t g_page_cache_size;
 static char g_page_cache_url[DIHSCOVER_URL_CAP];
 static uint8_t g_page_cache_tls_unverified;
 static uint32_t g_window, g_root, g_viewport, g_page_bg, g_status_obj, g_tls_obj;
-static uint32_t g_textbox, g_textbox_root, g_request, g_generation = 1u;
+static uint32_t g_textbox, g_textbox_root, g_page_textbox, g_page_textbox_root, g_request, g_generation = 1u;
 static uint32_t g_retired_requests[8];
 static toolbar_button g_buttons[4];
 static uint32_t g_action, g_load_state, g_history_count, g_history_at;
@@ -38,6 +38,8 @@ static uint8_t g_prev_address_focus;
 static char g_status[192];
 static uint8_t g_suppress_document_click;
 static uint8_t g_document_tls_unverified;
+static int32_t g_page_input_node = -1;
+static uint8_t g_page_submit_pending;
 
 static sacx_color rgb(uint8_t r, uint8_t g, uint8_t b) { sacx_color c={r,g,b}; return c; }
 
@@ -63,6 +65,17 @@ static void button_cb(uint32_t handle, void *user)
 {
     (void)handle;
     g_action=(uint32_t)(uintptr_t)user;
+}
+
+static void page_textbox_submit(uint32_t handle,const char*text,void*user)
+{
+    (void)handle;(void)user;if(g_page_input_node>0){(void)browser_document_set_attribute(&g_doc,(uint32_t)g_page_input_node,"value",text?text:"",0u);g_page_submit_pending=1u;}
+}
+
+static void close_page_input(void)
+{
+    if(g_page_input_node>0&&g_page_textbox){char value[512];if(g_api->textbox_text_copy(g_page_textbox,value,sizeof(value))>=0)(void)browser_document_set_attribute(&g_doc,(uint32_t)g_page_input_node,"value",value,0u);}
+    g_page_input_node=-1;g_page_submit_pending=0u;if(g_page_textbox_root)(void)g_api->gfx_obj_set_visible(g_page_textbox_root,0u);
 }
 
 static int make_button(toolbar_button *b, const char *label, uint32_t action)
@@ -105,6 +118,7 @@ static void clear_images(void)
 
 static void cancel_load(void)
 {
+    close_page_input();
     if (g_request) {
         (void)g_api->net_request_cancel(g_request);
         for (uint32_t k=0u;k<8u;++k) if(!g_retired_requests[k]) { g_retired_requests[k]=g_request; break; }
@@ -174,6 +188,30 @@ static void navigate_post(const char *url, const char *body)
     cancel_load();++g_generation;g_scroll_y=0;clear_paint();g_suppress_document_click=1u;history_push(url);(void)g_api->textbox_set_text(g_textbox,url);browser_document_reset(&g_doc,g_generation,url);set_status("Submitting form");
     b_memset(&desc,0,sizeof(desc));desc.url=url;desc.max_response_bytes=DIHSCOVER_BODY_CAP-1u;desc.timeout_ms=45000u;desc.redirect_limit=5u;desc.method="POST";desc.body=body;desc.body_size=b_strlen(body);desc.content_type="application/x-www-form-urlencoded";
     if(g_api->net_request_start_ex(&desc,&g_request)!=0){show_error("Could not submit form","The network request could not be started.");return;}g_load_state=LOAD_DOCUMENT;
+}
+
+static int32_t page_input_form(uint32_t node)
+{
+    for(int32_t p=(int32_t)node;p>0;p=g_doc.nodes[p].parent)if(g_doc.nodes[p].tag==B_TAG_FORM)return p;return -1;
+}
+
+static void submit_form(uint32_t form)
+{
+    char action[DIHSCOVER_URL_CAP],resolved[DIHSCOVER_URL_CAP],method[12],body[DIHSCOVER_FORM_BODY_CAP];
+    if(browser_document_encode_form(&g_doc,form,action,sizeof(action),method,sizeof(method),body,sizeof(body))!=0){show_error("Could not submit form","The form data was too large.");return;}
+    if(browser_url_resolve(g_doc.base_url,action,resolved,sizeof(resolved))!=0){show_error("Could not submit form","The form action URL was invalid.");return;}
+    if((method[0]=='p'||method[0]=='P')&&(method[1]=='o'||method[1]=='O'))navigate_post(resolved,body);
+    else{char target[DIHSCOVER_URL_CAP];uint8_t has_query=0u;for(uint32_t i=0u;resolved[i];++i)if(resolved[i]=='?'){has_query=1u;break;}b_copy(target,sizeof(target),resolved);append_text(target,sizeof(target),has_query?"&":"?");append_text(target,sizeof(target),body);navigate(target,1);}
+}
+
+static void focus_page_input(uint32_t node)
+{
+    if(node>=g_doc.node_count||!g_page_textbox)return;close_page_input();g_page_input_node=(int32_t)node;browser_node*n=&g_doc.nodes[node];const char*value=n->value_off?browser_document_string(&g_doc,n->value_off):"";(void)g_api->textbox_set_text(g_page_textbox,value);(void)g_api->textbox_set_bounds(g_page_textbox,n->x,n->y-g_scroll_y,n->w,n->h?n->h:34u);(void)g_api->gfx_obj_set_visible(g_page_textbox_root,1u);(void)g_api->textbox_set_focus(g_page_textbox,1u);if(SACX_API_HAS(g_api,textbox_select))(void)g_api->textbox_select(g_page_textbox,0u,b_strlen(value));
+}
+
+static void sync_page_input(void)
+{
+    if(g_page_input_node<=0||!g_page_textbox)return;if((uint32_t)g_page_input_node>=g_doc.node_count){close_page_input();return;}browser_node*n=&g_doc.nodes[g_page_input_node];int32_t sy=n->y-g_scroll_y;if(!n->h||sy+(int32_t)n->h<0||sy>(int32_t)g_view_h){close_page_input();return;}(void)g_api->textbox_set_bounds(g_page_textbox,n->x,sy,n->w,n->h?n->h:34u);char value[512];if(g_api->textbox_text_copy(g_page_textbox,value,sizeof(value))>=0){const char*old=n->value_off?browser_document_string(&g_doc,n->value_off):"";if(!b_streq(old,value))(void)browser_document_set_attribute(&g_doc,(uint32_t)g_page_input_node,"value",value,0u);}if(g_page_submit_pending){uint32_t input=(uint32_t)g_page_input_node;g_page_submit_pending=0u;int32_t form=page_input_form(input);if(form>0)submit_form((uint32_t)form);}
 }
 
 static void pump_retired_requests(void)
@@ -258,6 +296,11 @@ static int image_near_viewport(const browser_image *im)
     return n->y+(int32_t)n->h>=top&&n->y<=bottom;
 }
 
+static void relayout_preserving_scroll(void)
+{
+    int32_t anchor=-1,offset=0;if(g_scroll_y>0){for(uint32_t i=1u;i<g_doc.node_count;++i){browser_node*n=&g_doc.nodes[i];if(n->text_off&&n->h&&n->y+(int32_t)n->h>=g_scroll_y){anchor=(int32_t)i;offset=g_scroll_y-n->y;break;}}}browser_document_layout(&g_doc,g_view_w);if(anchor>0&&(uint32_t)anchor<g_doc.node_count){g_scroll_y=g_doc.nodes[anchor].y+offset;if(g_scroll_y<0)g_scroll_y=0;int32_t max=(int32_t)g_doc.content_height-(int32_t)g_view_h;if(max<0)max=0;if(g_scroll_y>max)g_scroll_y=max;}
+}
+
 static int start_next_image(void)
 {
     for (uint32_t i=0u;i<DIHSCOVER_IMAGE_CAP;++i) if(g_images[i].used&&!g_images[i].failed&&!g_images[i].image&&!g_images[i].request&&image_near_viewport(&g_images[i])) {
@@ -266,6 +309,24 @@ static int start_next_image(void)
         if(!g_images[i].reserved){g_images[i].reserved=1u;set_status("Retrying image");return 1;}g_images[i].failed=1u;return 0;
     }
     return 0;
+}
+
+static int reclaim_image_graphics_slot(void)
+{
+    for(uint32_t i=g_paint_count;i>0u;--i){browser_paint*p=&g_paint[i-1u];uint32_t*h=p->underline_object3?&p->underline_object3:p->underline_object2?&p->underline_object2:p->underline_object?&p->underline_object:p->background_object?&p->background_object:0;if(h){(void)g_api->gfx_obj_destroy(*h);*h=0u;return 1;}}
+    if(g_paint_count>96u){browser_paint*p=&g_paint[g_paint_count-1u];if(p->object)(void)g_api->gfx_obj_destroy(p->object);b_memset(p,0,sizeof(*p));--g_paint_count;return 1;}return 0;
+}
+
+static int ensure_image_object(browser_image*im)
+{
+    if(!im||!im->image||im->node_index>=g_doc.node_count)return -1;if(im->object)return 0;browser_node*n=&g_doc.nodes[im->node_index];if(!n->w||!n->h)return -1;
+    for(uint32_t attempt=0u;attempt<80u;++attempt){uint32_t obj=0u;if(g_api->gfx_obj_add_image_from_img(im->image,n->x,n->y-g_scroll_y,&obj)==0){im->object=obj;(void)g_api->gfx_obj_set_parent(obj,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(obj,1u);(void)g_api->gfx_obj_set_z(obj,5);(void)g_api->gfx_obj_set_visible(obj,1u);(void)g_api->gfx_image_set_sample_mode(obj,SACX_GFX_IMAGE_SAMPLE_NEAREST);(void)g_api->gfx_image_set_pos(obj,n->x,n->y-g_scroll_y);(void)g_api->gfx_image_set_size(obj,n->w,n->h);if(g_api->log)g_api->log("Dihscover: image object ready");return 0;}if(!reclaim_image_graphics_slot())break;}
+    if(g_api->log)g_api->log("Dihscover: image object allocation failed");return -1;
+}
+
+static void log_image_pixel_state(uint32_t image,uint32_t w,uint32_t h)
+{
+    if(!g_api->log||!SACX_API_HAS(g_api,img_pixels)||!w||!h)return;uint32_t*pixels=0u,stride=0u;if(g_api->img_pixels(image,&pixels,&stride)!=0||!pixels||stride<w)return;uint32_t opaque=0u,dark=0u,light=0u,varied=0u,first=0u;for(uint32_t gy=0u;gy<4u;++gy)for(uint32_t gx=0u;gx<4u;++gx){uint32_t px=pixels[((uint64_t)gy*(h-1u)/3u)*stride+((uint64_t)gx*(w-1u)/3u)];uint32_t a=px>>24,r=(px>>16)&255u,g=(px>>8)&255u,b=px&255u;if(a>16u)++opaque;if(r+g+b<48u)++dark;if(r+g+b>720u)++light;if((gx||gy)&&px!=first)++varied;else if(!gx&&!gy)first=px;}if(!opaque)g_api->log("Dihscover: decoded image samples transparent");else if(!varied&&light==16u)g_api->log("Dihscover: decoded image samples white");else if(!varied&&dark==16u)g_api->log("Dihscover: decoded image samples black");else g_api->log("Dihscover: decoded image samples contain colour");
 }
 
 static void pump_images(void)
@@ -277,7 +338,7 @@ static void pump_images(void)
             if(g_api->log)g_api->log("Dihscover: image decode begin");
             if(g_api->net_response_info(g_images[i].request,&info)==0 && info.body_size<DIHSCOVER_BODY_CAP &&
                g_api->net_response_read(g_images[i].request,0u,g_body,info.body_size,&got)==0 && got==info.body_size &&
-               g_api->img_load_memory(g_body,got,&g_images[i].image)==0){browser_node*n=&g_doc.nodes[g_images[i].node_index];uint32_t iw=0u,ih=0u;if(g_api->img_size&&g_api->img_size(g_images[i].image,&iw,&ih)==0&&iw&&ih){uint32_t maxw=g_view_w>48u?g_view_w-48u:g_view_w;if(!n->style.width_px&&!n->style.height_px){n->style.width_px=(uint16_t)(iw>maxw?maxw:iw);n->style.height_px=(uint16_t)(((uint64_t)ih*n->style.width_px)/iw);}else if(n->style.width_px&&!n->style.height_px)n->style.height_px=(uint16_t)(((uint64_t)ih*n->style.width_px)/iw);else if(!n->style.width_px&&n->style.height_px)n->style.width_px=(uint16_t)(((uint64_t)iw*n->style.height_px)/ih);if(!n->style.width_px)n->style.width_px=1u;if(!n->style.height_px)n->style.height_px=1u;}g_images[i].failed=0u;browser_document_layout(&g_doc,g_view_w);}else g_images[i].failed=1u;
+               g_api->img_load_memory(g_body,got,&g_images[i].image)==0){browser_node*n=&g_doc.nodes[g_images[i].node_index];uint32_t iw=0u,ih=0u;if(g_api->img_size&&g_api->img_size(g_images[i].image,&iw,&ih)==0&&iw&&ih){log_image_pixel_state(g_images[i].image,iw,ih);uint32_t maxw=g_view_w>48u?g_view_w-48u:g_view_w;if(!n->style.width_px&&!n->style.height_px){n->style.width_px=(uint16_t)(iw>maxw?maxw:iw);n->style.height_px=(uint16_t)(((uint64_t)ih*n->style.width_px)/iw);}else if(n->style.width_px&&!n->style.height_px)n->style.height_px=(uint16_t)(((uint64_t)ih*n->style.width_px)/iw);else if(!n->style.width_px&&n->style.height_px)n->style.width_px=(uint16_t)(((uint64_t)iw*n->style.height_px)/ih);if(!n->style.width_px)n->style.width_px=1u;if(!n->style.height_px)n->style.height_px=1u;}g_images[i].failed=0u;relayout_preserving_scroll();(void)ensure_image_object(&g_images[i]);}else g_images[i].failed=1u;
             if(g_api->log)g_api->log("Dihscover: image decode done");(void)g_api->net_request_release(g_images[i].request); g_images[i].request=0u; g_images[i].loading=0u; clear_paint();
         } else if(st==SACX_NET_STATUS_FAILED||st==SACX_NET_STATUS_CANCELLED) { (void)g_api->net_request_release(g_images[i].request); g_images[i].request=0u;g_images[i].loading=0u;if(!g_images[i].reserved){g_images[i].reserved=1u;set_status("Retrying image");}else g_images[i].failed=1u; }
         return;
@@ -294,11 +355,14 @@ static void paint_document(void)
 {
     uint32_t used=0u;
     for(uint32_t i=0u;i<g_paint_count;++i) g_paint[i].active=0u;
-    for(uint32_t i=1u;i<g_doc.node_count&&used<g_paint_count;++i) {
+    for(uint32_t pass=0u;pass<2u&&used<g_paint_count;++pass) for(uint32_t i=1u;i<g_doc.node_count&&used<g_paint_count;++i) {
         browser_node *n=&g_doc.nodes[i]; int32_t sy=n->y-g_scroll_y;
         if(!n->h||sy+(int32_t)n->h<0||sy>(int32_t)g_view_h) continue;
         if(n->tag==B_TAG_IMG&&n->image_slot>=0) continue;
+        if((int32_t)i==g_page_input_node) continue;
         if(!n->text_off&&!n->style.has_background&&!n->style.border_width) continue;
+        if(pass==0u&&!n->text_off)continue;
+        if(pass==1u&&n->text_off)continue;
         browser_paint *p=&g_paint[used++];
         p->node=(int32_t)i;p->active=1u;
         uint32_t scale=browser_text_scale(n->style.font_px);
@@ -326,7 +390,7 @@ static void paint_document(void)
     for(uint32_t i=used;i<g_paint_count;++i){if(g_paint[i].object)(void)g_api->gfx_obj_set_visible(g_paint[i].object,0u);if(g_paint[i].underline_object)(void)g_api->gfx_obj_set_visible(g_paint[i].underline_object,0u);if(g_paint[i].underline_object2)(void)g_api->gfx_obj_set_visible(g_paint[i].underline_object2,0u);if(g_paint[i].underline_object3)(void)g_api->gfx_obj_set_visible(g_paint[i].underline_object3,0u);if(g_paint[i].background_object)(void)g_api->gfx_obj_set_visible(g_paint[i].background_object,0u);}
     for(uint32_t i=0u;i<DIHSCOVER_IMAGE_CAP;++i) if(g_images[i].image) {
         browser_node *n=&g_doc.nodes[g_images[i].node_index];
-        if(!g_images[i].object) { uint32_t obj=0u;if(g_api->gfx_obj_add_image_from_img(g_images[i].image,n->x,n->y-g_scroll_y,&obj)==0){g_images[i].object=obj;(void)g_api->gfx_obj_set_parent(obj,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(obj,1u);(void)g_api->gfx_image_set_sample_mode(obj,SACX_GFX_IMAGE_SAMPLE_BILINEAR);} }
+        if(!g_images[i].object)(void)ensure_image_object(&g_images[i]);
         if(g_images[i].object){(void)g_api->gfx_image_set_pos(g_images[i].object,n->x,n->y-g_scroll_y);(void)g_api->gfx_image_set_size(g_images[i].object,n->w,n->h);}
     }
 }
@@ -378,6 +442,7 @@ static int update(const sacx_api *api)
     else if(g_load_state==LOAD_STYLES)pump_stylesheets();
     else if(g_load_state==LOAD_IMAGES)pump_images();
     if(browser_scripts_pump(&g_doc,api->time_ticks(),64u)>0){browser_document_layout(&g_doc,g_view_w);clear_paint();}
+    sync_page_input();
     if(api->mouse_get_state(&mouse)==0&&api->window_focused(g_window)){
         if(mouse.wheel){g_scroll_y-=mouse.wheel*42;if(g_scroll_y<0)g_scroll_y=0;int32_t max=(int32_t)g_doc.content_height-(int32_t)g_view_h;if(max<0)max=0;if(g_scroll_y>max)g_scroll_y=max;if(g_load_state==LOAD_IDLE)g_load_state=LOAD_IMAGES;}
         int32_t lx=mouse.x-g_root_x,ly=mouse.y-g_root_y;
@@ -392,17 +457,13 @@ static int update(const sacx_api *api)
             (void)api->mouse_set_cursor(cursor);
             if(!g_suppress_document_click&&(mouse.buttons&1u)&&!(g_prev_mouse&1u)&&hit>=0){
                 browser_node *n=&g_doc.nodes[hit];
-                if(n->href_off){char url[DIHSCOVER_URL_CAP],direct[DIHSCOVER_URL_CAP];if(browser_url_resolve(g_doc.base_url,browser_document_string(&g_doc,n->href_off),url,sizeof(url))==0&&browser_url_unwrap_navigation(url,direct,sizeof(direct))==0)navigate(direct,1);}
+                if(n->flags&32u){}
+                else if(n->tag==B_TAG_INPUT&&!(n->flags&(8u|16u))){focus_page_input((uint32_t)hit);}
+                else if(n->href_off){char href[DIHSCOVER_URL_CAP],url[DIHSCOVER_URL_CAP],direct[DIHSCOVER_URL_CAP];b_copy(href,sizeof(href),browser_document_string(&g_doc,n->href_off));int changed=browser_scripts_click(&g_doc,(uint32_t)hit);if(changed>0){browser_document_layout(&g_doc,g_view_w);clear_paint();}if(browser_url_resolve(g_doc.base_url,href,url,sizeof(url))==0&&browser_url_unwrap_navigation(url,direct,sizeof(direct))==0)navigate(direct,1);}
                 else{
-                    uint32_t form=0u;int activated=browser_document_activate(&g_doc,(uint32_t)hit,&form);
-                    if(activated==1){browser_document_layout(&g_doc,g_view_w);clear_paint();}
-                    else if(activated==2){
-                        char action[DIHSCOVER_URL_CAP],resolved[DIHSCOVER_URL_CAP],method[12],body[DIHSCOVER_FORM_BODY_CAP];
-                        if(browser_document_encode_form(&g_doc,form,action,sizeof(action),method,sizeof(method),body,sizeof(body))!=0)show_error("Could not submit form","The form data was too large.");
-                        else if(browser_url_resolve(g_doc.base_url,action,resolved,sizeof(resolved))!=0)show_error("Could not submit form","The form action URL was invalid.");
-                        else if((method[0]=='p'||method[0]=='P')&&(method[1]=='o'||method[1]=='O'))navigate_post(resolved,body);
-                        else{char target[DIHSCOVER_URL_CAP];uint8_t has_query=0u;for(uint32_t qi=0u;resolved[qi];++qi)if(resolved[qi]=='?'){has_query=1u;break;}b_copy(target,sizeof(target),resolved);append_text(target,sizeof(target),has_query?"&":"?");append_text(target,sizeof(target),body);navigate(target,1);}
-                    }else if(browser_scripts_click(&g_doc,(uint32_t)hit)>0){browser_document_layout(&g_doc,g_view_w);clear_paint();}
+                    uint32_t form=0u;int scripted=browser_scripts_click(&g_doc,(uint32_t)hit);int activated=browser_document_activate(&g_doc,(uint32_t)hit,&form);
+                    if(activated==1||scripted>0){browser_document_layout(&g_doc,g_view_w);clear_paint();}
+                    if(activated==2)submit_form(form);
                 }
             }
         }
@@ -425,14 +486,17 @@ static int create_ui(void)
     (void)g_api->gfx_obj_set_parent(g_textbox_root,g_root);(void)g_api->textbox_set_max_len(g_textbox,DIHSCOVER_URL_CAP-1u);
     if(g_api->gfx_obj_add_rect(0,UI_DOCUMENT_Y,860,514,1,rgb(255,255,255),1,&g_viewport)!=0||g_api->gfx_obj_add_rect(0,0,860,514,0,rgb(255,255,255),1,&g_page_bg)!=0)return -1;
     (void)g_api->gfx_obj_set_parent(g_viewport,g_root);(void)g_api->gfx_obj_set_parent(g_page_bg,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_page_bg,1u);
+    ts.fill=rgb(255,255,255);ts.focus_fill=rgb(255,255,255);ts.outline=rgb(105,115,124);ts.focus_outline=rgb(15,126,154);ts.text_color=rgb(28,34,40);ts.text_scale=1u;ts.padding_x=7u;ts.padding_y=5u;
+    if(g_api->textbox_add_rect(0,0,220,34,18,&ts,page_textbox_submit,0,&g_page_textbox)!=0||g_api->textbox_root(g_page_textbox,&g_page_textbox_root)!=0)return -1;
+    (void)g_api->gfx_obj_set_parent(g_page_textbox_root,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_page_textbox_root,1u);(void)g_api->gfx_obj_set_visible(g_page_textbox_root,0u);(void)g_api->textbox_set_max_len(g_page_textbox,511u);
     if(g_api->gfx_obj_add_text("Ready",10,UI_STATUS_Y,20,rgb(73,84,92),255,1,0,0,SACX_TEXT_ALIGN_LEFT,1,&g_status_obj)!=0||g_api->gfx_obj_add_text("",850,UI_STATUS_Y,20,rgb(172,91,22),255,1,0,0,SACX_TEXT_ALIGN_RIGHT,1,&g_tls_obj)!=0)return -1;
     (void)g_api->gfx_obj_set_parent(g_status_obj,g_root);(void)g_api->gfx_obj_set_parent(g_tls_obj,g_root);
-    for(uint32_t i=0u;i<DIHSCOVER_PAINT_CAP;++i){
-        if(g_api->gfx_obj_add_text("",0,0,4,rgb(28,34,40),255,1,0,2,SACX_TEXT_ALIGN_LEFT,0,&g_paint[i].object)!=0||g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object)!=0||g_api->gfx_obj_add_rect(0,0,1,1,2,rgb(255,255,255),0,&g_paint[i].background_object)!=0)break;
-        if(i<48u){(void)g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object2);(void)g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object3);}
-        uint32_t objects[5]={g_paint[i].background_object,g_paint[i].object,g_paint[i].underline_object,g_paint[i].underline_object2,g_paint[i].underline_object3};for(uint32_t k=0u;k<5u;++k)if(objects[k]){(void)g_api->gfx_obj_set_parent(objects[k],g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(objects[k],1u);}
-        g_paint[i].node=-1;g_paint_count=i+1u;
-    }
+    /* Reserve text capacity first. Decorations are optional when the global graphics pool is busy. */
+    for(uint32_t i=0u;i<DIHSCOVER_PAINT_CAP;++i){if(g_api->gfx_obj_add_text("",0,0,4,rgb(28,34,40),255,1,0,2,SACX_TEXT_ALIGN_LEFT,0,&g_paint[i].object)!=0)break;(void)g_api->gfx_obj_set_parent(g_paint[i].object,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_paint[i].object,1u);g_paint[i].node=-1;g_paint_count=i+1u;}
+    if(g_paint_count<DIHSCOVER_PAINT_CAP&&g_api->log)g_api->log("Dihscover: graphics pool limited text virtualization");
+    for(uint32_t i=0u;i<g_paint_count&&i<32u;++i)if(g_api->gfx_obj_add_rect(0,0,1,1,2,rgb(255,255,255),0,&g_paint[i].background_object)==0){(void)g_api->gfx_obj_set_parent(g_paint[i].background_object,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_paint[i].background_object,1u);}
+    for(uint32_t i=0u;i<g_paint_count&&i<24u;++i)if(g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object)==0){(void)g_api->gfx_obj_set_parent(g_paint[i].underline_object,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_paint[i].underline_object,1u);}
+    for(uint32_t i=0u;i<g_paint_count&&i<4u;++i){if(g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object2)==0){(void)g_api->gfx_obj_set_parent(g_paint[i].underline_object2,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_paint[i].underline_object2,1u);}if(g_api->gfx_obj_add_rect(0,0,1,1,3,rgb(16,92,172),0,&g_paint[i].underline_object3)==0){(void)g_api->gfx_obj_set_parent(g_paint[i].underline_object3,g_viewport);(void)g_api->gfx_obj_set_clip_to_parent(g_paint[i].underline_object3,1u);}}
     layout_ui();(void)g_api->textbox_set_focus(g_textbox,1u);return 0;
 }
 

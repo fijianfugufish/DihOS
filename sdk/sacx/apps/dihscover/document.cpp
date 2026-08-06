@@ -22,6 +22,7 @@ static char lower(char c){return c>='A'&&c<='Z'?(char)(c+32):c;}
 static int space(char c){return c==' '||c=='\t'||c=='\r'||c=='\n';}
 static int span_eq(const char*s,uint32_t n,const char*lit){uint32_t i=0;while(i<n&&lit[i]&&lower(s[i])==lower(lit[i]))++i;return i==n&&!lit[i];}
 static int span_same(const char*a,uint32_t an,const char*b,uint32_t bn){if(an!=bn)return 0;for(uint32_t i=0;i<an;++i)if(lower(a[i])!=lower(b[i]))return 0;return 1;}
+static uint32_t tag_hash(const char*s,uint32_t n){uint32_t h=2166136261u;for(uint32_t i=0;i<n;++i){h^=(uint8_t)lower(s[i]);h*=16777619u;}return h?h:1u;}
 
 static browser_style default_style(uint16_t tag)
 {
@@ -66,7 +67,7 @@ void browser_document_release(browser_document*d){if(!d)return;browser_heap_free
 
 static int decode_entity(const char*s,uint32_t n,uint32_t*used,char*out)
 {
-    struct named{const char*name;char value;};static const named names[]={{"amp;",'&'},{"lt;",'<'},{"gt;",'>'},{"quot;",'"'},{"apos;",'\''},{"nbsp;",' '}};
+    struct named{const char*name;char value;};static const named names[]={{"amp;",'&'},{"lt;",'<'},{"gt;",'>'},{"quot;",'"'},{"apos;",'\''},{"nbsp;",' '},{"ndash;",'-'},{"mdash;",'-'},{"hellip;",'.'},{"lsquo;",'\''},{"rsquo;",'\''},{"ldquo;",'"'},{"rdquo;",'"'},{"copy;",'c'},{"reg;",'R'},{"trade;",'T'},{"bull;",'*'},{"middot;",'.'}};
     for(uint32_t k=0u;k<sizeof(names)/sizeof(names[0]);++k){uint32_t z=b_strlen(names[k].name);if(z<=n){uint32_t i=0u;while(i<z&&s[i]==names[k].name[i])++i;if(i==z){*used=z;*out=names[k].value;return 1;}}}
     if(n>2u&&s[0]=='#'){uint32_t i=1u,value=0u;int base=10;if(i<n&&(s[i]=='x'||s[i]=='X')){base=16;++i;}uint32_t digits=0u;while(i<n&&s[i]!=';'&&digits<8u){char c=s[i];int v=c>='0'&&c<='9'?c-'0':base==16&&c>='a'&&c<='f'?c-'a'+10:base==16&&c>='A'&&c<='F'?c-'A'+10:-1;if(v<0)return 0;value=value*(uint32_t)base+(uint32_t)v;++i;++digits;}if(i<n&&s[i]==';'&&digits){*used=i+1u;if(value==160u)*out=' ';else if(value==8211u||value==8212u)*out='-';else if(value==8216u||value==8217u)*out='\'';else if(value==8220u||value==8221u)*out='"';else *out=value<128u?(char)value:'?';return 1;}}
     return 0;
@@ -104,16 +105,16 @@ static uint32_t color_component(const char*s,uint32_t n,uint32_t*p){uint32_t v=0
 static int named_color(const char*v,uint32_t n,sacx_color*out)
 {
     while(n&&space(*v)){++v;--n;}while(n&&space(v[n-1]))--n;
-    if(n==7&&v[0]=='#'){int a=hex(v[1]),b=hex(v[2]),c=hex(v[3]),d=hex(v[4]),e=hex(v[5]),f=hex(v[6]);if(a<0||b<0||c<0||d<0||e<0||f<0)return -1;*out=color((uint8_t)(a*16+b),(uint8_t)(c*16+d),(uint8_t)(e*16+f));return 0;}
-    if(n==4&&v[0]=='#'){int a=hex(v[1]),b=hex(v[2]),c=hex(v[3]);if(a<0||b<0||c<0)return -1;*out=color((uint8_t)(a*17),(uint8_t)(b*17),(uint8_t)(c*17));return 0;}
+    if((n==7||n==9)&&v[0]=='#'){int a=hex(v[1]),b=hex(v[2]),c=hex(v[3]),d=hex(v[4]),e=hex(v[5]),f=hex(v[6]);if(a<0||b<0||c<0||d<0||e<0||f<0)return -1;*out=color((uint8_t)(a*16+b),(uint8_t)(c*16+d),(uint8_t)(e*16+f));return 0;}
+    if((n==4||n==5)&&v[0]=='#'){int a=hex(v[1]),b=hex(v[2]),c=hex(v[3]);if(a<0||b<0||c<0)return -1;*out=color((uint8_t)(a*17),(uint8_t)(b*17),(uint8_t)(c*17));return 0;}
     if((n>5&&span_same(v,4,"rgb(",4))||(n>6&&span_same(v,5,"rgba(",5))){uint32_t p=v[3]=='('?4u:5u;uint32_t r=color_component(v,n,&p),g=color_component(v,n,&p),b=color_component(v,n,&p);*out=color((uint8_t)r,(uint8_t)g,(uint8_t)b);return 0;}
-    if(span_eq(v,n,"red"))*out=color(190,35,42);else if(span_eq(v,n,"blue"))*out=color(20,80,190);else if(span_eq(v,n,"green"))*out=color(22,128,65);else if(span_eq(v,n,"white"))*out=color(255,255,255);else if(span_eq(v,n,"black"))*out=color(0,0,0);else if(span_eq(v,n,"gray")||span_eq(v,n,"grey"))*out=color(110,115,120);else if(span_eq(v,n,"yellow"))*out=color(225,190,35);else if(span_eq(v,n,"orange"))*out=color(220,120,30);else if(span_eq(v,n,"purple"))*out=color(125,65,160);else if(span_eq(v,n,"transparent"))*out=color(0,0,0);else return -1;return 0;
+    if(span_eq(v,n,"red"))*out=color(190,35,42);else if(span_eq(v,n,"blue"))*out=color(20,80,190);else if(span_eq(v,n,"green"))*out=color(22,128,65);else if(span_eq(v,n,"white"))*out=color(255,255,255);else if(span_eq(v,n,"black"))*out=color(0,0,0);else if(span_eq(v,n,"gray")||span_eq(v,n,"grey"))*out=color(110,115,120);else if(span_eq(v,n,"yellow"))*out=color(225,190,35);else if(span_eq(v,n,"orange"))*out=color(220,120,30);else if(span_eq(v,n,"purple"))*out=color(125,65,160);else if(span_eq(v,n,"navy"))*out=color(0,0,128);else if(span_eq(v,n,"teal"))*out=color(0,128,128);else if(span_eq(v,n,"aqua")||span_eq(v,n,"cyan"))*out=color(0,180,190);else if(span_eq(v,n,"lime"))*out=color(0,190,70);else if(span_eq(v,n,"maroon"))*out=color(128,0,0);else if(span_eq(v,n,"silver"))*out=color(192,192,192);else if(span_eq(v,n,"fuchsia")||span_eq(v,n,"magenta"))*out=color(200,0,180);else if(span_eq(v,n,"whitesmoke"))*out=color(245,245,245);else if(span_eq(v,n,"transparent"))*out=color(0,0,0);else return -1;return 0;
 }
 static uint32_t number_px(const char*s,uint32_t n){uint32_t v=0,i=0;while(i<n&&space(s[i]))++i;while(i<n&&s[i]>='0'&&s[i]<='9'){if(v<100000)v=v*10+(uint32_t)(s[i]-'0');++i;}return v;}
 static uint8_t percent_value(const char*s,uint32_t n){uint32_t v=number_px(s,n);for(uint32_t i=0;i<n;++i)if(s[i]=='%')return (uint8_t)(v>100u?100u:v);return 0u;}
 static int span_contains_ci(const char*s,uint32_t n,const char*needle);
 static uint32_t decimal_1000(const char*s,uint32_t n,uint32_t*unit){uint32_t i=0,whole=0,frac=0,mul=100;while(i<n&&space(s[i]))++i;if(i<n&&s[i]=='-')++i;while(i<n&&s[i]>='0'&&s[i]<='9'){if(whole<100000u)whole=whole*10u+(uint32_t)(s[i]-'0');++i;}if(i<n&&s[i]=='.'){++i;while(i<n&&s[i]>='0'&&s[i]<='9'&&mul){frac+=(uint32_t)(s[i]-'0')*mul;mul/=10u;++i;}while(i<n&&s[i]>='0'&&s[i]<='9')++i;}while(i<n&&space(s[i]))++i;if(unit)*unit=i;return whole*1000u+frac;}
-static uint32_t css_length(const browser_style*st,const char*s,uint32_t n,uint32_t relative){uint32_t u=0,v=decimal_1000(s,n,&u);if(u<n&&s[u]=='%')return (relative*v+50000u)/100000u;if(u+1u<n&&lower(s[u])=='e'&&lower(s[u+1])=='m')return ((st->font_px?st->font_px:16u)*v+500u)/1000u;if(u+2u<n&&lower(s[u])=='r'&&lower(s[u+1])=='e'&&lower(s[u+2])=='m')return (16u*v+500u)/1000u;return (v+500u)/1000u;}
+static uint32_t css_length(const browser_style*st,const char*s,uint32_t n,uint32_t relative){uint32_t u=0,v=decimal_1000(s,n,&u);if(u<n&&s[u]=='%')return (relative*v+50000u)/100000u;if(u+1u<n&&lower(s[u])=='e'&&lower(s[u+1])=='m')return ((st->font_px?st->font_px:16u)*v+500u)/1000u;if(u+2u<n&&lower(s[u])=='r'&&lower(s[u+1])=='e'&&lower(s[u+2])=='m')return (16u*v+500u)/1000u;if(u+1u<n&&lower(s[u])=='v'&&(lower(s[u+1])=='w'||lower(s[u+1])=='h'))return (g_css_viewport*v+50000u)/100000u;if(u+1u<n&&lower(s[u])=='c'&&lower(s[u+1])=='h')return (((st->font_px?st->font_px:16u)/2u)*v+500u)/1000u;return (v+500u)/1000u;}
 static uint32_t box_lengths(const browser_style*st,const char*s,uint32_t n,uint16_t out[4],uint8_t autos[4])
 {
     uint16_t values[4]={0,0,0,0};uint8_t is_auto[4]={0,0,0,0};uint32_t count=0u,p=0u;while(p<n&&count<4u){while(p<n&&space(s[p]))++p;if(p>=n)break;uint32_t a=p,paren=0u;while(p<n&&(!space(s[p])||paren)){if(s[p]=='(')++paren;else if(s[p]==')'&&paren)--paren;++p;}uint32_t len=p-a;if(span_eq(s+a,len,"auto"))is_auto[count]=1u;else{uint32_t v=css_length(st,s+a,len,st->font_px?st->font_px:16u);values[count]=(uint16_t)(v>256u?256u:v);}++count;}
@@ -124,7 +125,7 @@ static int transparent_value(const char*s,uint32_t n){while(n&&space(*s)){++s;--
 static int starts_number(const char*s,uint32_t n){uint32_t i=0;while(i<n&&space(s[i]))++i;return i<n&&((s[i]>='0'&&s[i]<='9')||s[i]=='.'||s[i]=='-');}
 static void parse_declarations(browser_style*st,const char*s,uint32_t n)
 {
-    uint32_t p=0;while(p<n){uint32_t a,b,v,e,num;while(p<n&&(space(s[p])||s[p]==';'))++p;a=p;while(p<n&&s[p]!=':'&&s[p]!=';')++p;b=p;while(b>a&&space(s[b-1]))--b;if(p>=n||s[p++]!=':')continue;while(p<n&&space(s[p]))++p;v=p;while(p<n&&s[p]!=';'&&s[p]!='}')++p;e=p;while(e>v&&space(s[e-1]))--e;num=css_length(st,s+v,e-v,st->font_px?st->font_px:16u);
+    uint32_t p=0;while(p<n){uint32_t a,b,v,e,num;while(p<n&&(space(s[p])||s[p]==';'))++p;a=p;while(p<n&&s[p]!=':'&&s[p]!=';')++p;b=p;while(b>a&&space(s[b-1]))--b;if(p>=n||s[p++]!=':')continue;while(p<n&&space(s[p]))++p;v=p;char quote=0;uint32_t paren=0;while(p<n){char c=s[p];if(quote){if(c=='\\'&&p+1u<n)++p;else if(c==quote)quote=0;}else if(c=='\''||c=='\"')quote=c;else if(c=='(')++paren;else if(c==')'&&paren)--paren;else if(!paren&&(c==';'||c=='}'))break;++p;}e=p;while(e>v&&space(s[e-1]))--e;num=css_length(st,s+v,e-v,st->font_px?st->font_px:16u);
         if(span_eq(s+a,b-a,"color")){if(!declaration_color(s+v,e-v,&st->color))st->mask|=SM_COLOR;}
         else if(span_eq(s+a,b-a,"background")||span_eq(s+a,b-a,"background-color")){if(transparent_value(s+v,e-v)){st->has_background=0;st->mask|=SM_BACKGROUND;}else if(!declaration_color(s+v,e-v,&st->background)){st->has_background=1;st->mask|=SM_BACKGROUND;}}
         else if(span_eq(s+a,b-a,"font-size")&&num){st->font_px=(uint16_t)(num>72?72:(num<6?6:num));st->mask|=SM_FONT;}
@@ -133,13 +134,17 @@ static void parse_declarations(browser_style*st,const char*s,uint32_t n)
         else if(span_eq(s+a,b-a,"font-style")){st->italic=(uint8_t)span_eq(s+v,e-v,"italic");st->mask|=SM_ITALIC;}
         else if(span_eq(s+a,b-a,"text-decoration")){st->underline=(uint8_t)(span_eq(s+v,e-v,"underline")||b_starts(s+v,"underline "));st->mask|=SM_UNDERLINE;}
         else if(span_eq(s+a,b-a,"text-align")){st->text_align=span_eq(s+v,e-v,"center")?1u:span_eq(s+v,e-v,"right")?2u:0u;st->mask|=SM_ALIGN;}
-        else if(span_eq(s+a,b-a,"display")){st->display=span_eq(s+v,e-v,"none")?B_DISPLAY_NONE:(span_eq(s+v,e-v,"flex")||span_eq(s+v,e-v,"inline-flex")||span_eq(s+v,e-v,"table-row"))?B_DISPLAY_FLEX:(span_eq(s+v,e-v,"inline")||span_eq(s+v,e-v,"inline-block")||span_eq(s+v,e-v,"inline-grid")||span_eq(s+v,e-v,"table-cell")||span_eq(s+v,e-v,"contents"))?B_DISPLAY_INLINE:B_DISPLAY_BLOCK;st->mask|=SM_DISPLAY;}
+        else if(span_eq(s+a,b-a,"display")){st->display=span_eq(s+v,e-v,"none")?B_DISPLAY_NONE:(span_eq(s+v,e-v,"flex")||span_eq(s+v,e-v,"inline-flex")||span_eq(s+v,e-v,"grid")||span_eq(s+v,e-v,"inline-grid")||span_eq(s+v,e-v,"table-row"))?B_DISPLAY_FLEX:(span_eq(s+v,e-v,"inline")||span_eq(s+v,e-v,"inline-block")||span_eq(s+v,e-v,"table-cell")||span_eq(s+v,e-v,"contents"))?B_DISPLAY_INLINE:B_DISPLAY_BLOCK;st->mask|=SM_DISPLAY;}
         else if(span_eq(s+a,b-a,"visibility")&&span_eq(s+v,e-v,"hidden")){st->display=B_DISPLAY_NONE;st->mask|=SM_DISPLAY;}
         else if(span_eq(s+a,b-a,"opacity")){/* Keep server-rendered content visible without full JavaScript transitions. */}
         else if(span_eq(s+a,b-a,"position"))st->position=(uint8_t)((span_eq(s+v,e-v,"absolute")||span_eq(s+v,e-v,"fixed"))?2u:span_eq(s+v,e-v,"relative")?1u:0u);
         else if(span_eq(s+a,b-a,"overflow"))st->overflow_hidden=(uint8_t)(span_eq(s+v,e-v,"hidden")||span_eq(s+v,e-v,"clip"));
         else if(span_eq(s+a,b-a,"white-space"))st->nowrap=(uint8_t)(span_eq(s+v,e-v,"nowrap")||span_eq(s+v,e-v,"pre"));
         else if(span_eq(s+a,b-a,"flex-direction"))st->flex_direction=(uint8_t)(span_eq(s+v,e-v,"column")?1:0);
+        else if(span_eq(s+a,b-a,"flex-grow"))st->flex_grow=(uint8_t)(num>16u?16u:num);
+        else if(span_eq(s+a,b-a,"flex-shrink"))st->flex_shrink=(uint8_t)(num>16u?16u:num);
+        else if(span_eq(s+a,b-a,"flex-basis"))st->flex_basis_px=(uint16_t)(num>4096u?4096u:num);
+        else if(span_eq(s+a,b-a,"flex")){st->flex_grow=(uint8_t)(num>16u?16u:num);if(span_contains_ci(s+v,e-v,"auto"))st->flex_grow=1u;}
         else if(span_eq(s+a,b-a,"flex-wrap"))st->flex_wrap=(uint8_t)!span_eq(s+v,e-v,"nowrap");
         else if(span_eq(s+a,b-a,"justify-content"))st->justify_content=span_eq(s+v,e-v,"center")?1u:(span_eq(s+v,e-v,"flex-end")||span_eq(s+v,e-v,"end"))?2u:span_eq(s+v,e-v,"space-between")?3u:0u;
         else if(span_eq(s+a,b-a,"align-items"))st->align_items=span_eq(s+v,e-v,"center")?1u:(span_eq(s+v,e-v,"flex-end")||span_eq(s+v,e-v,"end"))?2u:0u;
@@ -152,6 +157,8 @@ static void parse_declarations(browser_style*st,const char*s,uint32_t n)
         else if(span_eq(s+a,b-a,"max-width")){uint8_t pc=percent_value(s+v,e-v);st->max_width_percent=pc;if(!pc)st->max_width_px=(uint16_t)(num>4096?4096:num);}
         else if(span_eq(s+a,b-a,"min-width"))st->min_width_px=(uint16_t)(num>4096?4096:num);
         else if(span_eq(s+a,b-a,"height"))st->height_px=(uint16_t)(num>4096?4096:num);
+        else if(span_eq(s+a,b-a,"min-height"))st->min_height_px=(uint16_t)(num>4096?4096:num);
+        else if(span_eq(s+a,b-a,"max-height"))st->max_height_px=(uint16_t)(num>4096?4096:num);
         else if(span_eq(s+a,b-a,"border-width"))st->border_width=(uint16_t)(num>16?16:num);else if(span_eq(s+a,b-a,"border-color"))(void)declaration_color(s+v,e-v,&st->border_color);else if(span_eq(s+a,b-a,"border")||span_eq(s+a,b-a,"border-top")||span_eq(s+a,b-a,"border-right")||span_eq(s+a,b-a,"border-bottom")||span_eq(s+a,b-a,"border-left")){if(span_contains_ci(s+v,e-v,"none")||(starts_number(s+v,e-v)&&num==0u))st->border_width=0u;else{st->border_width=(uint16_t)(num?num:1u);(void)declaration_color(s+v,e-v,&st->border_color);}}
     }
     if(st->position==2u&&st->overflow_hidden&&st->width_px<=2u&&st->height_px<=2u){st->display=B_DISPLAY_NONE;st->mask|=SM_DISPLAY;}
@@ -160,7 +167,7 @@ static void parse_declarations(browser_style*st,const char*s,uint32_t n)
 static void parse_attrs(browser_document*d,browser_node*n,const char*s,uint32_t len)
 {
     uint32_t p=0;while(p<len){uint32_t a,b,v=0,e=0;char q=0;while(p<len&&(space(s[p])||s[p]=='/'))++p;a=p;while(p<len&&s[p]!='='&&!space(s[p])&&s[p]!='/')++p;b=p;while(p<len&&space(s[p]))++p;
-        if(p>=len||s[p]!='='){if(span_eq(s+a,b-a,"checked"))n->flags|=4u;else if(span_eq(s+a,b-a,"hidden"))n->flags|=2u;while(p<len&&!space(s[p]))++p;continue;}
+        if(p>=len||s[p]!='='){if(span_eq(s+a,b-a,"checked"))n->flags|=4u;else if(span_eq(s+a,b-a,"hidden"))n->flags|=2u;else if(span_eq(s+a,b-a,"disabled"))n->flags|=32u;while(p<len&&!space(s[p]))++p;continue;}
         ++p;while(p<len&&space(s[p]))++p;if(p<len&&(s[p]=='\''||s[p]=='"'))q=s[p++];v=p;while(p<len&&((q&&s[p]!=q)||(!q&&!space(s[p]))))++p;e=p;if(q&&p<len)++p;
         if(span_eq(s+a,b-a,"href"))n->href_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"src"))n->src_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"id"))n->id_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"class"))n->class_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"rel"))n->rel_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"onclick"))n->onclick_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"style"))n->inline_style_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"name"))n->name_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"value"))n->value_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"action"))n->action_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"method"))n->method_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"for"))n->for_off=store(d,s+v,e-v);else if(span_eq(s+a,b-a,"width")){n->attr_width=(uint16_t)number_px(s+v,e-v);n->style.width_px=n->attr_width;}else if(span_eq(s+a,b-a,"height")){n->attr_height=(uint16_t)number_px(s+v,e-v);n->style.height_px=n->attr_height;}else if(span_eq(s+a,b-a,"placeholder")&&n->tag==B_TAG_INPUT&&!n->text_off){n->text_off=store(d,s+v,e-v);n->text_len=b_strlen(d->text+n->text_off);}else if(span_eq(s+a,b-a,"type")){n->type_off=store(d,s+v,e-v);if(span_eq(s+v,e-v,"hidden"))n->flags|=2u;else if(span_eq(s+v,e-v,"checkbox")||span_eq(s+v,e-v,"radio"))n->flags|=8u;else if(span_eq(s+v,e-v,"submit")||span_eq(s+v,e-v,"image"))n->flags|=16u;}}
     if(n->tag==B_TAG_BUTTON&&!(n->type_off&&b_streq(d->text+n->type_off,"button")))n->flags|=16u;
@@ -174,11 +181,34 @@ static const char*node_attr(const browser_document*d,const browser_node*x,const 
     if(span_eq(name,n,"href"))off=x->href_off;else if(span_eq(name,n,"src"))off=x->src_off;else if(span_eq(name,n,"id"))off=x->id_off;else if(span_eq(name,n,"class"))off=x->class_off;else if(span_eq(name,n,"rel"))off=x->rel_off;else if(span_eq(name,n,"name"))off=x->name_off;else if(span_eq(name,n,"value"))off=x->value_off;else if(span_eq(name,n,"type"))off=x->type_off;else if(span_eq(name,n,"action"))off=x->action_off;else if(span_eq(name,n,"method"))off=x->method_off;else if(span_eq(name,n,"for"))off=x->for_off;else if(span_eq(name,n,"hidden")){*present=(x->flags&2u)!=0u;return "";}else if(span_eq(name,n,"checked")){*present=(x->flags&4u)!=0u;return "";}else return "";
     *present=off!=0u;return off?d->text+off:"";
 }
+static int simple_match(const browser_document*d,uint32_t idx,const char*s,uint32_t n);
+static int pseudo_match(const browser_document*d,uint32_t idx,const char*s,uint32_t n,uint32_t*used)
+{
+    const browser_node*x=&d->nodes[idx];uint32_t p=0u;while(p<n&&((s[p]>='a'&&s[p]<='z')||(s[p]>='A'&&s[p]<='Z')||s[p]=='-'))++p;uint32_t name=p,open=p;
+    if(open<n&&s[open]=='('){uint32_t depth=1u;char quote=0;++p;uint32_t body=p;while(p<n&&depth){char c=s[p];if(quote){if(c=='\\'&&p+1u<n)++p;else if(c==quote)quote=0;}else if(c=='\''||c=='\"')quote=c;else if(c=='(')++depth;else if(c==')')--depth;if(depth)++p;}if(depth)return 0;*used=p+1u;uint32_t body_n=p-body;
+        if(span_eq(s,name,"not"))return !simple_match(d,idx,s+body,body_n);
+        if(span_eq(s,name,"is")||span_eq(s,name,"where")){uint32_t a=body;while(a<p){uint32_t e=a,sub=0;while(e<p){if(s[e]=='(')++sub;else if(s[e]==')'&&sub)--sub;else if(s[e]==','&&!sub)break;++e;}while(a<e&&space(s[a]))++a;while(e>a&&space(s[e-1]))--e;if(simple_match(d,idx,s+a,e-a))return 1;a=e+1u;}return 0;}
+        if(span_eq(s,name,"nth-child")){uint32_t ordinal=1u;for(int32_t c=x->parent>=0?d->nodes[x->parent].first_child:-1;c>=0&&c!=(int32_t)idx;c=d->nodes[c].next_sibling)++ordinal;if(span_eq(s+body,body_n,"odd"))return (ordinal&1u)!=0u;if(span_eq(s+body,body_n,"even"))return (ordinal&1u)==0u;return ordinal==number_px(s+body,body_n);}
+        return 0;
+    }
+    *used=p;
+    if(span_eq(s,name,"root"))return x->parent==0;
+    if(span_eq(s,name,"link")||span_eq(s,name,"any-link"))return x->href_off!=0u;
+    if(span_eq(s,name,"checked"))return (x->flags&4u)!=0u;
+    if(span_eq(s,name,"disabled"))return (x->flags&32u)!=0u;
+    if(span_eq(s,name,"enabled"))return (x->flags&32u)==0u;
+    if(span_eq(s,name,"empty"))return x->first_child<0&&!x->text_off;
+    if(span_eq(s,name,"first-child"))return x->parent>=0&&d->nodes[x->parent].first_child==(int32_t)idx;
+    if(span_eq(s,name,"last-child"))return x->parent>=0&&d->nodes[x->parent].last_child==(int32_t)idx;
+    if(span_eq(s,name,"only-child"))return x->parent>=0&&d->nodes[x->parent].first_child==(int32_t)idx&&d->nodes[x->parent].last_child==(int32_t)idx;
+    /* Dynamic pseudo-classes are deliberately inactive until the UI supplies state. */
+    return 0;
+}
 static int simple_match(const browser_document*d,uint32_t idx,const char*s,uint32_t n)
 {
-    uint32_t p=0,tag_end=0;const browser_node*x=&d->nodes[idx];while(n&&(s[n-1]=='>'||s[n-1]=='+'||s[n-1]=='~'||space(s[n-1])))--n;if(!n||s[0]==':')return 0;while(p<n&&s[p]!='.'&&s[p]!='#'&&s[p]!=':'&&s[p]!='[')++p;tag_end=p;if(tag_end&&!(tag_end==1u&&s[0]=='*')&&!span_eq(s,tag_end,tag_name(x->tag)))return 0;
+    uint32_t p=0,tag_end=0;const browser_node*x=&d->nodes[idx];while(n&&(s[n-1]=='>'||s[n-1]=='+'||s[n-1]=='~'||space(s[n-1])))--n;if(!n)return 0;while(p<n&&s[p]!='.'&&s[p]!='#'&&s[p]!=':'&&s[p]!='[')++p;tag_end=p;if(tag_end&&!(tag_end==1u&&s[0]=='*')&&!span_eq(s,tag_end,tag_name(x->tag)))return 0;
     while(p<n){
-        if(s[p]==':')break;
+        if(s[p]==':'){uint32_t used=0u;if(!pseudo_match(d,idx,s+p+1u,n-p-1u,&used))return 0;p+=used+1u;continue;}
         if(s[p]=='.'||s[p]=='#'){char kind=s[p++];uint32_t a=p;while(p<n&&s[p]!='.'&&s[p]!='#'&&s[p]!=':'&&s[p]!='[')++p;if(kind=='#'){if(!x->id_off||!span_same(d->text+x->id_off,b_strlen(d->text+x->id_off),s+a,p-a))return 0;}else if(!x->class_off||!class_has(d->text+x->class_off,s+a,p-a))return 0;continue;}
         if(s[p]=='['){uint32_t close=++p;while(close<n&&s[close]!=']')++close;if(close>=n)return 0;uint32_t a=p;while(p<close&&!space(s[p])&&s[p]!='='&&s[p]!='^'&&s[p]!='*'&&s[p]!='$'&&s[p]!='~'&&s[p]!='|')++p;uint32_t b=p;while(p<close&&space(s[p]))++p;char op=0;if(p<close&&s[p]!='='){op=s[p++];if(p<close&&s[p]=='=')++p;}else if(p<close&&s[p]=='='){op='=';++p;}while(p<close&&space(s[p]))++p;char quote=0;if(p<close&&(s[p]=='\''||s[p]=='"'))quote=s[p++];uint32_t v=p;while(p<close&&(!quote||s[p]!=quote))++p;uint32_t ve=p;int present=0;const char*actual=node_attr(d,x,s+a,b-a,&present);if(!present)return 0;if(op){uint32_t an=b_strlen(actual),vn=ve-v;int match=0;if(op=='=')match=span_same(actual,an,s+v,vn);else if(op=='^')match=an>=vn&&span_same(actual,vn,s+v,vn);else if(op=='$')match=an>=vn&&span_same(actual+an-vn,vn,s+v,vn);else if(op=='*'){for(uint32_t k=0;k+vn<=an;++k)if(span_same(actual+k,vn,s+v,vn)){match=1;break;}}else if(op=='~')match=class_has(actual,s+v,vn);if(!match)return 0;}p=close+1u;continue;}
         return 0;
@@ -231,9 +261,10 @@ int browser_document_parse(browser_document*d,const char*html,uint32_t size)
         if(p+3u<size&&html[p+1]=='!'&&html[p+2]=='-'&&html[p+3]=='-'){p+=4u;while(p+2u<size&&!(html[p]=='-'&&html[p+1]=='-'&&html[p+2]=='>'))++p;if(p+2u<size)p+=3u;continue;}
         if(p+1u<size&&html[p+1]=='!'){while(p<size&&html[p]!='>')++p;if(p<size)++p;continue;}
         uint32_t end=p+1u;char quote=0;while(end<size){char c=html[end];if(quote){if(c=='\\'&&end+1u<size)++end;else if(c==quote)quote=0;}else if(c=='\''||c=='"')quote=c;else if(c=='>')break;++end;}if(end>=size)break;
-        uint32_t q=p+1u;int closing=q<end&&html[q]=='/';if(closing)++q;while(q<end&&space(html[q]))++q;uint32_t name=q;while(q<end&&!space(html[q])&&html[q]!='/'&&html[q]!='>')++q;uint16_t tag=parse_tag(html+name,q-name);
-        if(closing){for(uint32_t k=depth;k>1u;--k)if(d->nodes[stack[k-1u]].tag==tag){depth=k-1u;break;}p=end+1u;continue;}
-        int32_t idx=add_node(d,parent,tag);if(idx>=0)parse_attrs(d,&d->nodes[idx],html+q,end-q);int is_void=tag==B_TAG_IMG||tag==B_TAG_INPUT||tag==B_TAG_BR||tag==B_TAG_HR||tag==B_TAG_META||tag==B_TAG_LINK||(end>p&&html[end-1u]=='/');if(!is_void&&idx>=0&&depth<128u)stack[depth++]=idx;p=end+1u;
+        uint32_t q=p+1u;int closing=q<end&&html[q]=='/';if(closing)++q;while(q<end&&space(html[q]))++q;uint32_t name=q;while(q<end&&!space(html[q])&&html[q]!='/'&&html[q]!='>')++q;uint16_t tag=parse_tag(html+name,q-name);uint32_t source_hash=tag_hash(html+name,q-name);
+        if(closing){for(uint32_t k=depth;k>1u;--k)if(d->nodes[stack[k-1u]].source_tag_hash==source_hash){depth=k-1u;break;}p=end+1u;continue;}
+        if(depth>1u){uint16_t open_tag=d->nodes[stack[depth-1u]].tag;int closes_same=(tag==B_TAG_P&&open_tag==B_TAG_P)||(tag==B_TAG_LI&&open_tag==B_TAG_LI)||(tag==B_TAG_TR&&open_tag==B_TAG_TR)||(tag==B_TAG_TD&&open_tag==B_TAG_TD);int block_closes_p=open_tag==B_TAG_P&&(tag==B_TAG_DIV||tag==B_TAG_P||tag==B_TAG_H1||tag==B_TAG_H2||tag==B_TAG_H3||tag==B_TAG_UL||tag==B_TAG_OL||tag==B_TAG_TABLE||tag==B_TAG_FORM);if(closes_same||block_closes_p){--depth;parent=stack[depth-1u];}}
+        int32_t idx=add_node(d,parent,tag);if(idx>=0){d->nodes[idx].source_tag_hash=source_hash;parse_attrs(d,&d->nodes[idx],html+q,end-q);}int is_void=tag==B_TAG_IMG||tag==B_TAG_INPUT||tag==B_TAG_BR||tag==B_TAG_HR||tag==B_TAG_META||tag==B_TAG_LINK||(end>p&&html[end-1u]=='/');if(!is_void&&idx>=0&&depth<128u)stack[depth++]=idx;p=end+1u;
     }
     if(p<size)d->truncated=1;apply_css(d);return d->node_count>1u?0:-1;
 }
@@ -245,7 +276,18 @@ int browser_document_apply_stylesheet(browser_document*d,const char*css,uint32_t
 
 void browser_document_apply_site_defaults(browser_document*d)
 {
-    if(!d||!d->nodes||!span_contains_ci(d->url,b_strlen(d->url),"duckduckgo.com/"))return;
+    if(!d||!d->nodes)return;
+    if(span_contains_ci(d->url,b_strlen(d->url),"wikipedia.org/")){
+        for(uint32_t i=1u;i<d->node_count;++i){browser_node*n=&d->nodes[i];const char*c=n->class_off?d->text+n->class_off:0;if(!c)continue;
+            if(class_has(c,"vector-header-container",23u)||class_has(c,"vector-main-menu-container",26u)||class_has(c,"vector-column-start",19u)||class_has(c,"vector-column-end",17u)||class_has(c,"vector-page-toolbar",19u)||class_has(c,"vector-sticky-header",20u)||class_has(c,"vector-toc",10u)||class_has(c,"mw-jump-link",12u)||class_has(c,"noprint",7u)){n->style.display=B_DISPLAY_NONE;n->style.mask|=SM_DISPLAY;continue;}
+            if(class_has(c,"mw-page-container",17u)){n->style.display=B_DISPLAY_BLOCK;n->style.max_width_px=980u;n->style.margin_auto_left=n->style.margin_auto_right=1u;n->style.padding_left=n->style.padding_right=8u;n->style.border_width=0u;n->style.has_background=0u;}
+            if(class_has(c,"mw-content-container",20u)||class_has(c,"mw-body",7u)||class_has(c,"mw-body-content",15u)||class_has(c,"vector-body",11u)){n->style.display=B_DISPLAY_BLOCK;n->style.max_width_px=920u;n->style.margin_auto_left=n->style.margin_auto_right=1u;n->style.width_percent=100u;n->style.border_width=0u;n->style.has_background=0u;}
+            if(class_has(c,"infobox",7u)||class_has(c,"sidebar",7u)){n->style.display=B_DISPLAY_BLOCK;n->style.max_width_px=420u;n->style.margin_auto_left=n->style.margin_auto_right=1u;n->style.padding_left=n->style.padding_right=8u;}
+            if(class_has(c,"gallery",7u)){n->style.display=B_DISPLAY_FLEX;n->style.flex_wrap=1u;n->style.gap_px=10u;}
+        }
+        return;
+    }
+    if(!span_contains_ci(d->url,b_strlen(d->url),"duckduckgo.com/"))return;
     for(uint32_t i=1u;i<d->node_count;++i){browser_node*n=&d->nodes[i];const char*c=n->class_off?d->text+n->class_off:0;if(!c)continue;
         if(class_has(c,"result",6u)){n->style.display=B_DISPLAY_BLOCK;n->style.max_width_px=760u;n->style.margin_bottom=22u;n->style.padding_bottom=8u;}
         if(class_has(c,"results",7u)||class_has(c,"results--main",13u)){n->style.display=B_DISPLAY_BLOCK;n->style.max_width_px=780u;n->style.margin_auto_left=n->style.margin_auto_right=1u;}
@@ -263,16 +305,21 @@ static uint32_t layout_node(browser_document*d,int32_t idx,int32_t x,int32_t y,u
 {
     browser_node*n=&d->nodes[idx];if(depth>128||n->style.display==B_DISPLAY_NONE){n->w=n->h=0;return 0;}uint32_t avail=width>n->style.margin_left+n->style.margin_right?width-n->style.margin_left-n->style.margin_right:width;n->y=y+n->style.margin_top;n->w=n->style.width_percent?(avail*n->style.width_percent)/100u:(n->style.width_px&&n->style.width_px<avail?n->style.width_px:avail);uint32_t maxw=n->style.max_width_percent?(avail*n->style.max_width_percent)/100u:n->style.max_width_px;if(maxw&&n->w>maxw)n->w=maxw;if(n->style.min_width_px&&n->w<n->style.min_width_px)n->w=n->style.min_width_px<avail?n->style.min_width_px:avail;n->x=x+n->style.margin_left;if(n->style.margin_auto_left&&n->style.margin_auto_right&&n->w<width)n->x=x+(int32_t)((width-n->w)/2u);else if(n->style.margin_auto_left&&n->w<width)n->x=x+(int32_t)(width-n->w-n->style.margin_right);
     uint32_t inner=n->w>n->style.padding_left+n->style.padding_right?n->w-n->style.padding_left-n->style.padding_right:n->w;uint32_t scale=browser_text_scale(n->style.font_px);uint32_t glyph_h=g_text_api&&g_text_api->text_line_height?g_text_api->text_line_height(scale,0):n->style.font_px;uint32_t line_h=n->style.line_height_px?n->style.line_height_px:glyph_h+4u;if(line_h<glyph_h)line_h=glyph_h;
-    if(n->text_off){char wrapped[256];uint32_t measured=0;uint32_t lines=browser_text_wrap(&n->style,d->text+n->text_off,n->style.nowrap?0x100000u:inner,wrapped,sizeof(wrapped),&measured);if(n->style.display==B_DISPLAY_INLINE&&lines==1u){uint32_t wanted=measured+n->style.padding_left+n->style.padding_right;if(wanted<n->w)n->w=wanted;}n->h=lines*line_h+n->style.padding_top+n->style.padding_bottom;if(n->style.height_px&&n->style.height_px>n->h)n->h=n->style.height_px;return n->style.margin_top+n->h+n->style.margin_bottom;}
-    if(n->tag==B_TAG_IMG){n->h=n->style.height_px?n->style.height_px:180;n->w=n->style.width_px?n->style.width_px:n->w;return n->style.margin_top+n->h+n->style.margin_bottom;}
+    if(n->text_off){char wrapped[256];uint32_t measured=0;uint32_t lines=browser_text_wrap(&n->style,d->text+n->text_off,n->style.nowrap?0x100000u:inner,wrapped,sizeof(wrapped),&measured);if(n->style.display==B_DISPLAY_INLINE&&lines==1u){uint32_t wanted=measured+n->style.padding_left+n->style.padding_right;if(wanted<n->w)n->w=wanted;}n->h=lines*line_h+n->style.padding_top+n->style.padding_bottom;if(n->style.height_px&&n->style.height_px>n->h)n->h=n->style.height_px;if(n->style.min_height_px&&n->h<n->style.min_height_px)n->h=n->style.min_height_px;if(n->style.max_height_px&&n->h>n->style.max_height_px)n->h=n->style.max_height_px;return n->style.margin_top+n->h+n->style.margin_bottom;}
+    if(n->tag==B_TAG_IMG){n->h=n->style.height_px?n->style.height_px:180;n->w=n->style.width_px?n->style.width_px:n->w;if(n->style.min_height_px&&n->h<n->style.min_height_px)n->h=n->style.min_height_px;if(n->style.max_height_px&&n->h>n->style.max_height_px)n->h=n->style.max_height_px;return n->style.margin_top+n->h+n->style.margin_bottom;}
     if(n->tag==B_TAG_BR){n->h=line_h;return n->h;}if(n->tag==B_TAG_HR){n->h=n->style.height_px?n->style.height_px:2;return n->h+12;}
-    uint32_t used=n->style.padding_top,max_right=0;int32_t child=n->first_child;if(n->style.display==B_DISPLAY_FLEX&&!n->style.flex_direction&&child>=0){
-        uint32_t count=0u,flexible=0u,fixed=0u,maxh=0u,pos=0u;for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;++count;if(cn->style.width_px){uint32_t track=cn->style.width_px+cn->style.margin_left+cn->style.margin_right;fixed+=track>inner?inner:track;}else ++flexible;}
+    uint32_t used=n->style.padding_top,max_right=0;int32_t child=n->first_child;if(n->style.display==B_DISPLAY_FLEX&&n->style.flex_direction&&child>=0){
+        uint32_t count=0u;for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling)if(d->nodes[c].style.display!=B_DISPLAY_NONE)++count;uint32_t seen=0u;int32_t parent_x=n->x+(int32_t)n->style.padding_left;
+        for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;if(seen++)used+=n->style.gap_px;uint32_t child_w=inner;if(cn->style.width_px&&cn->style.width_px<child_w)child_w=cn->style.width_px;int32_t child_x=parent_x;if(child_w<inner&&n->style.align_items==1u)child_x+=(int32_t)((inner-child_w)/2u);else if(child_w<inner&&n->style.align_items==2u)child_x+=(int32_t)(inner-child_w);uint32_t h=layout_node(d,c,child_x,n->y+(int32_t)used,child_w,depth+1);if(used>0x1000000u-h){d->truncated=1;break;}used+=h;}(void)count;
+    }else if(n->style.display==B_DISPLAY_FLEX&&!n->style.flex_direction&&n->style.flex_wrap&&child>=0){
+        uint32_t pos=0u,row_h=0u;int32_t parent_x=n->x+(int32_t)n->style.padding_left;for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;uint32_t track=cn->style.width_px?cn->style.width_px:cn->style.flex_basis_px?cn->style.flex_basis_px:(inner>240u?240u:inner);track+=cn->style.margin_left+cn->style.margin_right;if(track>inner)track=inner;if(pos&&pos+track>inner){used+=row_h+n->style.gap_px;pos=0u;row_h=0u;}uint32_t h=layout_node(d,c,parent_x+(int32_t)pos,n->y+(int32_t)used,track,depth+1);if(h>row_h)row_h=h;pos+=track+n->style.gap_px;}used+=row_h;
+    }else if(n->style.display==B_DISPLAY_FLEX&&!n->style.flex_direction&&child>=0){
+        uint32_t count=0u,flexible=0u,fixed=0u,maxh=0u,pos=0u;for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;++count;if(cn->style.width_px||cn->style.flex_basis_px){uint32_t basis=cn->style.width_px?cn->style.width_px:cn->style.flex_basis_px;uint32_t track=basis+cn->style.margin_left+cn->style.margin_right;fixed+=track>inner?inner:track;}else flexible+=cn->style.flex_grow?cn->style.flex_grow:1u;}
         uint32_t gap=count>1u?n->style.gap_px:0u,gaps=count>1u?(count-1u)*gap:0u;if(fixed+gaps>inner){fixed=inner>gaps?inner-gaps:0u;}uint32_t share=flexible&&inner>fixed+gaps?(inner-fixed-gaps)/flexible:1u;uint32_t occupied=fixed+gaps+share*flexible;uint32_t start=0u;if(occupied<inner&&n->style.justify_content==1u)start=(inner-occupied)/2u;else if(occupied<inner&&n->style.justify_content==2u)start=inner-occupied;else if(occupied<inner&&n->style.justify_content==3u&&count>1u)gap+=(inner-occupied)/(count-1u);pos=start;
-        for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;uint32_t track=cn->style.width_px?cn->style.width_px+cn->style.margin_left+cn->style.margin_right:share;if(pos>=inner)track=1u;else if(track>inner-pos)track=inner-pos;uint32_t h=layout_node(d,c,n->x+n->style.padding_left+(int32_t)pos,n->y+n->style.padding_top,track,depth+1);if(h>maxh)maxh=h;if(pos>0x1000000u-track-gap){d->truncated=1;break;}pos+=track+gap;}used+=maxh;
+        for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_NONE)continue;uint32_t basis=cn->style.width_px?cn->style.width_px:cn->style.flex_basis_px;uint32_t track=basis?basis+cn->style.margin_left+cn->style.margin_right:share*(cn->style.flex_grow?cn->style.flex_grow:1u);if(pos>=inner)track=1u;else if(track>inner-pos)track=inner-pos;uint32_t h=layout_node(d,c,n->x+n->style.padding_left+(int32_t)pos,n->y+n->style.padding_top,track,depth+1);if(h>maxh)maxh=h;if(pos>0x1000000u-track-gap){d->truncated=1;break;}pos+=track+gap;}used+=maxh;
     }else{uint32_t row_x=0,row_h=0;int32_t parent_x=n->x+(int32_t)n->style.padding_left;for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling){browser_node*cn=&d->nodes[c];if(cn->style.display==B_DISPLAY_INLINE){uint32_t remain=inner>row_x?inner-row_x:inner;if(row_x&&remain<32u){used+=row_h;row_x=0;row_h=0;remain=inner;}uint32_t h=layout_node(d,c,parent_x+(int32_t)row_x,n->y+(int32_t)used,remain,depth+1);uint32_t child_right=(uint32_t)(cn->x-parent_x)+cn->w+cn->style.margin_right;if(row_x&&child_right>inner){used+=row_h;row_x=0;row_h=0;h=layout_node(d,c,parent_x,n->y+(int32_t)used,inner,depth+1);child_right=(uint32_t)(cn->x-parent_x)+cn->w+cn->style.margin_right;}row_x=child_right>inner?inner:child_right;if(row_x>max_right)max_right=row_x;if(h>row_h)row_h=h;}else{if(row_h){used+=row_h;row_x=0;row_h=0;}uint32_t h=layout_node(d,c,parent_x,n->y+(int32_t)used,inner,depth+1);if(used>0x1000000u-h){d->truncated=1;break;}used+=h;}}if(row_h)used+=row_h;if(n->style.display==B_DISPLAY_INLINE&&max_right&&max_right+n->style.padding_right<n->w)n->w=max_right+n->style.padding_right;}
     if(n->style.text_align&&max_right<inner){int32_t shift=n->style.text_align==1u?(int32_t)((inner-max_right)/2u):(int32_t)(inner-max_right);for(int32_t c=child;c>=0;c=d->nodes[c].next_sibling)if(d->nodes[c].style.display==B_DISPLAY_INLINE)shift_subtree(d,c,shift);}
-    used+=n->style.padding_bottom;n->h=n->style.height_px?n->style.height_px:used;if(!n->h&&n->style.has_background)n->h=line_h;return n->style.margin_top+n->h+n->style.margin_bottom;
+    used+=n->style.padding_bottom;n->h=n->style.height_px?n->style.height_px:used;if(n->style.min_height_px&&n->h<n->style.min_height_px)n->h=n->style.min_height_px;if(n->style.max_height_px&&n->h>n->style.max_height_px)n->h=n->style.max_height_px;if(!n->h&&n->style.has_background)n->h=line_h;return n->style.margin_top+n->h+n->style.margin_bottom;
 }
 
 void browser_document_layout(browser_document*d,uint32_t viewport_w)
@@ -293,7 +340,7 @@ static int32_t containing_form(const browser_document*d,uint32_t node){for(int32
 
 int browser_document_activate(browser_document*d,uint32_t node_index,uint32_t*out_form_index)
 {
-    if(out_form_index)*out_form_index=0u;if(!d||node_index>=d->node_count)return 0;browser_node*n=&d->nodes[node_index];
+    if(out_form_index)*out_form_index=0u;if(!d||node_index>=d->node_count)return 0;browser_node*n=&d->nodes[node_index];if(n->flags&32u)return 0;
     if((n->tag==B_TAG_BUTTON||n->tag==B_TAG_INPUT)&&(n->flags&16u)){int32_t form=containing_form(d,node_index);if(form>0&&out_form_index)*out_form_index=(uint32_t)form;return form>0?2:0;}
     int32_t input=n->tag==B_TAG_INPUT?(int32_t)node_index:-1;
     if(n->tag==B_TAG_LABEL){if(n->for_off){const char*wanted=d->text+n->for_off;for(uint32_t i=1u;i<d->node_count;++i)if(d->nodes[i].tag==B_TAG_INPUT&&d->nodes[i].id_off&&b_streq(d->text+d->nodes[i].id_off,wanted)){input=(int32_t)i;break;}}if(input<0)for(uint32_t i=node_index+1u;i<d->node_count;++i)if(node_descends_from(d,i,node_index)&&d->nodes[i].tag==B_TAG_INPUT){input=(int32_t)i;break;}}
@@ -313,14 +360,20 @@ int browser_document_encode_form(const browser_document*d,uint32_t form_index,ch
     return 0;
 }
 const char*browser_document_string(const browser_document*d,uint32_t off){return d&&d->text&&off<d->text_used?d->text+off:"";}
-int browser_document_set_text_by_id(browser_document*d,const char*id,const char*value){if(!d||!id)return -1;for(uint32_t i=1;i<d->node_count;++i)if(d->nodes[i].id_off&&b_streq(d->text+d->nodes[i].id_off,id)){int32_t c=d->nodes[i].first_child;uint32_t off=store(d,value,b_strlen(value));if(!off)return -1;if(c>=0){d->nodes[c].text_off=off;d->nodes[c].text_len=b_strlen(value);}else{c=add_node(d,(int32_t)i,B_TAG_SPAN);if(c>=0){d->nodes[c].text_off=off;d->nodes[c].text_len=b_strlen(value);}}return 0;}return -1;}
-int browser_document_set_style_by_id(browser_document*d,const char*id,const char*property,const char*value)
+int browser_document_find_selector(const browser_document*d,const char*selector){if(!d||!selector||!selector[0])return -1;uint32_t n=b_strlen(selector);if(n>256u)return -1;for(uint32_t i=1u;i<d->node_count;++i)if(selector_match(d,i,selector,n))return (int)i;return -1;}
+int browser_document_set_text(browser_document*d,uint32_t index,const char*value){if(!d||index>=d->node_count||!value)return -1;browser_node*n=&d->nodes[index];uint32_t off=store(d,value,b_strlen(value));if(!off)return -1;int32_t c=n->first_child;if(c<0)c=add_node(d,(int32_t)index,B_TAG_SPAN);if(c<0)return -1;d->nodes[c].text_off=off;d->nodes[c].text_len=b_strlen(value);d->nodes[c].style.display=B_DISPLAY_INLINE;for(int32_t rest=d->nodes[c].next_sibling;rest>=0;rest=d->nodes[rest].next_sibling)d->nodes[rest].style.display=B_DISPLAY_NONE;return 0;}
+int browser_document_set_text_by_id(browser_document*d,const char*id,const char*value){if(!d||!id)return -1;char selector[100]="#";b_copy(selector+1,sizeof(selector)-1u,id);int idx=browser_document_find_selector(d,selector);return idx<0?-1:browser_document_set_text(d,(uint32_t)idx,value);}
+int browser_document_set_style(browser_document*d,uint32_t index,const char*property,const char*value)
 {
-    if(!d||!id||!property||!value)return -1;for(uint32_t i=1;i<d->node_count;++i)if(d->nodes[i].id_off&&b_streq(d->text+d->nodes[i].id_off,id)){browser_style*s=&d->nodes[i].style;
-        if(b_streq(property,"color")){if(named_color(value,b_strlen(value),&s->color))return -1;s->mask|=SM_COLOR;}
-        else if(b_streq(property,"backgroundColor")||b_streq(property,"background")){if(named_color(value,b_strlen(value),&s->background))return -1;s->has_background=1;s->mask|=SM_BACKGROUND;}
-        else if(b_streq(property,"display")){s->display=b_streq(value,"none")?B_DISPLAY_NONE:b_streq(value,"flex")?B_DISPLAY_FLEX:b_streq(value,"inline")?B_DISPLAY_INLINE:B_DISPLAY_BLOCK;s->mask|=SM_DISPLAY;}
-        else if(b_streq(property,"fontSize")){uint32_t px=number_px(value,b_strlen(value));if(!px)return -1;s->font_px=(uint16_t)(px>72?72:px);s->mask|=SM_FONT;}
-        else if(b_streq(property,"textDecoration")){s->underline=(uint8_t)b_streq(value,"underline");s->mask|=SM_UNDERLINE;}
-        else return -1;return 0;}return -1;
+    if(!d||index>=d->node_count||!property||!value)return -1;char declaration[384];uint32_t p=0u;for(uint32_t i=0u;property[i]&&p+2u<sizeof(declaration);++i){char c=property[i];if(c>='A'&&c<='Z'){declaration[p++]='-';c=(char)(c+32);}declaration[p++]=c;}if(p+2u>=sizeof(declaration))return -1;declaration[p++]=':';for(uint32_t i=0u;value[i]&&p+1u<sizeof(declaration);++i)declaration[p++]=value[i];declaration[p]=0;parse_declarations(&d->nodes[index].style,declaration,p);return 0;
+}
+int browser_document_set_style_by_id(browser_document*d,const char*id,const char*property,const char*value){if(!d||!id)return -1;char selector[100]="#";b_copy(selector+1,sizeof(selector)-1u,id);int idx=browser_document_find_selector(d,selector);return idx<0?-1:browser_document_set_style(d,(uint32_t)idx,property,value);}
+int browser_document_set_class(browser_document*d,uint32_t index,const char*name,uint32_t operation)
+{
+    if(!d||index>=d->node_count||!name||!name[0])return -1;browser_node*n=&d->nodes[index];const char*old=n->class_off?d->text+n->class_off:"";uint32_t name_n=b_strlen(name);int present=class_has(old,name,name_n);if(operation==2u)operation=present?1u:0u;if((operation==0u&&present)||(operation==1u&&!present))return 0;char out[384];uint32_t w=0u;if(operation==0u){for(uint32_t i=0u;old[i]&&w+1u<sizeof(out);++i)out[w++]=old[i];if(w&&w+1u<sizeof(out))out[w++]=' ';for(uint32_t i=0u;name[i]&&w+1u<sizeof(out);++i)out[w++]=name[i];}else{const char*p=old;while(*p){while(*p&&space(*p))++p;const char*a=p;while(*p&&!space(*p))++p;uint32_t z=(uint32_t)(p-a);if(z&&!(z==name_n&&span_same(a,z,name,name_n))){if(w&&w+1u<sizeof(out))out[w++]=' ';for(uint32_t i=0u;i<z&&w+1u<sizeof(out);++i)out[w++]=a[i];}}}out[w]=0;n->class_off=w?store(d,out,w):0u;apply_css(d);return 0;
+}
+int browser_document_set_attribute(browser_document*d,uint32_t index,const char*name,const char*value,uint8_t remove)
+{
+    if(!d||index>=d->node_count||!name)return -1;browser_node*n=&d->nodes[index];uint32_t off=(!remove&&value&&value[0])?store(d,value,b_strlen(value)):0u;
+    if(b_streq(name,"class")){n->class_off=off;apply_css(d);}else if(b_streq(name,"id")){n->id_off=off;apply_css(d);}else if(b_streq(name,"value"))n->value_off=off;else if(b_streq(name,"href"))n->href_off=off;else if(b_streq(name,"src"))n->src_off=off;else if(b_streq(name,"hidden")){if(remove)n->flags&=(uint16_t)~2u;else n->flags|=2u;apply_css(d);}else if(b_streq(name,"disabled")){if(remove)n->flags&=(uint16_t)~32u;else n->flags|=32u;}else if(b_streq(name,"checked")){if(remove)n->flags&=(uint16_t)~4u;else n->flags|=4u;}else if(b_streq(name,"style")){n->inline_style_off=off;apply_css(d);}else return -1;return 0;
 }

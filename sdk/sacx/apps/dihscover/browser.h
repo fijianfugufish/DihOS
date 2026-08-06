@@ -10,7 +10,7 @@
 #define DIHSCOVER_NODE_MAX 32768u
 #define DIHSCOVER_TEXT_INITIAL (512u * 1024u)
 #define DIHSCOVER_TEXT_MAX (8u * 1024u * 1024u)
-#define DIHSCOVER_PAINT_CAP 96u
+#define DIHSCOVER_PAINT_CAP 128u
 #define DIHSCOVER_HISTORY_CAP 32u
 #define DIHSCOVER_IMAGE_CAP 12u
 #define DIHSCOVER_FORM_BODY_CAP 4096u
@@ -36,7 +36,8 @@ typedef struct browser_style {
     uint16_t padding_top, padding_right, padding_bottom, padding_left;
     uint16_t border_width;
     uint16_t width_px, height_px;
-    uint16_t max_width_px, min_width_px, line_height_px, gap_px;
+    uint16_t max_width_px, min_width_px, min_height_px, max_height_px;
+    uint16_t line_height_px, gap_px, flex_basis_px;
     sacx_color border_color;
     uint32_t mask;
     uint8_t display;
@@ -56,6 +57,8 @@ typedef struct browser_style {
     uint8_t nowrap;
     uint8_t margin_auto_left;
     uint8_t margin_auto_right;
+    uint8_t flex_grow;
+    uint8_t flex_shrink;
 } browser_style;
 
 typedef struct browser_node {
@@ -74,6 +77,7 @@ typedef struct browser_node {
     uint32_t w, h;
     int16_t image_slot;
     int16_t reserved;
+    uint32_t source_tag_hash;
 } browser_node;
 
 typedef struct browser_document {
@@ -146,6 +150,11 @@ int browser_document_encode_form(const browser_document *doc, uint32_t form_inde
 const char *browser_document_string(const browser_document *doc, uint32_t off);
 int browser_document_set_text_by_id(browser_document *doc, const char *id, const char *value);
 int browser_document_set_style_by_id(browser_document *doc, const char *id, const char *property, const char *value);
+int browser_document_find_selector(const browser_document *doc, const char *selector);
+int browser_document_set_text(browser_document *doc, uint32_t node_index, const char *value);
+int browser_document_set_style(browser_document *doc, uint32_t node_index, const char *property, const char *value);
+int browser_document_set_class(browser_document *doc, uint32_t node_index, const char *class_name, uint32_t operation);
+int browser_document_set_attribute(browser_document *doc, uint32_t node_index, const char *name, const char *value, uint8_t remove);
 uint32_t browser_text_scale(uint16_t font_px);
 uint32_t browser_text_wrap(const browser_style *style, const char *src, uint32_t width,
                            char *out, uint32_t cap, uint32_t *out_width);
