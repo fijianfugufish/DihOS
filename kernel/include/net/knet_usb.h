@@ -24,6 +24,15 @@ typedef struct knet_usb_status
 int knet_usb_dhcp(uint32_t rounds);
 void knet_usb_get_status(knet_usb_status *out_status);
 int knet_usb_get_url(const char *url, uint32_t max_bytes);
+int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
+                       uint32_t *out_size, uint8_t *out_truncated,
+                       volatile uint32_t *cancelled, uint32_t timeout_ms);
+int knet_usb_fetch_request(const char *url, const char *method,
+                           const uint8_t *body, uint32_t body_size,
+                           const char *content_type,
+                           uint8_t *response, uint32_t capacity,
+                           uint32_t *out_size, uint8_t *out_truncated,
+                           volatile uint32_t *cancelled, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

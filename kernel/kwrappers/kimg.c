@@ -717,3 +717,67 @@ int kimg_load(kimg *out, const char *path)
         return -1;
     }
 }
+
+int kimg_load_memory(kimg *out, const void *data, uint32_t size)
+{
+    stbi_uc *decoded = 0;
+    uint32_t *dst = 0;
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+    uint64_t px_count;
+    uint64_t px_bytes;
+
+    if (!out || !data || size < 4u || size > 16u * 1024u * 1024u || size > 0x7FFFFFFFu)
+        return -1;
+    {
+        const uint8_t *text = (const uint8_t *)data;
+        uint32_t at = 0u;
+        while (at < size && (text[at] == ' ' || text[at] == '\t' || text[at] == '\r' || text[at] == '\n'))
+            ++at;
+        for (uint32_t scan = at; scan + 4u <= size && scan < at + 1024u; ++scan)
+            if (text[scan] == '<' && (text[scan + 1u] == 's' || text[scan + 1u] == 'S') &&
+                (text[scan + 2u] == 'v' || text[scan + 2u] == 'V') &&
+                (text[scan + 3u] == 'g' || text[scan + 3u] == 'G'))
+                return kimg_load_svg_memory(out, data, size);
+    }
+    if (size >= 12u && memcmp(data, "RIFF", 4u) == 0 &&
+        memcmp((const uint8_t *)data + 8u, "WEBP", 4u) == 0)
+        return kimg_load_webp_memory(out, data, size);
+    kimg_zero(out);
+    if (kimg_stbi_arena_prepare() != 0)
+        return -1;
+    kimg_stbi_arena_reset();
+    decoded = stbi_load_from_memory((const stbi_uc *)data, (int)size, &w, &h, &comp, 4);
+    if (!decoded || w <= 0 || h <= 0 || (uint32_t)w > 8192u || (uint32_t)h > 8192u)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+    px_count = (uint64_t)(uint32_t)w * (uint64_t)(uint32_t)h;
+    px_bytes = px_count * 4ull;
+    if (!px_count || px_bytes > 256ull * 1024ull * 1024ull)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+    dst = (uint32_t *)pmem_alloc_pages((px_bytes + 4095ull) >> 12);
+    if (!dst)
+    {
+        kimg_stbi_arena_reset();
+        return -1;
+    }
+    for (uint64_t i = 0u; i < px_count; ++i)
+    {
+        uint8_t r = decoded[i * 4ull];
+        uint8_t g = decoded[i * 4ull + 1u];
+        uint8_t b = decoded[i * 4ull + 2u];
+        uint8_t a = decoded[i * 4ull + 3u];
+        dst[i] = pack_pixel(r, g, b, a);
+    }
+    out->w = (uint32_t)w;
+    out->h = (uint32_t)h;
+    out->px = dst;
+    kimg_stbi_arena_reset();
+    return 0;
+}

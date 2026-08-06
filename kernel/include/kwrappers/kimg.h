@@ -26,6 +26,9 @@ int kimg_load_jpeg(kimg *out, const char *path);
 
 // Auto-detect by file signature and dispatch to BMP/PNG/JPEG loader.
 int kimg_load(kimg *out, const char *path);
+int kimg_load_memory(kimg *out, const void *data, uint32_t size);
+int kimg_load_webp_memory(kimg *out, const void *data, uint32_t size);
+int kimg_load_svg_memory(kimg *out, const void *data, uint32_t size);
 
 // Reserve decoder scratch memory early, before later DMA/ring allocations make
 // large contiguous allocations harder.

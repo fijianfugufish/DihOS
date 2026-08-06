@@ -1,7 +1,13 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>
 #include "sacx_keys.h"
+
+#ifndef SACX_API_HAS
+#define SACX_API_HAS(api, member) \
+    ((api) && (api)->struct_size >= offsetof(sacx_api, member) + sizeof((api)->member) && (api)->member)
+#endif
 
 #ifdef __cplusplus
 extern "C"
@@ -84,6 +90,48 @@ extern "C"
         SACX_WORK_STATUS_DONE = 3u,
         SACX_WORK_STATUS_FAILED = 4u,
     };
+
+    enum
+    {
+        SACX_NET_STATUS_EMPTY = 0u,
+        SACX_NET_STATUS_QUEUED = 1u,
+        SACX_NET_STATUS_LOADING = 2u,
+        SACX_NET_STATUS_DONE = 3u,
+        SACX_NET_STATUS_FAILED = 4u,
+        SACX_NET_STATUS_CANCELLED = 5u,
+    };
+
+    typedef struct sacx_net_request_desc
+    {
+        const char *url;
+        uint32_t max_response_bytes;
+        uint32_t timeout_ms;
+        uint32_t redirect_limit;
+    } sacx_net_request_desc;
+
+    typedef struct sacx_net_request_desc_ex
+    {
+        const char *url;
+        uint32_t max_response_bytes;
+        uint32_t timeout_ms;
+        uint32_t redirect_limit;
+        const char *method;
+        const void *body;
+        uint32_t body_size;
+        const char *content_type;
+    } sacx_net_request_desc_ex;
+
+    typedef struct sacx_net_response_info
+    {
+        uint32_t status;
+        uint32_t http_status;
+        uint32_t body_size;
+        uint32_t truncated;
+        uint32_t tls_unverified;
+        char final_url[768];
+        char content_type[96];
+        char error[128];
+    } sacx_net_response_info;
 
     typedef struct sacx_api sacx_api;
     typedef int (*sacx_update_fn)(const sacx_api *api);
@@ -645,6 +693,23 @@ extern "C"
                               uint32_t *out_save_id);
         uint32_t (*img_save_status)(uint32_t save_id, int *out_result);
         int (*img_save_release)(uint32_t save_id);
+
+        /* ABI v1 append-only browser foundation extension. */
+        int (*net_request_start)(const sacx_net_request_desc *desc, uint32_t *out_request_id);
+        uint32_t (*net_request_status)(uint32_t request_id);
+        int (*net_response_info)(uint32_t request_id, sacx_net_response_info *out_info);
+        int (*net_response_read)(uint32_t request_id, uint32_t offset, void *dst,
+                                 uint32_t capacity, uint32_t *out_read);
+        int (*net_request_cancel)(uint32_t request_id);
+        int (*net_request_release)(uint32_t request_id);
+        int (*img_load_memory)(const void *data, uint32_t size, uint32_t *out_image_handle);
+
+        /* ABI v1 append-only task memory extension. */
+        int (*mem_alloc)(uint32_t size, void **out_ptr);
+        int (*mem_free)(void *ptr);
+
+        /* ABI v1 append-only HTTP form request extension. */
+        int (*net_request_start_ex)(const sacx_net_request_desc_ex *desc, uint32_t *out_request_id);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

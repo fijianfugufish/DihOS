@@ -14,7 +14,9 @@ param(
   [string]$KernelX64Out  = "OS\x64\KERNEL.ELF",
 
   [ValidateSet("Release","Debug")]
-  [string]$Config = "Release"
+  [string]$Config = "Release",
+
+  [switch]$ArmOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,6 +69,8 @@ $BearDir = Join-Path $ProjectRoot "third_party\BearSSL"
 $BearSrc = Join-Path $BearDir "src"
 $BearInc = Join-Path $BearDir "inc"
 $BearCompat = Join-Path $BearDir "compat"
+$SimpleWebPDir = Join-Path $ProjectRoot "third_party\simplewebp"
+$SimpleWebPCompat = Join-Path $SimpleWebPDir "freestanding"
 
 $bootSrc  = Get-ChildItem -Recurse -Path $SrcDir -Filter "boot.c" -File | Select-Object -First 1
 $stageSrc = Get-ChildItem -Recurse -Path $SrcDir -Filter "*.c" -File | Where-Object { $_.Name -ne "boot.c" }
@@ -98,6 +102,8 @@ function Kernel-Include-Dirs {
     (Join-Path $KerDir "asm\$Arch"),
     $IncDir,
     $KerInc,
+    $SimpleWebPCompat,
+    $SimpleWebPDir,
     $BearInc
   )
 }
@@ -314,12 +320,14 @@ Remove-ExistingOutput -Path $BootOutFull
 if ($LASTEXITCODE) { throw "lld-link (boot aa64) failed" }
 Write-Host "Built: $BootOutFull" -ForegroundColor Green
 
-Write-Host "== BOOT x64 -> $BootX64OutFull ==" -ForegroundColor Cyan
-$bootX64Objs = Compile-C -Sources @($bootSrc.FullName) -ObjDir $ObjBootX64 -CFlags $uefiX64CFlags
-Remove-ExistingOutput -Path $BootX64OutFull
-& $lld /nologo /machine:x64 /subsystem:efi_application /entry:$BootEntry /nodefaultlib /out:$BootX64OutFull $bootX64Objs
-if ($LASTEXITCODE) { throw "lld-link (boot x64) failed" }
-Write-Host "Built: $BootX64OutFull" -ForegroundColor Green
+if (!$ArmOnly) {
+  Write-Host "== BOOT x64 -> $BootX64OutFull ==" -ForegroundColor Cyan
+  $bootX64Objs = Compile-C -Sources @($bootSrc.FullName) -ObjDir $ObjBootX64 -CFlags $uefiX64CFlags
+  Remove-ExistingOutput -Path $BootX64OutFull
+  & $lld /nologo /machine:x64 /subsystem:efi_application /entry:$BootEntry /nodefaultlib /out:$BootX64OutFull $bootX64Objs
+  if ($LASTEXITCODE) { throw "lld-link (boot x64) failed" }
+  Write-Host "Built: $BootX64OutFull" -ForegroundColor Green
+}
 
 # ---- STAGE2 ----
 Write-Host "== STAGE2 aa64 -> $Stage2OutFull ==" -ForegroundColor Cyan
@@ -329,18 +337,22 @@ Remove-ExistingOutput -Path $Stage2OutFull
 if ($LASTEXITCODE) { throw "lld-link (stage2 aa64) failed" }
 Write-Host "Built: $Stage2OutFull" -ForegroundColor Green
 
-Write-Host "== STAGE2 x64 -> $Stage2X64OutFull ==" -ForegroundColor Cyan
-$stageX64Objs = Compile-C -Sources ($stageSrc.FullName) -ObjDir $ObjS2X64 -CFlags $uefiX64CFlags
-Remove-ExistingOutput -Path $Stage2X64OutFull
-& $lld /nologo /machine:x64 /subsystem:efi_application /entry:$Stage2Entry /nodefaultlib /out:$Stage2X64OutFull $stageX64Objs
-if ($LASTEXITCODE) { throw "lld-link (stage2 x64) failed" }
-Write-Host "Built: $Stage2X64OutFull" -ForegroundColor Green
+if (!$ArmOnly) {
+  Write-Host "== STAGE2 x64 -> $Stage2X64OutFull ==" -ForegroundColor Cyan
+  $stageX64Objs = Compile-C -Sources ($stageSrc.FullName) -ObjDir $ObjS2X64 -CFlags $uefiX64CFlags
+  Remove-ExistingOutput -Path $Stage2X64OutFull
+  & $lld /nologo /machine:x64 /subsystem:efi_application /entry:$Stage2Entry /nodefaultlib /out:$Stage2X64OutFull $stageX64Objs
+  if ($LASTEXITCODE) { throw "lld-link (stage2 x64) failed" }
+  Write-Host "Built: $Stage2X64OutFull" -ForegroundColor Green
+}
 
 # ---- KERNELS (PIE ELF) ----
 $ldsAA64 = Join-Path $KerDir "kernel.ld"
 $ldsX64  = Join-Path $KerDir "kernel_x64.ld"
 Build-Kernel -Arch "aa64" -Target "aarch64-unknown-none-elf" -ObjDir $ObjKAA64 -OutFile $KernelAa64OutFull -LinkerScript $ldsAA64
-Build-Kernel -Arch "x64"  -Target "x86_64-unknown-none-elf"  -ObjDir $ObjKX64  -OutFile $KernelX64OutFull  -LinkerScript $ldsX64
+if (!$ArmOnly) {
+  Build-Kernel -Arch "x64" -Target "x86_64-unknown-none-elf" -ObjDir $ObjKX64 -OutFile $KernelX64OutFull -LinkerScript $ldsX64
+}
 
 # ---- IMAGE EDITOR SACX (fat AA64 + x64 package) ----
 $imageEditorBuild = Join-Path $ProjectRoot "build_sacx_app.ps1"
@@ -376,32 +388,38 @@ if (Test-Path $UsbRoot) {
   New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
 
   Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
-  Copy-Item -Force $BootX64OutFull    (Join-Path $destBoot "BOOTX64.EFI")
   Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
-  Copy-Item -Force $Stage2X64OutFull  (Join-Path $destX64 "STAGE2.EFI")
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
-  Copy-Item -Force $KernelX64OutFull  (Join-Path $destX64 "KERNEL.ELF")
   Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
+  if (!$ArmOnly) {
+    Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
+    Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
+    Copy-Item -Force $KernelX64OutFull (Join-Path $destX64 "KERNEL.ELF")
+  }
 
   Write-Host "Copied outputs to U:\ successfully:" -ForegroundColor Green
   Write-Host "  U:\EFI\BOOT\BOOTAA64.EFI"
-  Write-Host "  U:\EFI\BOOT\BOOTX64.EFI"
   Write-Host "  U:\OS\aa64\STAGE2.EFI"
-  Write-Host "  U:\OS\x64\STAGE2.EFI"
   Write-Host "  U:\OS\aa64\KERNEL.ELF"
-  Write-Host "  U:\OS\x64\KERNEL.ELF"
   Write-Host "  U:\OS\System\Programs\Image Viewer\image_viewer.sacx"
+  if (!$ArmOnly) {
+    Write-Host "  U:\EFI\BOOT\BOOTX64.EFI"
+    Write-Host "  U:\OS\x64\STAGE2.EFI"
+    Write-Host "  U:\OS\x64\KERNEL.ELF"
+  }
 } else {
   Write-Host "USB drive U:\ not found. Skipping copy." -ForegroundColor Yellow
   Write-Host ""
   Write-Host "Copy to USB:" -ForegroundColor Yellow
   Write-Host ("  \EFI\BOOT\BOOTAA64.EFI   <= " + $BootOutFull)
-  Write-Host ("  \EFI\BOOT\BOOTX64.EFI    <= " + $BootX64OutFull)
   Write-Host ("  \OS\aa64\STAGE2.EFI       <= " + $Stage2OutFull)
-  Write-Host ("  \OS\x64\STAGE2.EFI        <= " + $Stage2X64OutFull)
   Write-Host ("  \OS\aa64\KERNEL.ELF       <= " + $KernelAa64OutFull)
-  Write-Host ("  \OS\x64\KERNEL.ELF        <= " + $KernelX64OutFull)
   Write-Host ("  \OS\System\Programs\Image Viewer\image_viewer.sacx <= " + $imageEditorOut)
+  if (!$ArmOnly) {
+    Write-Host ("  \EFI\BOOT\BOOTX64.EFI    <= " + $BootX64OutFull)
+    Write-Host ("  \OS\x64\STAGE2.EFI        <= " + $Stage2X64OutFull)
+    Write-Host ("  \OS\x64\KERNEL.ELF        <= " + $KernelX64OutFull)
+  }
 }
 
 # ---- Hyper-V VHDX copy ----
@@ -439,12 +457,14 @@ if ($VhdAccessible) {
     New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
 
     Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
-    Copy-Item -Force $BootX64OutFull    (Join-Path $destBoot "BOOTX64.EFI")
     Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
-    Copy-Item -Force $Stage2X64OutFull  (Join-Path $destX64 "STAGE2.EFI")
     Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
-    Copy-Item -Force $KernelX64OutFull  (Join-Path $destX64 "KERNEL.ELF")
     Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
+    if (!$ArmOnly) {
+      Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
+      Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
+      Copy-Item -Force $KernelX64OutFull (Join-Path $destX64 "KERNEL.ELF")
+    }
 
     Write-Host "Copied outputs to DihOS VHDX at $VhdRoot successfully." -ForegroundColor Green
   }

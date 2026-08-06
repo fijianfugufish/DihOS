@@ -12,8 +12,6 @@ static uint8_t g_usb_eth_ax_link_sts;
 static uint32_t g_usb_eth_last_tx_len;
 static int g_usb_eth_last_tx_rc;
 static uint32_t g_usb_eth_last_tx_got;
-static uint32_t g_usb_eth_last_tx_fifo_before;
-static uint32_t g_usb_eth_last_tx_fifo_after;
 static uint32_t g_usb_eth_last_xhci_cc;
 static uint32_t g_usb_eth_last_xhci_ep;
 static uint32_t g_usb_eth_last_xhci_rem;
@@ -27,12 +25,13 @@ static uint8_t *g_usb_eth_tx_dma;
 static uint8_t *g_usb_eth_rx_dma;
 static uint32_t g_usb_eth_dma_cap;
 
-#define USB_ETH_PENDING_COUNT 16u
+#define USB_ETH_PENDING_COUNT 32u
 #define USB_ETH_PENDING_CAP 2048u
 static uint8_t g_usb_eth_pending[USB_ETH_PENDING_COUNT][USB_ETH_PENDING_CAP];
 static uint16_t g_usb_eth_pending_len[USB_ETH_PENDING_COUNT];
 static uint8_t g_usb_eth_pending_head;
 static uint8_t g_usb_eth_pending_used;
+static uint32_t g_usb_eth_pending_dropped;
 
 #define USB_ETH_DMA_CAP 32768u
 
@@ -92,9 +91,6 @@ static uint8_t g_usb_eth_pending_used;
 #define GMII_PHY_PHYSR_LINK 0x0400u
 #define AX_RXHDR_CRC_ERR 0x20000000u
 #define AX_RXHDR_DROP_ERR 0x80000000u
-#define AX_TX_FIFO_FULL_STATUS_CMD 0x81u
-#define AX_TX_FIFO_FULL_STATUS_REG 0x8Cu
-
 #define USB_ETH_RX_OK 0u
 #define USB_ETH_RX_NO_USB 1u
 #define USB_ETH_RX_NOT_READY 2u
@@ -231,15 +227,6 @@ static int ax_phy_write_u16(uint16_t reg, uint16_t value)
     uint8_t tmp[2];
     eth_put_le16(tmp, value);
     return ax_write(AX_ACCESS_PHY, AX88179_PHY_ID, reg, tmp, 2u);
-}
-
-static int ax_read_tx_fifo_status(uint32_t *out)
-{
-    uint8_t tmp[4] = {0u, 0u, 0u, 0u};
-    if (!out || ax_read(AX_TX_FIFO_FULL_STATUS_CMD, AX_TX_FIFO_FULL_STATUS_REG, 0u, tmp, 4u) != 0)
-        return -1;
-    *out = eth_get_le32(tmp);
-    return 0;
 }
 
 static int ax88179_link_reset(void)
@@ -477,6 +464,19 @@ int usb_ethernet_get_mac(uint8_t out_mac[6])
     return 0;
 }
 
+int usb_ethernet_prepare_receive(void)
+{
+    if (!g_usb_eth_online || eth_dma_ready() != 0)
+        return -1;
+
+    g_usb_eth_pending_head = 0u;
+    g_usb_eth_pending_used = 0u;
+    g_usb_eth_pending_dropped = 0u;
+    if (g_usb_eth_dev.net_driver == USB_NET_DRIVER_ASIX_AX88179)
+        return ax88179_link_reset();
+    return 0;
+}
+
 void usb_ethernet_get_status(usb_ethernet_status *out_status)
 {
     if (!out_status)
@@ -511,10 +511,16 @@ void usb_ethernet_get_status(usb_ethernet_status *out_status)
     eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_dev.port_id);
     eth_append(out_status->detail, sizeof(out_status->detail), " mtu ");
     eth_append_u32(out_status->detail, sizeof(out_status->detail), out_status->mtu);
+    if (g_usb_eth_pending_dropped)
+    {
+        eth_append(out_status->detail, sizeof(out_status->detail), " rxdrop ");
+        eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_pending_dropped);
+    }
     if (g_usb_eth_dev.net_driver == USB_NET_DRIVER_ASIX_AX88179)
         eth_append(out_status->detail, sizeof(out_status->detail), g_usb_eth_ax_ready ? " ax-ready" : " ax-init-pending");
     if (g_usb_eth_dev.net_driver == USB_NET_DRIVER_ASIX_AX88179)
     {
+        uint32_t ep_state=0u,dci=0u,enq=0u,cycle=0u,pending=0u;
         eth_append(out_status->detail, sizeof(out_status->detail), g_usb_eth_ax_link_up ? " link-up" : " link-down");
         eth_append(out_status->detail, sizeof(out_status->detail), " physr ");
         eth_append_hex16(out_status->detail, sizeof(out_status->detail), g_usb_eth_ax_physr);
@@ -525,12 +531,6 @@ void usb_ethernet_get_status(usb_ethernet_status *out_status)
         eth_append(out_status->detail, sizeof(out_status->detail), "/");
         eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_last_tx_got);
         eth_append(out_status->detail, sizeof(out_status->detail), g_usb_eth_last_tx_rc == 0 ? " tok" : " terr");
-        eth_append(out_status->detail, sizeof(out_status->detail), " fifo ");
-        eth_append_hex16(out_status->detail, sizeof(out_status->detail), (uint16_t)(g_usb_eth_last_tx_fifo_before >> 16));
-        eth_append_hex16(out_status->detail, sizeof(out_status->detail), (uint16_t)g_usb_eth_last_tx_fifo_before);
-        eth_append(out_status->detail, sizeof(out_status->detail), "/");
-        eth_append_hex16(out_status->detail, sizeof(out_status->detail), (uint16_t)(g_usb_eth_last_tx_fifo_after >> 16));
-        eth_append_hex16(out_status->detail, sizeof(out_status->detail), (uint16_t)g_usb_eth_last_tx_fifo_after);
         eth_append(out_status->detail, sizeof(out_status->detail), " x ");
         eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_last_xhci_cc);
         eth_append(out_status->detail, sizeof(out_status->detail), ":");
@@ -547,6 +547,18 @@ void usb_ethernet_get_status(usb_ethernet_status *out_status)
         eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_last_rx_xhci_ep);
         eth_append(out_status->detail, sizeof(out_status->detail), ":");
         eth_append_u32(out_status->detail, sizeof(out_status->detail), g_usb_eth_last_rx_xhci_rem);
+        if(usbh_bulk_in_debug_state(&g_usb_eth_dev,&ep_state,&dci,&enq,&cycle,&pending)==0)
+        {
+            eth_append(out_status->detail,sizeof(out_status->detail)," bi ");
+            eth_append_u32(out_status->detail,sizeof(out_status->detail),ep_state);
+            eth_append(out_status->detail,sizeof(out_status->detail),":");
+            eth_append_u32(out_status->detail,sizeof(out_status->detail),dci);
+            eth_append(out_status->detail,sizeof(out_status->detail)," q");
+            eth_append_u32(out_status->detail,sizeof(out_status->detail),enq);
+            eth_append(out_status->detail,sizeof(out_status->detail)," c");
+            eth_append_u32(out_status->detail,sizeof(out_status->detail),cycle);
+            eth_append(out_status->detail,sizeof(out_status->detail),pending?" pending":" idle");
+        }
     }
     if (g_usb_eth_dev.net_mac_valid)
     {
@@ -568,8 +580,6 @@ int usb_ethernet_send_frame(const void *frame, uint32_t len)
 
     g_usb_eth_last_tx_rc = -1;
     g_usb_eth_last_tx_got = 0u;
-    g_usb_eth_last_tx_fifo_before = 0u;
-    g_usb_eth_last_tx_fifo_after = 0u;
 
     if (!g_usb_eth_online || !frame || len < 14u || len > 2048u)
         return -1;
@@ -587,14 +597,12 @@ int usb_ethernet_send_frame(const void *frame, uint32_t len)
         memcpy(g_usb_eth_tx_dma + 8u, frame, len);
         tx_len = len + 8u;
         g_usb_eth_last_tx_len = tx_len;
-        (void)ax_read_tx_fifo_status(&g_usb_eth_last_tx_fifo_before);
         rc = usbh_bulk_out_got(&g_usb_eth_dev, g_usb_eth_tx_dma, tx_len, &got);
         g_usb_eth_last_tx_rc = rc;
         g_usb_eth_last_tx_got = got;
         g_usb_eth_last_xhci_cc = g_xhci_last_cc;
         g_usb_eth_last_xhci_ep = g_xhci_last_ev_epid;
         g_usb_eth_last_xhci_rem = g_xhci_last_ev_len;
-        (void)ax_read_tx_fifo_status(&g_usb_eth_last_tx_fifo_after);
         return rc;
     }
     memcpy(g_usb_eth_tx_dma, frame, len);
@@ -644,7 +652,7 @@ int usb_ethernet_recv_frame(void *frame, uint32_t cap, uint32_t *out_len)
     if (cap > g_usb_eth_dma_cap)
         cap = g_usb_eth_dma_cap;
     if (usbh_bulk_in_got_timeout(&g_usb_eth_dev, g_usb_eth_rx_dma, g_usb_eth_dma_cap,
-                                 &got, 1000u) != 0)
+                                 &got, 100u) != 0)
     {
         g_usb_eth_last_rx_reason = USB_ETH_RX_NO_USB;
         g_usb_eth_last_rx_xhci_cc = g_xhci_last_cc;
@@ -703,6 +711,11 @@ int usb_ethernet_recv_frame(void *frame, uint32_t cap, uint32_t *out_len)
                 memcpy(g_usb_eth_pending[tail], g_usb_eth_rx_dma + data_off + 2u, pkt_len - 2u);
                 ++g_usb_eth_pending_used;
             }
+            else
+            {
+                ++g_usb_eth_pending_dropped;
+                g_usb_eth_last_rx_reason = USB_ETH_RX_TOO_BIG;
+            }
             data_off += pkt_pad;
         }
         if (g_usb_eth_pending_used)
@@ -735,4 +748,26 @@ int usb_ethernet_recv_frame(void *frame, uint32_t cap, uint32_t *out_len)
 uint32_t usb_ethernet_pending_frames(void)
 {
     return g_usb_eth_pending_used;
+}
+
+void usb_ethernet_discard_pending_frames(void)
+{
+    g_usb_eth_pending_head = 0u;
+    g_usb_eth_pending_used = 0u;
+    memset(g_usb_eth_pending_len, 0, sizeof(g_usb_eth_pending_len));
+}
+
+int usb_ethernet_recover_receive(void)
+{
+    usb_ethernet_discard_pending_frames();
+    return usbh_bulk_in_cancel_pending(&g_usb_eth_dev);
+}
+
+int usb_ethernet_restart_receive(void)
+{
+    usb_ethernet_discard_pending_frames();
+    if (g_usb_eth_dev.net_driver != USB_NET_DRIVER_ASIX_AX88179)
+        return 0;
+    terminal_print("net: fully restarting AX88179");
+    return ax88179_basic_init();
 }

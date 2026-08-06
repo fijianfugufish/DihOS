@@ -111,9 +111,14 @@ int usbh_bulk_in(usbh_dev_t *d, void *buf, uint32_t len);
 int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *got);
 int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got);
 int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got,
-                             uint32_t timeout_ms);
+                              uint32_t timeout_ms);
+int usbh_bulk_in_cancel_pending(usbh_dev_t *d);
+int usbh_bulk_in_debug_state(usbh_dev_t *d, uint32_t *endpoint_state,
+                             uint32_t *dci, uint32_t *enqueue,
+                             uint32_t *cycle, uint32_t *pending);
 
 int usbh_intr_in(usbh_dev_t *d, void *buf, uint32_t len);
+void usbh_background_network_set(uint32_t busy);
 int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got);
 
 int usbh_msc_bot_recover(usbh_dev_t *d);

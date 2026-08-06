@@ -23,6 +23,7 @@ extern "C"
 #include "kwrappers/string.h"
 #include "bootinfo.h"
 #include "memory/pmem.h"
+#include "net/knet_usb.h"
 #include "system/dihos_time.h"
 #include "system/kbusy.h"
 #include "system/kwork.h"
@@ -48,6 +49,11 @@ extern const boot_info *k_bootinfo_ptr;
 #define SACX_MAX_TASK_3D_PLAYERS 8u
 #define SACX_MAX_TASK_WORKERS 8u
 #define SACX_MAX_TASK_ASYNC_IMAGE_SAVES 1u
+#define SACX_MAX_TASK_NET_REQUESTS 4u
+#define SACX_MAX_TASK_MEMORY_ALLOCS 8u
+#define SACX_MAX_TASK_MEMORY_BYTES (32u * 1024u * 1024u)
+#define SACX_NET_DEFAULT_BYTES (2u * 1024u * 1024u)
+#define SACX_NET_MAX_BYTES (8u * 1024u * 1024u)
 #define SACX_MAX_SEGMENTS 128u
 #define SACX_MAX_RELOCS 8192u
 #define SACX_MAX_IMPORTS 256u
@@ -191,6 +197,38 @@ typedef struct sacx_async_image_save_slot
     char path[256];
 } sacx_async_image_save_slot;
 
+typedef struct __attribute__((aligned(64))) sacx_net_request_slot
+{
+    uint8_t used;
+    uint8_t truncated;
+    uint16_t reserved0;
+    uint32_t id;
+    uint32_t job_id;
+    volatile uint32_t status;
+    volatile uint32_t cancelled;
+    uint32_t capacity;
+    uint32_t redirect_limit;
+    uint32_t timeout_ms;
+    uint32_t raw_size;
+    uint32_t body_size;
+    uint64_t pages;
+    uint8_t *buffer;
+    sacx_net_response_info info;
+    char url[768];
+    char method[8];
+    char content_type[96];
+    uint32_t request_body_size;
+    uint8_t request_body[4096];
+} sacx_net_request_slot;
+
+typedef struct sacx_memory_slot
+{
+    uint8_t used;
+    uint8_t reserved[7];
+    uint64_t pages;
+    void *ptr;
+} sacx_memory_slot;
+
 typedef struct sacx_task
 {
     uint32_t task_id;
@@ -246,6 +284,8 @@ typedef struct sacx_task
     sacx_3d_player_slot players3d[SACX_MAX_TASK_3D_PLAYERS];
     sacx_worker_slot workers[SACX_MAX_TASK_WORKERS];
     sacx_async_image_save_slot image_saves[SACX_MAX_TASK_ASYNC_IMAGE_SAVES];
+    sacx_net_request_slot net_requests[SACX_MAX_TASK_NET_REQUESTS];
+    sacx_memory_slot memory_allocs[SACX_MAX_TASK_MEMORY_ALLOCS];
 } sacx_task;
 
 static sacx_task G_tasks[SACX_MAX_TASKS];
@@ -311,6 +351,14 @@ static int sacx_task_worker_active(const sacx_task *task)
         if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
             return 1;
     }
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
+    {
+        if (!task->net_requests[i].used)
+            continue;
+        uint32_t status = kwork_status(task->net_requests[i].job_id);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+            return 1;
+    }
     return 0;
 }
 
@@ -364,6 +412,299 @@ static void sacx_copy_trunc(char *dst, uint32_t cap, const char *src)
         ++i;
     }
     dst[i] = 0;
+}
+
+static uint8_t sacx_ascii_lower(uint8_t c)
+{
+    return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
+}
+
+static int sacx_span_ieq(const uint8_t *text, uint32_t len, const char *wanted)
+{
+    uint32_t i = 0u;
+    if (!text || !wanted)
+        return 0;
+    while (wanted[i])
+    {
+        if (i >= len || sacx_ascii_lower(text[i]) != sacx_ascii_lower((uint8_t)wanted[i]))
+            return 0;
+        ++i;
+    }
+    return i == len;
+}
+
+static uint32_t sacx_find_header_end(const uint8_t *data, uint32_t size)
+{
+    if (!data)
+        return 0u;
+    for (uint32_t i = 0u; i + 3u < size; ++i)
+        if (data[i] == '\r' && data[i + 1u] == '\n' &&
+            data[i + 2u] == '\r' && data[i + 3u] == '\n')
+            return i + 4u;
+    return 0u;
+}
+
+static uint32_t sacx_parse_hex(const uint8_t *text, uint32_t len, uint8_t *ok)
+{
+    uint32_t value = 0u;
+    uint32_t digits = 0u;
+    *ok = 0u;
+    for (uint32_t i = 0u; i < len; ++i)
+    {
+        uint8_t c = text[i];
+        uint32_t n;
+        if (c == ';' || c == ' ' || c == '\t' || c == '\r')
+            break;
+        if (c >= '0' && c <= '9')
+            n = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            n = c - 'a' + 10u;
+        else if (c >= 'A' && c <= 'F')
+            n = c - 'A' + 10u;
+        else
+            return 0u;
+        if (value > 0x0FFFFFFFu)
+            return 0u;
+        value = (value << 4) | n;
+        ++digits;
+    }
+    *ok = digits ? 1u : 0u;
+    return value;
+}
+
+static int sacx_url_resolve(const char *base, const char *relative, char *out, uint32_t cap)
+{
+    uint32_t n = 0u;
+    uint32_t authority_end = 0u;
+    uint32_t base_end = 0u;
+    if (!base || !relative || !out || cap < 16u)
+        return -1;
+    if ((strncmp(relative, "http://", 7u) == 0) || (strncmp(relative, "https://", 8u) == 0))
+    {
+        sacx_copy_trunc(out, cap, relative);
+        return 0;
+    }
+    if (!relative[0])
+    {
+        sacx_copy_trunc(out, cap, base);
+        return 0;
+    }
+    while (base[authority_end] && base[authority_end] != ':')
+        ++authority_end;
+    if (!base[authority_end] || base[authority_end + 1u] != '/' || base[authority_end + 2u] != '/')
+        return -1;
+    authority_end += 3u;
+    while (base[authority_end] && base[authority_end] != '/')
+        ++authority_end;
+    if (relative[0] == '/' && relative[1u] == '/')
+    {
+        while (base[n] && base[n] != ':' && n + 1u < cap)
+        {
+            out[n] = base[n];
+            ++n;
+        }
+        if (base[n] == ':' && n + 1u < cap)
+            out[n++] = ':';
+        for (uint32_t i = 0u; relative[i] && n + 1u < cap; ++i)
+            out[n++] = relative[i];
+        out[n] = 0;
+        return n + 1u < cap ? 0 : -1;
+    }
+    if (relative[0] == '?' || relative[0] == '#')
+    {
+        base_end = (uint32_t)strlen(base);
+        for (uint32_t i = authority_end; i < base_end; ++i)
+            if (base[i] == '#' || (relative[0] == '?' && base[i] == '?'))
+            {
+                base_end = i;
+                break;
+            }
+    }
+    else if (relative[0] == '/')
+        base_end = authority_end;
+    else
+    {
+        base_end = (uint32_t)strlen(base);
+        for (uint32_t i = authority_end; i < base_end; ++i)
+            if (base[i] == '?' || base[i] == '#')
+            {
+                base_end = i;
+                break;
+            }
+        while (base_end > authority_end && base[base_end - 1u] != '/')
+            --base_end;
+    }
+    while (n < base_end && n + 1u < cap)
+    {
+        out[n] = base[n];
+        ++n;
+    }
+    for (uint32_t i = 0u; relative[i] && n + 1u < cap; ++i)
+        out[n++] = relative[i];
+    out[n] = 0;
+    if (n + 1u >= cap)
+        return -1;
+
+    /* Remove path dot-segments without touching the scheme/authority. */
+    for (uint32_t i = authority_end; out[i] && out[i] != '?' && out[i] != '#';)
+    {
+        if (out[i] == '/' && out[i + 1u] == '.' && out[i + 2u] == '/')
+        {
+            memmove(out + i, out + i + 2u, strlen(out + i + 2u) + 1u);
+            continue;
+        }
+        if (out[i] == '/' && out[i + 1u] == '.' && out[i + 2u] == '.' &&
+            (out[i + 3u] == '/' || out[i + 3u] == 0 || out[i + 3u] == '?' || out[i + 3u] == '#'))
+        {
+            uint32_t previous = i;
+            uint32_t source = i + 3u + (out[i + 3u] == '/' ? 1u : 0u);
+            while (previous > authority_end && out[previous - 1u] != '/')
+                --previous;
+            memmove(out + previous, out + source, strlen(out + source) + 1u);
+            i = previous;
+            continue;
+        }
+        ++i;
+    }
+    return 0;
+}
+
+static int sacx_net_parse_response(sacx_net_request_slot *slot, char *location, uint32_t location_cap)
+{
+    uint32_t header_end;
+    uint32_t line = 0u;
+    uint32_t content_length = 0u;
+    uint8_t chunked = 0u;
+    uint8_t has_content_length = 0u;
+    if (!slot || !slot->buffer || !slot->raw_size)
+        return -1;
+    location[0] = 0;
+    slot->info.content_type[0] = 0;
+    header_end = sacx_find_header_end(slot->buffer, slot->raw_size);
+    if (!header_end || header_end < 12u)
+        return -1;
+    if (slot->buffer[0] != 'H' || slot->buffer[1] != 'T' || slot->buffer[2] != 'T' || slot->buffer[3] != 'P')
+        return -1;
+    while (line < header_end && slot->buffer[line] != ' ')
+        ++line;
+    if (line + 3u >= header_end)
+        return -1;
+    if (slot->buffer[line + 1u] < '0' || slot->buffer[line + 1u] > '9' ||
+        slot->buffer[line + 2u] < '0' || slot->buffer[line + 2u] > '9' ||
+        slot->buffer[line + 3u] < '0' || slot->buffer[line + 3u] > '9')
+        return -1;
+    slot->info.http_status = (uint32_t)(slot->buffer[line + 1u] - '0') * 100u +
+                             (uint32_t)(slot->buffer[line + 2u] - '0') * 10u +
+                             (uint32_t)(slot->buffer[line + 3u] - '0');
+    while (line + 1u < header_end && !(slot->buffer[line] == '\r' && slot->buffer[line + 1u] == '\n'))
+        ++line;
+    line += 2u;
+    while (line + 2u < header_end)
+    {
+        uint32_t name = line;
+        uint32_t colon;
+        uint32_t value;
+        uint32_t end;
+        if (slot->buffer[line] == '\r' && slot->buffer[line + 1u] == '\n')
+            break;
+        colon = line;
+        while (colon < header_end && slot->buffer[colon] != ':' && slot->buffer[colon] != '\r')
+            ++colon;
+        if (colon >= header_end || slot->buffer[colon] != ':')
+            return -1;
+        value = colon + 1u;
+        while (value < header_end && (slot->buffer[value] == ' ' || slot->buffer[value] == '\t'))
+            ++value;
+        end = value;
+        while (end + 1u < header_end && !(slot->buffer[end] == '\r' && slot->buffer[end + 1u] == '\n'))
+            ++end;
+        if (sacx_span_ieq(slot->buffer + name, colon - name, "content-type"))
+        {
+            uint32_t n = 0u;
+            while (value < end && slot->buffer[value] != ';' && n + 1u < sizeof(slot->info.content_type))
+                slot->info.content_type[n++] = (char)slot->buffer[value++];
+            slot->info.content_type[n] = 0;
+        }
+        else if (sacx_span_ieq(slot->buffer + name, colon - name, "transfer-encoding"))
+        {
+            for (uint32_t i = value; i + 6u < end; ++i)
+                if (sacx_span_ieq(slot->buffer + i, 7u, "chunked"))
+                    chunked = 1u;
+        }
+        else if (sacx_span_ieq(slot->buffer + name, colon - name, "location"))
+        {
+            uint32_t n = 0u;
+            while (value < end && n + 1u < location_cap)
+                location[n++] = (char)slot->buffer[value++];
+            location[n] = 0;
+        }
+        else if (sacx_span_ieq(slot->buffer + name, colon - name, "content-length"))
+        {
+            uint32_t parsed = 0u;
+            if (value == end)
+                return -1;
+            for (uint32_t i = value; i < end; ++i)
+            {
+                uint32_t digit;
+                if (slot->buffer[i] < '0' || slot->buffer[i] > '9')
+                    return -1;
+                digit = (uint32_t)(slot->buffer[i] - '0');
+                if (parsed > (0xFFFFFFFFu - digit) / 10u)
+                    return -1;
+                parsed = parsed * 10u + digit;
+            }
+            content_length = parsed;
+            has_content_length = 1u;
+        }
+        line = end + 2u;
+    }
+
+    if (chunked)
+    {
+        uint32_t src = header_end;
+        uint32_t dst = 0u;
+        while (src < slot->raw_size)
+        {
+            uint32_t line_end = src;
+            uint32_t chunk;
+            uint8_t ok;
+            while (line_end + 1u < slot->raw_size &&
+                   !(slot->buffer[line_end] == '\r' && slot->buffer[line_end + 1u] == '\n'))
+                ++line_end;
+            if (line_end + 1u >= slot->raw_size)
+                return -1;
+            chunk = sacx_parse_hex(slot->buffer + src, line_end - src, &ok);
+            if (!ok)
+                return -1;
+            src = line_end + 2u;
+            if (!chunk)
+                break;
+            if (chunk > slot->raw_size - src || dst > slot->capacity ||
+                chunk > slot->capacity - dst)
+                return -1;
+            memmove(slot->buffer + dst, slot->buffer + src, chunk);
+            dst += chunk;
+            src += chunk;
+            if (src + 1u >= slot->raw_size || slot->buffer[src] != '\r' || slot->buffer[src + 1u] != '\n')
+                return -1;
+            src += 2u;
+        }
+        slot->body_size = dst;
+    }
+    else
+    {
+        slot->body_size = slot->raw_size - header_end;
+        if (has_content_length)
+        {
+            if (slot->body_size < content_length)
+                return -1;
+            slot->body_size = content_length;
+        }
+        memmove(slot->buffer, slot->buffer + header_end, slot->body_size);
+    }
+    slot->info.body_size = slot->body_size;
+    slot->info.truncated = slot->truncated;
+    return 0;
 }
 
 static void sacx_i32_to_text(int32_t value, char *out, uint32_t cap)
@@ -714,6 +1055,16 @@ static const char *G_known_imports[] = {
     "work_status",
     "work_wait",
     "work_cancel",
+    "net_request_start",
+    "net_request_status",
+    "net_response_info",
+    "net_response_read",
+    "net_request_cancel",
+    "net_request_release",
+    "img_load_memory",
+    "mem_alloc",
+    "mem_free",
+    "net_request_start_ex",
 };
 
 static int sacx_import_known(const char *name)
@@ -1530,6 +1881,43 @@ static void sacx_task_destroy_async_image_saves(sacx_task *task)
         sacx_async_image_save_release_slot(&task->image_saves[i]);
 }
 
+static void sacx_task_destroy_net_requests(sacx_task *task)
+{
+    if (!task)
+        return;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
+    {
+        sacx_net_request_slot *slot = &task->net_requests[i];
+        uint32_t status;
+        if (!slot->used)
+            continue;
+        status = kwork_status(slot->job_id);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+        {
+            __atomic_store_n(&slot->cancelled, 1u, __ATOMIC_RELEASE);
+            asm_dma_clean_range((const void *)&slot->cancelled, sizeof(slot->cancelled));
+            (void)kwork_cancel(slot->job_id);
+            continue;
+        }
+        if (slot->buffer && slot->pages)
+            pmem_free_pages(slot->buffer, slot->pages);
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
+static void sacx_task_destroy_memory(sacx_task *task)
+{
+    if (!task)
+        return;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_MEMORY_ALLOCS; ++i)
+    {
+        sacx_memory_slot *slot = &task->memory_allocs[i];
+        if (slot->used && slot->ptr && slot->pages)
+            pmem_free_pages(slot->ptr, slot->pages);
+        *slot = (sacx_memory_slot){0};
+    }
+}
+
 static void sacx_task_destroy_3d_scenes(sacx_task *task)
 {
     if (!task)
@@ -1590,6 +1978,8 @@ static void sacx_task_finish(sacx_task *task, int32_t status, const char *messag
     sacx_task_destroy_buttons(task);
     sacx_task_destroy_windows(task);
     sacx_task_destroy_images(task);
+    sacx_task_destroy_net_requests(task);
+    sacx_task_destroy_memory(task);
     if (!worker_active)
         sacx_task_destroy_async_image_saves(task);
 
@@ -2296,6 +2686,309 @@ static int sacx_api_work_wait(uint32_t job_id, uint64_t spin_limit)
 static int sacx_api_work_cancel(uint32_t job_id)
 {
     return kwork_cancel(job_id);
+}
+
+static sacx_net_request_slot *sacx_net_slot_from_id(sacx_task *task, uint32_t request_id)
+{
+    if (!task || !request_id || request_id > SACX_MAX_TASK_NET_REQUESTS)
+        return 0;
+    sacx_net_request_slot *slot = &task->net_requests[request_id - 1u];
+    return slot->used ? slot : 0;
+}
+
+static void sacx_net_request_worker(void *ctx)
+{
+    sacx_net_request_slot *slot = (sacx_net_request_slot *)ctx;
+    char current_url[768];
+    char location[768];
+    char next_url[768];
+    uint32_t redirects = 0u;
+    int rc = -1;
+    if (!slot || !slot->used || !slot->buffer)
+        return;
+    sacx_copy_trunc(current_url, sizeof(current_url), slot->url);
+    __atomic_store_n(&slot->status, SACX_NET_STATUS_LOADING, __ATOMIC_RELEASE);
+    for (;;)
+    {
+        if (__atomic_load_n(&slot->cancelled, __ATOMIC_ACQUIRE))
+        {
+            __atomic_store_n(&slot->status, SACX_NET_STATUS_CANCELLED, __ATOMIC_RELEASE);
+            asm_dma_clean_range(slot, sizeof(*slot));
+            return;
+        }
+        slot->raw_size = 0u;
+        slot->body_size = 0u;
+        slot->truncated = 0u;
+        memset(&slot->info, 0, sizeof(slot->info));
+        rc = knet_usb_fetch_request(current_url, slot->method,
+                                    slot->request_body, slot->request_body_size,
+                                    slot->content_type, slot->buffer, slot->capacity,
+                                    &slot->raw_size, &slot->truncated, &slot->cancelled,
+                                    slot->timeout_ms);
+        if (__atomic_load_n(&slot->cancelled, __ATOMIC_ACQUIRE))
+        {
+            __atomic_store_n(&slot->status, SACX_NET_STATUS_CANCELLED, __ATOMIC_RELEASE);
+            asm_dma_clean_range(slot, sizeof(*slot));
+            return;
+        }
+        if (rc != 0)
+        {
+            sacx_copy_trunc(slot->info.error, sizeof(slot->info.error),
+                            rc == -4 ? "network request timed out" : "network request failed");
+            slot->info.status = SACX_NET_STATUS_FAILED;
+            __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
+            asm_dma_clean_range(slot, sizeof(*slot));
+            return;
+        }
+        if (sacx_net_parse_response(slot, location, sizeof(location)) != 0)
+        {
+            sacx_copy_trunc(slot->info.error, sizeof(slot->info.error), "malformed HTTP response");
+            slot->info.status = SACX_NET_STATUS_FAILED;
+            __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
+            asm_dma_clean_range(slot, sizeof(*slot));
+            return;
+        }
+        if ((slot->info.http_status == 301u || slot->info.http_status == 302u ||
+             slot->info.http_status == 303u || slot->info.http_status == 307u ||
+             slot->info.http_status == 308u) && location[0])
+        {
+            if (redirects++ >= slot->redirect_limit ||
+                sacx_url_resolve(current_url, location, next_url, sizeof(next_url)) != 0)
+            {
+                sacx_copy_trunc(slot->info.error, sizeof(slot->info.error), "HTTP redirect limit or URL error");
+                slot->info.status = SACX_NET_STATUS_FAILED;
+                __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
+                asm_dma_clean_range(slot, sizeof(*slot));
+                return;
+            }
+            sacx_copy_trunc(current_url, sizeof(current_url), next_url);
+            if ((slot->info.http_status == 301u || slot->info.http_status == 302u ||
+                 slot->info.http_status == 303u) && strcmp(slot->method, "POST") == 0)
+            {
+                sacx_copy_trunc(slot->method, sizeof(slot->method), "GET");
+                slot->request_body_size = 0u;
+            }
+            continue;
+        }
+        sacx_copy_trunc(slot->info.final_url, sizeof(slot->info.final_url), current_url);
+        slot->info.tls_unverified = strncmp(current_url, "https://", 8u) == 0 ? 1u : 0u;
+        slot->info.status = SACX_NET_STATUS_DONE;
+        asm_dma_clean_range(slot->buffer, slot->body_size);
+        __atomic_store_n(&slot->status, SACX_NET_STATUS_DONE, __ATOMIC_RELEASE);
+        asm_dma_clean_range(slot, sizeof(*slot));
+        return;
+    }
+}
+
+static int sacx_api_net_request_start_ex(const sacx_net_request_desc_ex *desc, uint32_t *out_request_id)
+{
+    sacx_net_request_slot *slot = 0;
+    uint32_t capacity;
+    if (out_request_id)
+        *out_request_id = 0u;
+    if (!G_current_task || !desc || !desc->url || !desc->url[0] || !out_request_id ||
+        desc->body_size > 4096u || (desc->body_size && !desc->body))
+        return -1;
+    for (uint32_t t = 0u; t < SACX_MAX_TASKS; ++t)
+        for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
+        {
+            uint32_t status = __atomic_load_n(&G_tasks[t].net_requests[i].status, __ATOMIC_ACQUIRE);
+            if (G_tasks[t].net_requests[i].used &&
+                (status == SACX_NET_STATUS_QUEUED || status == SACX_NET_STATUS_LOADING))
+                return -2;
+        }
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
+        if (!G_current_task->net_requests[i].used)
+        {
+            slot = &G_current_task->net_requests[i];
+            memset(slot, 0, sizeof(*slot));
+            slot->used = 1u;
+            slot->id = i + 1u;
+            break;
+        }
+    if (!slot)
+        return -3;
+    capacity = desc->max_response_bytes ? desc->max_response_bytes : SACX_NET_DEFAULT_BYTES;
+    if (capacity < 4096u)
+        capacity = 4096u;
+    if (capacity > SACX_NET_MAX_BYTES)
+        capacity = SACX_NET_MAX_BYTES;
+    slot->pages = ((uint64_t)capacity + 4095ull) >> 12;
+    slot->buffer = (uint8_t *)pmem_alloc_pages(slot->pages);
+    if (!slot->buffer)
+    {
+        memset(slot, 0, sizeof(*slot));
+        return -4;
+    }
+    slot->capacity = capacity;
+    slot->redirect_limit = desc->redirect_limit > 10u ? 10u : desc->redirect_limit;
+    if (!slot->redirect_limit)
+        slot->redirect_limit = 5u;
+    slot->timeout_ms = desc->timeout_ms;
+    if (slot->timeout_ms < 1000u)
+        slot->timeout_ms = 45000u;
+    if (slot->timeout_ms > 120000u)
+        slot->timeout_ms = 120000u;
+    sacx_copy_trunc(slot->url, sizeof(slot->url), desc->url);
+    sacx_copy_trunc(slot->method, sizeof(slot->method), desc->method && desc->method[0] ? desc->method : "GET");
+    sacx_copy_trunc(slot->content_type, sizeof(slot->content_type),
+                    desc->content_type && desc->content_type[0] ? desc->content_type : "application/x-www-form-urlencoded");
+    slot->request_body_size = desc->body_size;
+    if (desc->body_size)
+        memcpy(slot->request_body, desc->body, desc->body_size);
+    __atomic_store_n(&slot->status, SACX_NET_STATUS_QUEUED, __ATOMIC_RELEASE);
+    asm_dma_clean_range(slot, sizeof(*slot));
+
+    /* xHCI controller state is currently main-core-owned. Run the shared
+       request implementation inline until USB transfers are cooperative. */
+    slot->job_id = 0u;
+    sacx_net_request_worker(slot);
+    *out_request_id = slot->id;
+    return 0;
+}
+
+static int sacx_api_net_request_start(const sacx_net_request_desc *desc, uint32_t *out_request_id)
+{
+    sacx_net_request_desc_ex extended;
+    if (!desc)
+        return -1;
+    memset(&extended, 0, sizeof(extended));
+    extended.url = desc->url;
+    extended.max_response_bytes = desc->max_response_bytes;
+    extended.timeout_ms = desc->timeout_ms;
+    extended.redirect_limit = desc->redirect_limit;
+    extended.method = "GET";
+    return sacx_api_net_request_start_ex(&extended, out_request_id);
+}
+
+static uint32_t sacx_api_net_request_status(uint32_t request_id)
+{
+    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
+    if (!slot)
+        return SACX_NET_STATUS_EMPTY;
+    if (slot->job_id)
+    {
+        uint32_t worker_status = kwork_status(slot->job_id);
+        if (worker_status == KWORK_STATUS_DONE || worker_status == KWORK_STATUS_FAILED)
+            asm_dma_invalidate_range(slot, sizeof(*slot));
+    }
+    return __atomic_load_n(&slot->status, __ATOMIC_ACQUIRE);
+}
+
+static int sacx_api_net_response_info(uint32_t request_id, sacx_net_response_info *out_info)
+{
+    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
+    if (!slot || !out_info)
+        return -1;
+    if (slot->job_id)
+    {
+        uint32_t worker_status = kwork_status(slot->job_id);
+        if (worker_status == KWORK_STATUS_DONE || worker_status == KWORK_STATUS_FAILED)
+            asm_dma_invalidate_range(slot, sizeof(*slot));
+    }
+    *out_info = slot->info;
+    out_info->status = __atomic_load_n(&slot->status, __ATOMIC_ACQUIRE);
+    return 0;
+}
+
+static int sacx_api_net_response_read(uint32_t request_id, uint32_t offset, void *dst,
+                                      uint32_t capacity, uint32_t *out_read)
+{
+    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
+    uint32_t take;
+    if (out_read)
+        *out_read = 0u;
+    if (!slot || !dst || !out_read ||
+        __atomic_load_n(&slot->status, __ATOMIC_ACQUIRE) != SACX_NET_STATUS_DONE)
+        return -1;
+    if (offset >= slot->body_size)
+        return 0;
+    take = slot->body_size - offset;
+    if (take > capacity)
+        take = capacity;
+    asm_dma_invalidate_range(slot->buffer + offset, take);
+    memcpy(dst, slot->buffer + offset, take);
+    *out_read = take;
+    return 0;
+}
+
+static int sacx_api_net_request_cancel(uint32_t request_id)
+{
+    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
+    if (!slot)
+        return -1;
+    __atomic_store_n(&slot->cancelled, 1u, __ATOMIC_RELEASE);
+    asm_dma_clean_range((const void *)&slot->cancelled, sizeof(slot->cancelled));
+    (void)kwork_cancel(slot->job_id);
+    if (__atomic_load_n(&slot->status, __ATOMIC_ACQUIRE) == SACX_NET_STATUS_QUEUED)
+    {
+        __atomic_store_n(&slot->status, SACX_NET_STATUS_CANCELLED, __ATOMIC_RELEASE);
+        asm_dma_clean_range((const void *)&slot->status, sizeof(slot->status));
+    }
+    return 0;
+}
+
+static int sacx_api_net_request_release(uint32_t request_id)
+{
+    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
+    uint32_t status;
+    if (!slot)
+        return -1;
+    status = __atomic_load_n(&slot->status, __ATOMIC_ACQUIRE);
+    if (status == SACX_NET_STATUS_QUEUED || status == SACX_NET_STATUS_LOADING)
+        return -2;
+    if (slot->buffer && slot->pages)
+        pmem_free_pages(slot->buffer, slot->pages);
+    memset(slot, 0, sizeof(*slot));
+    return 0;
+}
+
+static int sacx_api_mem_alloc(uint32_t size, void **out_ptr)
+{
+    uint64_t pages;
+    uint64_t total_pages = 0u;
+    sacx_memory_slot *free_slot = 0;
+    void *ptr;
+    if (out_ptr)
+        *out_ptr = 0;
+    if (!G_current_task || !out_ptr || !size || size > SACX_MAX_TASK_MEMORY_BYTES)
+        return -1;
+    pages = ((uint64_t)size + 4095ull) >> 12;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_MEMORY_ALLOCS; ++i)
+    {
+        sacx_memory_slot *slot = &G_current_task->memory_allocs[i];
+        if (slot->used)
+            total_pages += slot->pages;
+        else if (!free_slot)
+            free_slot = slot;
+    }
+    if (!free_slot || total_pages + pages > (SACX_MAX_TASK_MEMORY_BYTES >> 12))
+        return -2;
+    ptr = pmem_alloc_pages(pages);
+    if (!ptr)
+        return -3;
+    memset(ptr, 0, (size_t)(pages << 12));
+    free_slot->used = 1u;
+    free_slot->pages = pages;
+    free_slot->ptr = ptr;
+    *out_ptr = ptr;
+    return 0;
+}
+
+static int sacx_api_mem_free(void *ptr)
+{
+    if (!G_current_task || !ptr)
+        return -1;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_MEMORY_ALLOCS; ++i)
+    {
+        sacx_memory_slot *slot = &G_current_task->memory_allocs[i];
+        if (!slot->used || slot->ptr != ptr)
+            continue;
+        pmem_free_pages(slot->ptr, slot->pages);
+        *slot = (sacx_memory_slot){0};
+        return 0;
+    }
+    return -1;
 }
 
 static uint64_t sacx_api_time_ticks(void)
@@ -4079,19 +4772,19 @@ static uint32_t sacx_api_text_measure_line_px(const char *text, uint32_t scale, 
 {
     if (!G_runtime_font || !text || scale == 0u)
         return 0u;
-    return ktext_measure_line_px(G_runtime_font, text, sacx_ui_text(scale), sacx_ui_spacing(char_spacing));
+    return sacx_ui_unscale_u32(ktext_measure_line_px(G_runtime_font, text, sacx_ui_text(scale), sacx_ui_spacing(char_spacing)));
 }
 
 static uint32_t sacx_api_text_line_height(uint32_t scale, int32_t line_spacing)
 {
     if (!G_runtime_font || scale == 0u)
         return 0u;
-    return ktext_line_height(G_runtime_font, sacx_ui_text(scale), sacx_ui_spacing(line_spacing));
+    return sacx_ui_unscale_u32(ktext_line_height(G_runtime_font, sacx_ui_text(scale), sacx_ui_spacing(line_spacing)));
 }
 
 static uint32_t sacx_api_text_scale_mul_px(uint32_t px, uint32_t scale)
 {
-    return ktext_scale_mul_px(px, sacx_ui_text(scale ? scale : 1u));
+    return sacx_ui_unscale_u32(ktext_scale_mul_px(px, sacx_ui_text(scale ? scale : 1u)));
 }
 
 static uint64_t sacx_task_image_bytes(const sacx_task *task);
@@ -4234,6 +4927,24 @@ static int sacx_api_img_load_jpg(const char *path, uint32_t *out_image_handle)
         return -1;
     }
     return 0;
+}
+
+static int sacx_api_img_load_memory(const void *data, uint32_t size, uint32_t *out_image_handle)
+{
+    kimg image = {0};
+    uint64_t bytes;
+    uint64_t pages;
+    if (!data || !size || !out_image_handle)
+        return -1;
+    if (kimg_load_memory(&image, data, size) != 0)
+        return -1;
+    if (sacx_api_img_register_loaded(&image, out_image_handle) == 0)
+        return 0;
+    bytes = (uint64_t)image.w * image.h * 4ull;
+    pages = (bytes + 4095ull) >> 12;
+    if (image.px && pages)
+        pmem_free_pages(image.px, pages);
+    return -1;
 }
 
 static int sacx_api_img_draw(uint32_t image_handle, int32_t x, int32_t y, uint8_t alpha)
@@ -5437,6 +6148,16 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.work_status = sacx_api_work_status;
     task->api.work_wait = sacx_api_work_wait;
     task->api.work_cancel = sacx_api_work_cancel;
+    task->api.net_request_start = sacx_api_net_request_start;
+    task->api.net_request_status = sacx_api_net_request_status;
+    task->api.net_response_info = sacx_api_net_response_info;
+    task->api.net_response_read = sacx_api_net_response_read;
+    task->api.net_request_cancel = sacx_api_net_request_cancel;
+    task->api.net_request_release = sacx_api_net_request_release;
+    task->api.img_load_memory = sacx_api_img_load_memory;
+    task->api.mem_alloc = sacx_api_mem_alloc;
+    task->api.mem_free = sacx_api_mem_free;
+    task->api.net_request_start_ex = sacx_api_net_request_start_ex;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -5796,6 +6517,7 @@ extern "C" int sacx_runtime_task_release(uint32_t task_id)
         pmem_free_executable_pages(task->arena, task->arena_size / 4096u);
         task->arena = 0;
     }
+    sacx_task_destroy_net_requests(task);
     sacx_task_reset(task);
     return 0;
 }

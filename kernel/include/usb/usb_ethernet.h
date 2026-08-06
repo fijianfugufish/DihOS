@@ -27,9 +27,13 @@ int usb_ethernet_probe_multi(const uint64_t *xhci_mmio_hints,
 uint32_t usb_ethernet_online(void);
 void usb_ethernet_get_status(usb_ethernet_status *out_status);
 int usb_ethernet_get_mac(uint8_t out_mac[6]);
+int usb_ethernet_prepare_receive(void);
 int usb_ethernet_send_frame(const void *frame, uint32_t len);
 int usb_ethernet_recv_frame(void *frame, uint32_t cap, uint32_t *out_len);
 uint32_t usb_ethernet_pending_frames(void);
+void usb_ethernet_discard_pending_frames(void);
+int usb_ethernet_recover_receive(void);
+int usb_ethernet_restart_receive(void);
 
 #ifdef __cplusplus
 }

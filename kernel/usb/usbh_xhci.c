@@ -39,6 +39,12 @@
 #ifndef TRB_TYPE_EVALUATE_CTX
 #define TRB_TYPE_EVALUATE_CTX 13
 #endif
+#ifndef TRB_TYPE_STOP_EP
+#define TRB_TYPE_STOP_EP 15
+#endif
+#ifndef TRB_TYPE_SET_TR_DEQ
+#define TRB_TYPE_SET_TR_DEQ 16
+#endif
 #ifndef TRB_TYPE_SETUP_STAGE
 #define TRB_TYPE_SETUP_STAGE 2
 #endif
@@ -123,6 +129,12 @@ static uint64_t g_expect_trbptr = 0;
 static uint8_t g_expect_slot = 0;
 static uint8_t g_expect_epid = 0;
 static uint8_t g_expect_valid = 0;
+static volatile uint32_t g_background_network_busy = 0u;
+
+void usbh_background_network_set(uint32_t busy)
+{
+    __atomic_store_n(&g_background_network_busy, busy ? 1u : 0u, __ATOMIC_RELEASE);
+}
 
 static volatile uint32_t g_expect_mismatch = 0; // count of ignored Transfer Events
 static volatile uint32_t g_expect_last_bad_epid = 0;
@@ -350,6 +362,9 @@ typedef struct
     uint8_t in_use;
 } xhci_saved_state_t;
 
+#define XHCI_TRANSFER_RING_TRBS 1024u
+#define XHCI_EVENT_RING_TRBS 1024u
+
 static xhci_t G;
 static uint8_t g_xhci_initialized = 0;
 static uint8_t g_claimed_ports[256];
@@ -499,6 +514,53 @@ typedef struct
 {
     uint32_t d0, d1, d2, d3;
 } trb_t;
+
+#define XHCI_DEFERRED_XFER_COUNT 16u
+static trb_t g_deferred_xfers[XHCI_DEFERRED_XFER_COUNT];
+static uint8_t g_deferred_xfer_used;
+
+static void deferred_xfer_store(const trb_t *event)
+{
+    if (!event)
+        return;
+    if (g_deferred_xfer_used == XHCI_DEFERRED_XFER_COUNT)
+    {
+        for (uint32_t i = 1u; i < XHCI_DEFERRED_XFER_COUNT; ++i)
+            g_deferred_xfers[i - 1u] = g_deferred_xfers[i];
+        --g_deferred_xfer_used;
+    }
+    g_deferred_xfers[g_deferred_xfer_used++] = *event;
+}
+
+static int deferred_xfer_take(uint8_t slot, uint8_t epid, uint64_t trbptr, trb_t *out)
+{
+    uint64_t expected = trbptr & ~0xFULL;
+    for (uint32_t i = 0u; i < g_deferred_xfer_used; ++i)
+    {
+        trb_t event = g_deferred_xfers[i];
+        uint64_t event_ptr = (((uint64_t)event.d1 << 32) | event.d0) & ~0xFULL;
+        uint8_t event_epid = (uint8_t)((event.d3 >> 16) & 0x1Fu);
+        uint8_t event_slot = (uint8_t)((event.d3 >> 24) & 0xFFu);
+        if (event_slot != slot || event_epid != epid || event_ptr != expected)
+            continue;
+        if (out)
+            *out = event;
+        for (uint32_t k = i + 1u; k < g_deferred_xfer_used; ++k)
+            g_deferred_xfers[k - 1u] = g_deferred_xfers[k];
+        --g_deferred_xfer_used;
+        return 1;
+    }
+    return 0;
+}
+
+static void deferred_xfer_drop(uint8_t slot, uint8_t epid, uint64_t trbptr)
+{
+    trb_t ignored;
+    while (deferred_xfer_take(slot, epid, trbptr, &ignored))
+    {
+    }
+}
+
 static trb_t *ring_next(trb_t *ring, uint32_t size, uint32_t *enq, uint8_t *cycle)
 {
     uint32_t i = *enq;
@@ -681,6 +743,10 @@ static int wait_event_type(uint32_t expect_type, uint32_t timeout_ms, trb_t *out
     else
         dot(195, 0xFF0000u);
 
+    if (expect_type == 32u && g_expect_valid &&
+        deferred_xfer_take(g_expect_slot, g_expect_epid, g_expect_trbptr, out))
+        return 0;
+
     for (uint32_t t = 0; t < ticks; t++)
     {
         trb_t *e = &ring[idx];
@@ -760,8 +826,14 @@ static int wait_event_type(uint32_t expect_type, uint32_t timeout_ms, trb_t *out
                         g_expect_last_bad_ptr_lo = (uint32_t)ev_ptr_m;
                         g_expect_last_bad_ptr_hi = (uint32_t)(ev_ptr_m >> 32);
 
+                        deferred_xfer_store(&cur);
                         continue;
                     }
+                }
+                else if (expect_type != 32u)
+                {
+                    deferred_xfer_store(&cur);
+                    continue;
                 }
 
                 if (cc == 1u)
@@ -1092,7 +1164,7 @@ static int xhci_reset_start(void)
 /* --- ring initializers --------------------------------------------------- */
 static void ring_init_xfer_or_cmd(uint64_t *base, uint32_t *size)
 {
-    const uint32_t N = 256;
+    const uint32_t N = XHCI_TRANSFER_RING_TRBS;
     trb_t *r = (trb_t *)alloc_dma((uint64_t)N * sizeof(trb_t));
     if (!r)
     {
@@ -1176,8 +1248,9 @@ static int init_event_ring(void)
     // We program the controller with the same address because your bring-up
     // is currently identity-mapped for low DMA.
 
+    const uint32_t event_bytes = XHCI_EVENT_RING_TRBS * (uint32_t)sizeof(trb_t);
     void *erst_v = alloc_dma(4096);
-    void *ers_v = alloc_dma(4096);
+    void *ers_v = alloc_dma(event_bytes);
 
     if (!erst_v || !ers_v)
         return -1;
@@ -1187,11 +1260,11 @@ static int init_event_ring(void)
 
     // Clear ring + ERST
     memset(erst_v, 0, 4096);
-    memset(ers_v, 0, 4096);
+    memset(ers_v, 0, event_bytes);
 
     // Event ring segment state
     G.ev.evt_base = ers;
-    G.ev.size = (uint32_t)(4096 / sizeof(trb_t));
+    G.ev.size = XHCI_EVENT_RING_TRBS;
     G.ev.deq = 0;
     G.ev.cycle = 1; // CCS starts at 1
 
@@ -1202,7 +1275,7 @@ static int init_event_ring(void)
 
     // Flush DMA structures before telling controller
     dma_flush(erst_v, 4096);
-    dma_flush(ers_v, 4096);
+    dma_flush(ers_v, event_bytes);
 
     // Program Interrupter 0 registers (Runtime offset + 0x20)
     uintptr_t rt = (uintptr_t)(G.mmio_base + (G.R.cap->RTSOFF & ~0x1Fu));
@@ -2115,7 +2188,7 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
     trb_t *ring = (trb_t *)(uintptr_t)G.ctrl_tr;
 
     /* ---------- SETUP STAGE ---------- */
-    trb_t *st = ring_next(ring, 256, &G.ctrl_enq, &G.ctrl_cycle);
+    trb_t *st = ring_next(ring, XHCI_TRANSFER_RING_TRBS, &G.ctrl_enq, &G.ctrl_cycle);
 
     uint64_t setup = pack_setup(bm, br, wValue, wIndex, wLen);
     st->d0 = (uint32_t)setup;
@@ -2144,7 +2217,7 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
         if ((bm & USB_DIR_IN) == 0)
             dma_flush(data, wLen);
 
-        trb_t *dt = ring_next(ring, 256, &G.ctrl_enq, &G.ctrl_cycle);
+        trb_t *dt = ring_next(ring, XHCI_TRANSFER_RING_TRBS, &G.ctrl_enq, &G.ctrl_cycle);
         uint64_t p = (uint64_t)(uintptr_t)data;
 
         dt->d0 = (uint32_t)p;
@@ -2160,7 +2233,7 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
     }
 
     /* ---------- STATUS STAGE ---------- */
-    trb_t *ss = ring_next(ring, 256, &G.ctrl_enq, &G.ctrl_cycle);
+    trb_t *ss = ring_next(ring, XHCI_TRANSFER_RING_TRBS, &G.ctrl_enq, &G.ctrl_cycle);
 
     /* Status direction is opposite of data stage.
        If no data stage, status is IN. */
@@ -2177,7 +2250,7 @@ static int control_xfer(uint8_t bm, uint8_t br, uint16_t wValue, uint16_t wIndex
     dot(42, C_CY);
 
     /* Make TRBs visible */
-    dma_flush((void *)(uintptr_t)G.ctrl_tr, 256 * sizeof(trb_t));
+    dma_flush((void *)(uintptr_t)G.ctrl_tr, XHCI_TRANSFER_RING_TRBS * sizeof(trb_t));
     mmio_wmb();
 
     /* Ring EP0 (DCI=1) */
@@ -3795,9 +3868,6 @@ static int hub_power_reset_port(usbh_dev_t *hub, uint8_t port, uint32_t *out_sta
     terminal_print_inline_hex8(port);
     terminal_print("");
 
-    (void)hub_port_set_feature(hub, port, 8u); /* PORT_POWER */
-    mdelay(120);
-
     if (hub_port_get_status(hub, port, &st) != 0)
     {
         terminal_warn("hub enum: port status failed");
@@ -4054,6 +4124,11 @@ static int enumerate_cdc_ethernet_via_hub(usbh_dev_t *D,
     terminal_print_inline("hub enum: downstream ports ");
     terminal_print_inline_hex8(ports);
     terminal_print("");
+
+    /* Power every downstream port together, then pay the power-good delay once. */
+    for (uint8_t port = 1u; port <= ports; ++port)
+        (void)hub_port_set_feature(&hub, port, 8u); /* PORT_POWER */
+    mdelay(120);
 
     for (uint8_t port = 1u; port <= ports; ++port)
     {
@@ -4450,7 +4525,7 @@ static trb_t *post_normal_trb(uint64_t ring_pa,
                               uint32_t len)
 {
     trb_t *ring = (trb_t *)(uintptr_t)ring_pa;
-    trb_t *t = ring_next(ring, 256, enq, cycle);
+    trb_t *t = ring_next(ring, XHCI_TRANSFER_RING_TRBS, enq, cycle);
 
     uint64_t p = (uint64_t)(uintptr_t)buf;
 
@@ -4500,7 +4575,8 @@ int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *go
     usbh_dbg_dot(161, 0xFFFF00u);
 
     trb_t *t = post_normal_trb((uint64_t)G.bulk_out_tr, &G.bout_enq, &G.bout_cycle, (void *)buf, len);
-    dma_flush((void *)(uintptr_t)G.bulk_out_tr, 256 * sizeof(trb_t));
+    dma_flush((void *)(uintptr_t)G.bulk_out_tr,
+              XHCI_TRANSFER_RING_TRBS * sizeof(trb_t));
     usbh_dbg_dot(162, 0xFFFF00u);
 
     // Expect exact Transfer Event for this TRB
@@ -4593,7 +4669,8 @@ int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *g
         usbh_dbg_dot(171, 0xFFFF00u);
 
         t = post_normal_trb((uint64_t)G.bulk_in_tr, &G.bin_enq, &G.bin_cycle, buf, len);
-        dma_flush((void *)(uintptr_t)G.bulk_in_tr, 256 * sizeof(trb_t));
+        dma_flush((void *)(uintptr_t)G.bulk_in_tr,
+                  XHCI_TRANSFER_RING_TRBS * sizeof(trb_t));
         usbh_dbg_dot(172, 0xFFFF00u);
 
         d->bulk_in_pending_buf = buf;
@@ -4672,6 +4749,95 @@ int usbh_bulk_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
     return usbh_bulk_in_got_timeout(d, buf, len, got, 12000u);
 }
 
+int usbh_bulk_in_cancel_pending(usbh_dev_t *d)
+{
+    trb_t *command_ring;
+    trb_t *command;
+    trb_t event;
+    uint8_t epid;
+    uint64_t old_trbptr;
+    uint64_t dequeue;
+    uint32_t cc;
+
+    if (!d || !d->configured)
+        return -1;
+    if (dev_state_load(d) != 0)
+        return -1;
+
+    epid = dci_from_ep(d->ep_bulk_in, 1);
+    old_trbptr = d->bulk_in_pending_trbptr;
+    command_ring = (trb_t *)(uintptr_t)G.cmd.base;
+
+    command = ring_next(command_ring, G.cmd.size, &G.cmd.enq, &G.cmd.cycle);
+    command->d0 = 0u;
+    command->d1 = 0u;
+    command->d2 = 0u;
+    command->d3 = (TRB_TYPE_STOP_EP << 10) | (G.cmd.cycle & 1u) |
+                  ((uint32_t)epid << 16) | ((G.slot_id & 0xFFu) << 24);
+    dma_flush(command_ring, (uint64_t)G.cmd.size * sizeof(trb_t));
+    mmio_wmb();
+    ring_cmd_db();
+    if (wait_cmd_complete(2000u, &event) != 0)
+        goto failed;
+    cc = (event.d2 >> 24) & 0xFFu;
+    if (cc != 1u)
+        goto failed;
+
+    dequeue = ((uint64_t)G.bulk_in_tr + (uint64_t)G.bin_enq * sizeof(trb_t)) |
+              (uint64_t)(G.bin_cycle & 1u);
+    command = ring_next(command_ring, G.cmd.size, &G.cmd.enq, &G.cmd.cycle);
+    command->d0 = (uint32_t)dequeue;
+    command->d1 = (uint32_t)(dequeue >> 32);
+    command->d2 = 0u;
+    command->d3 = (TRB_TYPE_SET_TR_DEQ << 10) | (G.cmd.cycle & 1u) |
+                  ((uint32_t)epid << 16) | ((G.slot_id & 0xFFu) << 24);
+    dma_flush(command_ring, (uint64_t)G.cmd.size * sizeof(trb_t));
+    mmio_wmb();
+    ring_cmd_db();
+    if (wait_cmd_complete(2000u, &event) != 0)
+        goto failed;
+    cc = (event.d2 >> 24) & 0xFFu;
+    if (cc != 1u)
+        goto failed;
+
+    deferred_xfer_drop((uint8_t)G.slot_id, epid, old_trbptr);
+    d->bulk_in_pending_active = 0u;
+    d->bulk_in_pending_trbptr = 0u;
+    d->bulk_in_pending_buf = 0;
+    d->bulk_in_pending_len = 0u;
+    dev_state_save(d);
+    return 0;
+
+failed:
+    dev_state_save(d);
+    return -1;
+}
+
+int usbh_bulk_in_debug_state(usbh_dev_t *d, uint32_t *endpoint_state,
+                             uint32_t *dci, uint32_t *enqueue,
+                             uint32_t *cycle, uint32_t *pending)
+{
+    uint8_t epid;
+    uint32_t *context;
+    if (!d || !d->configured || dev_state_load(d) != 0)
+        return -1;
+    epid = dci_from_ep(d->ep_bulk_in, 1);
+    context = (uint32_t *)((uint8_t *)(uintptr_t)G.dev_ctx + (uint32_t)epid * G_ctx_stride);
+    dma_invalidate(context, G_ctx_stride);
+    if (endpoint_state)
+        *endpoint_state = context[0] & 7u;
+    if (dci)
+        *dci = epid;
+    if (enqueue)
+        *enqueue = G.bin_enq;
+    if (cycle)
+        *cycle = G.bin_cycle;
+    if (pending)
+        *pending = d->bulk_in_pending_active ? 1u : 0u;
+    dev_state_save(d);
+    return 0;
+}
+
 // Legacy API: strict exact-length
 int usbh_bulk_in(usbh_dev_t *d, void *buf, uint32_t len)
 {
@@ -4692,6 +4858,8 @@ int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
     if (!d || !d->configured || !buf || len == 0 || !d->ep_intr_in)
         return -1;
 
+    if (__atomic_load_n(&g_background_network_busy, __ATOMIC_ACQUIRE))
+        return 1;
     if (dev_state_load(d) != 0)
         return -1;
 
@@ -4725,7 +4893,8 @@ int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 
         dma_invalidate(d->intr_buf, xfer_len);
         t = post_normal_trb((uint64_t)G.intr_in_tr, &G.iin_enq, &G.iin_cycle, d->intr_buf, xfer_len);
-        dma_flush((void *)(uintptr_t)G.intr_in_tr, 256 * sizeof(trb_t));
+        dma_flush((void *)(uintptr_t)G.intr_in_tr,
+                  XHCI_TRANSFER_RING_TRBS * sizeof(trb_t));
 
         d->intr_pending_trbptr = (uint64_t)(uintptr_t)t;
         d->intr_pending_active = 1;

@@ -11,6 +11,7 @@ linux-firmware/
 !build.ps1
 !build_sacx_app.ps1
 !test_image_editor.ps1
+!test_dihscover.ps1
 
 # Ignore specific files
 efi_main.S

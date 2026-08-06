@@ -331,6 +331,13 @@ static std::vector<std::string> default_imports()
         "window_close_requested",
         "window_close_accept",
         "window_close_cancel",
+        "net_request_start",
+        "net_request_status",
+        "net_response_info",
+        "net_response_read",
+        "net_request_cancel",
+        "net_request_release",
+        "img_load_memory",
     };
 }
 

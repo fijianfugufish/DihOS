@@ -1378,7 +1378,10 @@ void kwindow_update_all(void)
             cursor_shape = kwindow_cursor_for_resize_edges(hover_resize_edges);
     }
 
-    (void)kmouse_set_cursor(cursor_shape);
+    /* Hover handlers run later in the frame, so retain their requested shape
+       long enough for the next render instead of erasing it immediately. */
+    if (cursor_shape != KMOUSE_CURSOR_ARROW || kmouse_current_cursor() == KMOUSE_CURSOR_ARROW)
+        (void)kmouse_set_cursor(cursor_shape);
 
     if (!left_down)
     {

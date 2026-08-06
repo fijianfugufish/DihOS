@@ -11,8 +11,10 @@
 #define EDITOR_TEXT_CAP 96u
 #define EDITOR_PATH_CAP 256u
 
+#ifndef SACX_API_HAS
 #define SACX_API_HAS(api, member) \
     ((api) && (api)->struct_size >= offsetof(sacx_api, member) + sizeof((api)->member) && (api)->member)
+#endif
 
 enum editor_layer_type
 {

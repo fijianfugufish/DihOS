@@ -13,6 +13,10 @@ param(
 
   [string]$Imports = "",
 
+  [string[]]$IncludeDir = @(),
+
+  [string[]]$Define = @(),
+
   [ValidateSet("Release","Debug")]
   [string]$Config = "Release",
 
@@ -38,6 +42,7 @@ if (Test-Path (Join-Path $llvm "clang++.exe")) {
 }
 
 $clangxx = "clang++.exe"
+$clang = "clang.exe"
 $ld = "ld.lld"
 
 $sdkInc = Join-Path $ProjectRoot "sdk\sacx\include"
@@ -62,18 +67,32 @@ New-Item -Force -ItemType Directory -Path $buildDir,$objDir | Out-Null
 New-Item -Force -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($elfOutAA64)),([System.IO.Path]::GetDirectoryName($elfOutX64)),([System.IO.Path]::GetDirectoryName($sacxOut)) | Out-Null
 
 $opt = if ($Config -eq "Release") { "-O2" } else { "-O0" }
+$extraIncludes = @(
+  foreach ($includeItem in $IncludeDir) {
+    $includePath = if ([System.IO.Path]::IsPathRooted($includeItem)) { $includeItem } else { Join-Path $ProjectRoot $includeItem }
+    "-I"
+    (Resolve-Path -LiteralPath $includePath).Path
+  }
+)
+$extraDefines = @(
+  foreach ($defineItem in $Define) { "-D$defineItem" }
+)
 
 Write-Host "== Compile AA64 objects ==" -ForegroundColor Cyan
 for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
 {
   $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
   $obj = Join-Path $objDir ("app_aa64_{0}_{1}.o" -f $i, $baseName)
-  & $clangxx `
+  $isC = [System.IO.Path]::GetExtension($SourcePaths[$i]).ToLowerInvariant() -eq ".c"
+  $compiler = if ($isC) { $clang } else { $clangxx }
+  $language = if ($isC) { "-std=c11" } else { "-std=c++17" }
+  & $compiler `
     "-target" "aarch64-unknown-none-elf" `
     "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
-    "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
+    "-fPIE" $language `
+    $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
     $opt "-g" `
-    "-I" $sdkInc `
+    "-I" $sdkInc $extraIncludes $extraDefines `
     "-c" $SourcePaths[$i] "-o" $obj
   if ($LASTEXITCODE) { throw "AA64 clang++ failed on $($SourcePaths[$i])" }
   $objAA64 += $obj
@@ -83,7 +102,10 @@ Write-Host "== Link AA64 ELF ==" -ForegroundColor Cyan
 if (Test-Path -LiteralPath $elfOutAA64) {
   Remove-Item -LiteralPath $elfOutAA64 -Force
 }
-& $ld "-pie" "-nostdlib" "-e" "sacx_main" "-o" $elfOutAA64 $objAA64
+$rspAA64 = Join-Path $buildDir "sacx_link_aa64.rsp"
+$rspAA64Lines = @("-pie", "-nostdlib", "-e", "sacx_main", "-o", ('"' + $elfOutAA64 + '"')) + @($objAA64 | ForEach-Object { '"' + $_ + '"' })
+Set-Content -LiteralPath $rspAA64 -Value $rspAA64Lines -Encoding Ascii
+& $ld "@$rspAA64"
 if ($LASTEXITCODE) { throw "AA64 ld.lld failed" }
 
 if ($BuildX64)
@@ -93,12 +115,16 @@ if ($BuildX64)
   {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
     $obj = Join-Path $objDir ("app_x64_{0}_{1}.o" -f $i, $baseName)
-    & $clangxx `
+    $isC = [System.IO.Path]::GetExtension($SourcePaths[$i]).ToLowerInvariant() -eq ".c"
+    $compiler = if ($isC) { $clang } else { $clangxx }
+    $language = if ($isC) { "-std=c11" } else { "-std=c++17" }
+    & $compiler `
       "-target" "x86_64-unknown-none-elf" `
       "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
-      "-fPIE" "-std=c++17" "-fno-exceptions" "-fno-rtti" `
+      "-fPIE" $language `
+      $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
       $opt "-g" `
-      "-I" $sdkInc `
+      "-I" $sdkInc $extraIncludes $extraDefines `
       "-c" $SourcePaths[$i] "-o" $obj
     if ($LASTEXITCODE) { throw "x64 clang++ failed on $($SourcePaths[$i])" }
     $objX64 += $obj
@@ -108,7 +134,10 @@ if ($BuildX64)
   if (Test-Path -LiteralPath $elfOutX64) {
     Remove-Item -LiteralPath $elfOutX64 -Force
   }
-  & $ld "-pie" "-nostdlib" "-e" "sacx_main" "-o" $elfOutX64 $objX64
+  $rspX64 = Join-Path $buildDir "sacx_link_x64.rsp"
+  $rspX64Lines = @("-pie", "-nostdlib", "-e", "sacx_main", "-o", ('"' + $elfOutX64 + '"')) + @($objX64 | ForEach-Object { '"' + $_ + '"' })
+  Set-Content -LiteralPath $rspX64 -Value $rspX64Lines -Encoding Ascii
+  & $ld "@$rspX64"
   if ($LASTEXITCODE) { throw "x64 ld.lld failed" }
 }
 
