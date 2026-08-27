@@ -22,6 +22,9 @@ extern "C"
     void kgfx_fill(kcolor c);
     void kgfx_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, kcolor c);
     void kgfx_flush(void);
+    /* Emergency path: draw/present a screen without involving the scene graph. */
+    void kgfx_panic_begin(kcolor background);
+    void kgfx_panic_present(void);
 
     /* =================== Scene graph: multiple shapes =================== */
 

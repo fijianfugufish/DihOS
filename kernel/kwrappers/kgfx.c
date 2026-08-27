@@ -1515,6 +1515,31 @@ static void present_full(void)
     kgfx_flush();
 }
 
+void kgfx_panic_begin(kcolor background)
+{
+    uint32_t pixel = pack_rgb(background.r, background.g, background.b);
+    if (!BB_ptr)
+    {
+        kgfx_fill(background);
+        return;
+    }
+    for (uint32_t y = 0u; y < FB.height; ++y)
+    {
+        uint32_t *row = (uint32_t *)(BB_ptr + y * BB_stride);
+        for (uint32_t x = 0u; x < FB.width; ++x)
+            row[x] = pixel;
+    }
+    present_full();
+}
+
+void kgfx_panic_present(void)
+{
+    if (BB_ptr)
+        present_full();
+    else
+        kgfx_flush();
+}
+
 static uint8_t present_region_raw(const kgfx_clip_rect *clip)
 {
     if (!clip || !clip->enabled)

@@ -3,6 +3,7 @@
 #include "kwrappers/ktext.h"
 #include "kwrappers/kgfx.h"
 #include "kwrappers/kfile.h"
+#include "kwrappers/kemoji_font.h"
 
 // PSF2 header
 #pragma pack(push, 1)
@@ -28,6 +29,12 @@ typedef struct
     uint8_t charsize; // bytes per glyph (PSF1 is always 8 pixels wide)
 } psf1_hdr;
 #pragma pack(pop)
+
+typedef struct ktext_unicode_map_entry
+{
+    uint32_t codepoint;
+    uint32_t glyph_index;
+} ktext_unicode_map_entry;
 
 #define PSF1_MAGIC 0x0436
 #define PSF1_MODE512 0x01
@@ -248,6 +255,84 @@ static void draw_glyph_tight_scaled(
     }
 }
 
+static int ktext_utf8_next(const unsigned char **inout, uint32_t *out_cp)
+{
+    const unsigned char *p = *inout;
+    uint32_t cp;
+    if (p[0] < 0x80u) { *out_cp = p[0]; *inout = p + 1; return 1; }
+    if ((p[0] & 0xe0u) == 0xc0u && p[1] && (p[1] & 0xc0u) == 0x80u) {
+        cp = ((uint32_t)(p[0] & 0x1fu) << 6) | (p[1] & 0x3fu);
+        if (cp >= 0x80u) { *out_cp = cp; *inout = p + 2; return 1; }
+    } else if ((p[0] & 0xf0u) == 0xe0u && p[1] && p[2] && (p[1] & 0xc0u) == 0x80u && (p[2] & 0xc0u) == 0x80u) {
+        cp = ((uint32_t)(p[0] & 0x0fu) << 12) | ((uint32_t)(p[1] & 0x3fu) << 6) | (p[2] & 0x3fu);
+        if (cp >= 0x800u && !(cp >= 0xd800u && cp <= 0xdfffu)) { *out_cp = cp; *inout = p + 3; return 1; }
+    } else if ((p[0] & 0xf8u) == 0xf0u && p[1] && p[2] && p[3] && (p[1] & 0xc0u) == 0x80u && (p[2] & 0xc0u) == 0x80u && (p[3] & 0xc0u) == 0x80u) {
+        cp = ((uint32_t)(p[0] & 0x07u) << 18) | ((uint32_t)(p[1] & 0x3fu) << 12) | ((uint32_t)(p[2] & 0x3fu) << 6) | (p[3] & 0x3fu);
+        if (cp >= 0x10000u && cp <= 0x10ffffu) { *out_cp = cp; *inout = p + 4; return 1; }
+    }
+    *out_cp = 0xfffdu; *inout = p + 1; return 0;
+}
+
+static int ktext_psf2_unicode_map(const uint8_t *table, const uint8_t *end,
+                                   uint32_t glyph_count, kfont *out)
+{
+    const uint8_t *p = table;
+    uint32_t count = 0u;
+    for (uint32_t gi = 0u; gi < glyph_count; ++gi) {
+        uint8_t in_sequence = 0u, ended = 0u;
+        while (p < end) {
+            if (*p == 0xffu) { ++p; ended = 1u; break; }
+            if (*p == 0xfeu) { ++p; in_sequence = 1u; continue; }
+            const unsigned char *q = p; uint32_t cp;
+            if (!ktext_utf8_next(&q, &cp) || q > end) return -1;
+            if (!in_sequence) ++count;
+            p = q;
+        }
+        if (!ended) return -1;
+    }
+    if (!count) return 0;
+    ktext_unicode_map_entry *map = (ktext_unicode_map_entry *)pmem_alloc_pages(((uint64_t)count * sizeof(*map) + 4095u) >> 12);
+    if (!map) return -1;
+    p = table; count = 0u;
+    for (uint32_t gi = 0u; gi < glyph_count; ++gi) {
+        uint8_t in_sequence = 0u;
+        while (p < end && *p != 0xffu) {
+            if (*p == 0xfeu) { ++p; in_sequence = 1u; continue; }
+            const unsigned char *q = p; uint32_t cp;
+            if (!ktext_utf8_next(&q, &cp) || q > end) return -1;
+            if (!in_sequence) { map[count].codepoint = cp; map[count].glyph_index = gi; ++count; }
+            p = q;
+        }
+        if (p >= end) return -1;
+        ++p;
+    }
+    out->unicode_map = map;
+    out->unicode_map_count = count;
+    return 0;
+}
+
+static uint32_t ktext_glyph_index(const kfont *f, uint32_t cp)
+{
+    if (f && f->unicode_map) {
+        for (uint32_t i = 0u; i < f->unicode_map_count; ++i)
+            if (f->unicode_map[i].codepoint == cp) return f->unicode_map[i].glyph_index;
+    }
+    return cp < f->glyph_count ? cp : f->glyph_count;
+}
+
+static uint32_t ktext_advance(const kfont *f, uint32_t cp, uint32_t scale)
+{
+    uint32_t gi = ktext_glyph_index(f, cp);
+    uint32_t adv = f->w;
+    if (gi < f->glyph_count && f->tight_width[gi]) adv = f->tight_width[gi];
+    else if (cp == ' ') adv = f->space_advance;
+    else {
+        uint32_t emoji = kemoji_font_advance(cp, ktext_scale_mul_px(f->h, scale));
+        if (emoji) return emoji;
+    }
+    return ktext_scale_mul_px(adv, scale);
+}
+
 // For a given radius 't', iterate a disk of offsets (dx,dy) with dx^2+dy^2 <= t^2.
 // Calls 'fn(dx,dy)' for each integer offset, skipping (0,0).
 static void foreach_outline_offset(uint32_t t, void (*fn)(int dx, int dy, void *), void *ctx)
@@ -293,6 +378,9 @@ static int ktext_parse_psf_blob(const uint8_t *p, uint32_t sz, kfont *out)
             out->bytes_per_glyph = h2->bytes_per_glyph;
             out->w = h2->width;
             out->h = h2->height;
+
+            if ((h2->flags & 1u) && ktext_psf2_unicode_map(p + need, p + sz, out->glyph_count, out) != 0)
+                return -1;
 
             /* allocate tight metrics (left + width) */
             uint64_t meta_bytes = (uint64_t)out->glyph_count * 2u;
@@ -380,6 +468,11 @@ int ktext_load_psf_blob(const void *blob, uint32_t size, kfont *out)
         return -1;
     *out = (kfont){0};
     return ktext_parse_psf_blob((const uint8_t *)blob, size, out);
+}
+
+int ktext_set_emoji_font(const char *path, uint32_t face_index)
+{
+    return kemoji_font_set_path(path, face_index);
 }
 
 /* ------------ public load (PSF2 or PSF1) -------------- */
@@ -519,23 +612,9 @@ uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, in
             continue;
         }
 
-        uint32_t gi = (uint32_t)(*p++);
-        uint32_t adv;
-        if (gi < f->glyph_count && f->tight_width[gi] != 0)
-        {
-            // variable width
-            adv = (uint32_t)f->tight_width[gi];
-        }
-        else if (gi == ' ')
-        {
-            adv = f->space_advance;
-        }
-        else
-        {
-            // fallback to full cell width
-            adv = f->w;
-        }
-        adv_sum += ktext_scale_mul_px(adv, scale);
+        uint32_t cp;
+        (void)ktext_utf8_next(&p, &cp);
+        adv_sum += ktext_advance(f, cp, scale);
         if (!first)
         {
             // apply spacing between characters (for N chars, we add N-1 spacings)
@@ -580,7 +659,9 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
             continue;
         }
 
-        uint32_t gi = (uint32_t)(*p++);
+        uint32_t cp;
+        (void)ktext_utf8_next(&p, &cp);
+        uint32_t gi = ktext_glyph_index(f, cp);
         uint8_t left = f->w; // default for empty
         uint8_t tw = 0;
 
@@ -600,7 +681,7 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
             adv = tw;
             draw_cols = tw;
         }
-        else if (gi == ' ')
+        else if (cp == ' ')
         {
             // space: no draw, just advance
             adv = f->space_advance;
@@ -617,6 +698,17 @@ void ktext_draw_str_ex(const kfont *f, int x, int y, const char *s,
         if (draw_cols)
         {
             draw_glyph_tight_scaled(f, gi, x, y, scale, active_col, alpha);
+        }
+        else
+        {
+            uint32_t emoji_adv = kemoji_font_advance(cp, font_h_scaled);
+            if (emoji_adv) {
+                kemoji_font_draw(cp, x, y, font_h_scaled, alpha);
+                adv = emoji_adv;
+                x += (int)adv;
+                x += char_spacing;
+                continue;
+            }
         }
 
         // advance pen
@@ -671,7 +763,9 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
                 continue;
             }
 
-            uint32_t gi = (uint32_t)(*p++);
+            uint32_t cp;
+            (void)ktext_utf8_next(&p, &cp);
+            uint32_t gi = ktext_glyph_index(f, cp);
             uint8_t left = f->w;
             uint8_t tw = 0;
 
@@ -689,7 +783,7 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
                 adv = tw;
                 draw_cols = tw;
             }
-            else if (gi == ' ')
+            else if (cp == ' ')
             {
                 adv = f->space_advance;
                 draw_cols = 0;
@@ -703,6 +797,15 @@ void ktext_draw_str_align(const kfont *f, int anchor_x, int y, const char *s,
             if (draw_cols)
             {
                 draw_glyph_tight_scaled(f, gi, x, y, scale, active_col, alpha);
+            }
+            else
+            {
+                uint32_t emoji_adv = kemoji_font_advance(cp, font_h_scaled);
+                if (emoji_adv) {
+                    kemoji_font_draw(cp, x, y, font_h_scaled, alpha);
+                    x += (int)emoji_adv + char_spacing;
+                    continue;
+                }
             }
 
             x += (int)ktext_scale_mul_px(adv, scale);
@@ -784,7 +887,9 @@ void ktext_draw_str_align_outline(
                 continue;
             }
 
-            uint32_t gi = (uint32_t)(*p++);
+            uint32_t cp;
+            (void)ktext_utf8_next(&p, &cp);
+            uint32_t gi = ktext_glyph_index(f, cp);
             uint8_t left = f->w, tw = 0;
 
             if (gi < f->glyph_count)
@@ -799,7 +904,7 @@ void ktext_draw_str_align_outline(
             {
                 adv = tw;
             }
-            else if (gi == ' ')
+            else if (cp == ' ')
             {
                 adv = f->space_advance;
             }
@@ -819,6 +924,15 @@ void ktext_draw_str_align_outline(
             if (tw != 0 && left < f->w)
             {
                 draw_glyph_tight_scaled(f, gi, x, y, scale, active_fill, fill_alpha);
+            }
+            else
+            {
+                uint32_t emoji_adv = kemoji_font_advance(cp, font_h_scaled);
+                if (emoji_adv) {
+                    kemoji_font_draw(cp, x, y, font_h_scaled, fill_alpha);
+                    x += (int)emoji_adv + char_spacing;
+                    continue;
+                }
             }
             // spaces/empty just advance
 

@@ -21,6 +21,8 @@
 #include "system/ksystem_font.h"
 #include "system/kearly_console.h"
 #include "system/boot_volume_blockdev.h"
+#include "system/kcrash_map.h"
+#include "system/kcrash_map.h"
 #include "hyperv/hyperv.h"
 #include "hyperv/hyperv_storage.h"
 #include "apps/desktop_shell_api.h"
@@ -128,6 +130,11 @@ void kmain(boot_info *bi)
     int have_fallback_font = (ksystem_font_init_fallback(&fallback_font) == 0);
 
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    asm_aa64_panic_renderer_init(have_fallback_font ? &fallback_font : 0);
+    asm_aa64_install_exception_vectors();
+#endif
+
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     /* Probe reads install temporary vectors locally; keep global VBAR untouched. */
 #endif
 
@@ -139,6 +146,21 @@ void kmain(boot_info *bi)
     crumb((kcolor){20, 20, 20});
     kearly_console_begin(have_fallback_font ? &fallback_font : 0);
     terminal_print("early console online");
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    {
+        uint64_t current_el = 0u;
+        __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(current_el));
+        switch ((current_el >> 2) & 3u)
+        {
+        case 0u: terminal_print("exception level: el0"); break;
+        case 1u: terminal_print("exception level: el1"); break;
+        case 2u: terminal_print("exception level: el2"); break;
+        default: terminal_print("exception level: el3"); break;
+        }
+    }
+#elif defined(DIHOS_ARCH_X64) || defined(KERNEL_ARCH_X64) || defined(__x86_64__) || defined(_M_X64)
+    terminal_print("exception level: not applicable on x64");
+#endif
     if (image_decoder_reserved)
         terminal_success("kimg: decoder arena reserved");
     else
@@ -301,11 +323,39 @@ void kmain(boot_info *bi)
         have_disk_font = 1;
     }
     kui_set_font(font);
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    asm_aa64_panic_renderer_init(font);
+#endif
 
     sacx_runtime_init(font);
 
     terminal_initialize(font);
     terminal_print("terminal online");
+    if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
+        terminal_success("crash map: source locations ready");
+    else
+        terminal_warn("crash map: source locations unavailable");
+    if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
+        terminal_success("crash map: source locations ready");
+    else
+        terminal_warn("crash map: source locations unavailable");
+    /* Load and cache the panic-title emoji while storage is healthy. */
+    (void)ktext_measure_line_px(font, "\xf0\x9f\xa5\x80", 1u, 0);
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    {
+        uint64_t current_el = 0u;
+        __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(current_el));
+        switch ((current_el >> 2) & 3u)
+        {
+        case 0u: terminal_print("exception level: el0"); break;
+        case 1u: terminal_print("exception level: el1"); break;
+        case 2u: terminal_print("exception level: el2"); break;
+        default: terminal_print("exception level: el3"); break;
+        }
+    }
+#elif defined(DIHOS_ARCH_X64) || defined(KERNEL_ARCH_X64) || defined(__x86_64__) || defined(_M_X64)
+    terminal_print("exception level: not applicable on x64");
+#endif
     smp_init(bi ? bi->acpi_rsdp : 0u);
     kwork_init();
     if (!mounted)

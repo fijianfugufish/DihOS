@@ -34,6 +34,10 @@ extern "C"
         const uint8_t *tight_left;
         const uint8_t *tight_width;
         uint8_t space_advance;
+
+        /* Optional PSF Unicode table, mapping Unicode scalar values to glyphs. */
+        const struct ktext_unicode_map_entry *unicode_map;
+        uint32_t unicode_map_count;
     } kfont;
 
     /* --- Drawing API (uses ktext_align from kui_types.h) --- */
@@ -79,6 +83,10 @@ extern "C"
     uint32_t ktext_scale_mul_px(uint32_t px, uint32_t scale);
     uint32_t ktext_line_height(const kfont *f, uint32_t scale, int line_spacing);
     uint32_t ktext_measure_line_px(const kfont *f, const char *s, uint32_t scale, int char_spacing);
+
+    /* Select a .ttf/.ttc colour-font fallback.  The default path is
+       0:/OS/System/Fonts/Emoji.ttf; this is only needed for another path/face. */
+    int ktext_set_emoji_font(const char *path, uint32_t face_index);
 
 #ifdef __cplusplus
 }

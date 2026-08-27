@@ -350,6 +350,9 @@ if (!$ArmOnly) {
 $ldsAA64 = Join-Path $KerDir "kernel.ld"
 $ldsX64  = Join-Path $KerDir "kernel_x64.ld"
 Build-Kernel -Arch "aa64" -Target "aarch64-unknown-none-elf" -ObjDir $ObjKAA64 -OutFile $KernelAa64OutFull -LinkerScript $ldsAA64
+$CrashMapAa64 = Join-Path (Split-Path -Parent $KernelAa64OutFull) "KERNEL.CRASHMAP"
+& py -3 (Join-Path $ProjectRoot "tools\gen_crash_map.py") $KernelAa64OutFull $CrashMapAa64
+if ($LASTEXITCODE) { throw "crash map generation failed" }
 if (!$ArmOnly) {
   Build-Kernel -Arch "x64" -Target "x86_64-unknown-none-elf" -ObjDir $ObjKX64 -OutFile $KernelX64OutFull -LinkerScript $ldsX64
 }
@@ -390,6 +393,7 @@ if (Test-Path $UsbRoot) {
   Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
   Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
+  Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
   Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
   if (!$ArmOnly) {
     Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
@@ -459,6 +463,7 @@ if ($VhdAccessible) {
     Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
     Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
     Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
+    Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
     Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
     if (!$ArmOnly) {
       Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
