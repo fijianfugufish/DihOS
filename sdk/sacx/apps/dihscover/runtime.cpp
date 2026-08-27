@@ -1,18 +1,18 @@
-#include "browser.h"
+#include "dihscover.h"
 
 extern "C" __attribute__((noinline)) void *memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
 {
-    return b_memcpy(dst, src, n);
+    return dihs_memcpy(dst, src, n);
 }
 
 extern "C" __attribute__((noinline)) void *memset(void *dst, int value, __SIZE_TYPE__ n)
 {
-    return b_memset(dst, value, n);
+    return dihs_memset(dst, value, n);
 }
 
 extern "C" __attribute__((noinline)) __SIZE_TYPE__ strlen(const char *s)
 {
-    return (__SIZE_TYPE__)b_strlen(s);
+    return (__SIZE_TYPE__)dihs_strlen(s);
 }
 
 #if defined(DIHSCOVER_FREESTANDING)
@@ -23,7 +23,7 @@ extern "C" int printf(const char *format, ...)
 }
 #endif
 
-void *b_memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
+void *dihs_memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
 {
     volatile uint8_t *d = (volatile uint8_t *)dst;
     const volatile uint8_t *s = (const volatile uint8_t *)src;
@@ -32,7 +32,7 @@ void *b_memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
     return dst;
 }
 
-void *b_memset(void *dst, int value, __SIZE_TYPE__ n)
+void *dihs_memset(void *dst, int value, __SIZE_TYPE__ n)
 {
     volatile uint8_t *d = (volatile uint8_t *)dst;
     for (__SIZE_TYPE__ i = 0; i < n; ++i)
@@ -40,7 +40,7 @@ void *b_memset(void *dst, int value, __SIZE_TYPE__ n)
     return dst;
 }
 
-uint32_t b_strlen(const char *s)
+uint32_t dihs_strlen(const char *s)
 {
     uint32_t n = 0u;
     if (s)
@@ -48,21 +48,14 @@ uint32_t b_strlen(const char *s)
     return n;
 }
 
-int b_streq(const char *a, const char *b)
+int dihs_streq(const char *a, const char *b)
 {
     if (!a || !b) return 0;
     while (*a && *a == *b) { ++a; ++b; }
     return *a == *b;
 }
 
-int b_starts(const char *s, const char *prefix)
-{
-    if (!s || !prefix) return 0;
-    while (*prefix && *s == *prefix) { ++s; ++prefix; }
-    return *prefix == 0;
-}
-
-void b_copy_n(char *dst, uint32_t cap, const char *src, uint32_t n)
+static void copy_n(char *dst, uint32_t cap, const char *src, uint32_t n)
 {
     uint32_t i = 0u;
     if (!dst || !cap) return;
@@ -70,7 +63,7 @@ void b_copy_n(char *dst, uint32_t cap, const char *src, uint32_t n)
     dst[i] = 0;
 }
 
-void b_copy(char *dst, uint32_t cap, const char *src)
+void dihs_copy(char *dst, uint32_t cap, const char *src)
 {
-    b_copy_n(dst, cap, src, src ? b_strlen(src) : 0u);
+    copy_n(dst, cap, src, src ? dihs_strlen(src) : 0u);
 }

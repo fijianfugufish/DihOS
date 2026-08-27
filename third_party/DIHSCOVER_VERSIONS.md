@@ -6,6 +6,12 @@
 | Lexbor | v3.0.0 | `2ae88a1c6b5261830eff73ee12bb3cdf805f3cfe` | Apache-2.0 |
 | TLSF | upstream main snapshot | `deff9ab509341f264addbd3c8ada533678591905` | BSD-3-Clause text in `tlsf.h` |
 | SimpleWebP | version 20260718 | `d1a728a1f8ec7348ca2a5039b6dd813b83986fbb` | BSD-3-Clause plus WebM patent grant |
+| NetSurf full source | 3.11 | official `netsurf-all-3.11.tar.gz` release archive | GPL-2.0; component licenses preserved in-tree |
 
 Lexbor does not publish a v2.9.0 tag. Dihscover therefore vendors the nearest
 official compatible release, v3.0.0, instead of inventing an unverifiable pin.
+
+The active Dihscover backend uses the official NetSurf 3.11 full-source release
+from `https://download.netsurf-browser.org/netsurf/releases/source-full/`.
+The archive includes the matching Hubbub, LibDOM, LibCSS, LibParserUtils,
+LibWapcaplet, LibNSBMP, LibNSGIF, LibNSLog, and LibNSUtils sources.

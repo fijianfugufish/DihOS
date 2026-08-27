@@ -47,6 +47,7 @@ extern "C"
         uint64_t wake_tick;
         uint32_t arena_size;
         uint32_t image_size;
+        uint32_t memory_size;
         uint32_t loaded_arch;
         uint32_t window_count;
         uint32_t gfx_count;

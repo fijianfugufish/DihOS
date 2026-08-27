@@ -50,8 +50,8 @@ extern const boot_info *k_bootinfo_ptr;
 #define SACX_MAX_TASK_WORKERS 8u
 #define SACX_MAX_TASK_ASYNC_IMAGE_SAVES 1u
 #define SACX_MAX_TASK_NET_REQUESTS 4u
-#define SACX_MAX_TASK_MEMORY_ALLOCS 8u
-#define SACX_MAX_TASK_MEMORY_BYTES (32u * 1024u * 1024u)
+#define SACX_MAX_TASK_MEMORY_ALLOCS 16u
+#define SACX_MAX_TASK_MEMORY_BYTES (128u * 1024u * 1024u)
 #define SACX_NET_DEFAULT_BYTES (2u * 1024u * 1024u)
 #define SACX_NET_MAX_BYTES (8u * 1024u * 1024u)
 #define SACX_MAX_SEGMENTS 128u
@@ -59,7 +59,7 @@ extern const boot_info *k_bootinfo_ptr;
 #define SACX_MAX_IMPORTS 256u
 #define SACX_MAX_SLICES 8u
 #define SACX_MAX_FILE_BYTES (32u * 1024u * 1024u)
-#define SACX_APP_ARENA_BYTES (64u * 1024u * 1024u)
+#define SACX_APP_ARENA_BYTES (128u * 1024u * 1024u)
 #define SACX_SCHED_DEFAULT_QUANTUM_TICKS 1u
 
 typedef struct sacx_task sacx_task;
@@ -5103,9 +5103,12 @@ static int sacx_api_img_touch(uint32_t image_handle)
     if (!slot || !slot->image.px)
         return -1;
 
+    /* SACX apps write image pixels with the CPU, then call img_touch before
+       the compositor reads them.  Publish those dirty CPU cache lines; an
+       invalidate here discards the app's new pixels on non-coherent AA64. */
     if (slot->image.w && slot->image.h)
-        asm_dma_invalidate_range(slot->image.px,
-                                 (uint64_t)slot->image.w * (uint64_t)slot->image.h * 4ull);
+        asm_dma_clean_range(slot->image.px,
+                            (uint64_t)slot->image.w * (uint64_t)slot->image.h * 4ull);
     for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
     {
         kgfx_obj *obj = 0;
@@ -6453,6 +6456,20 @@ static uint32_t sacx_count_images(const sacx_task *task)
     return count;
 }
 
+static uint32_t sacx_count_memory_bytes(const sacx_task *task)
+{
+    uint64_t bytes = 0u;
+    if (!task)
+        return 0u;
+    for (uint32_t i = 0u; i < SACX_MAX_TASK_MEMORY_ALLOCS; ++i)
+    {
+        const sacx_memory_slot *slot = &task->memory_allocs[i];
+        if (slot->used)
+            bytes += slot->pages << 12;
+    }
+    return bytes > 0xffffffffull ? 0xffffffffu : (uint32_t)bytes;
+}
+
 extern "C" uint32_t sacx_runtime_task_snapshot(sacx_task_info *out_items, uint32_t max_items)
 {
     uint32_t written = 0u;
@@ -6477,6 +6494,7 @@ extern "C" uint32_t sacx_runtime_task_snapshot(sacx_task_info *out_items, uint32
         out->wake_tick = task->wake_tick;
         out->arena_size = task->arena_size;
         out->image_size = task->image_size;
+        out->memory_size = sacx_count_memory_bytes(task);
         out->loaded_arch = task->loaded_arch;
         out->window_count = sacx_count_windows(task);
         out->gfx_count = sacx_count_gfx_objects(task);

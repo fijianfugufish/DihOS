@@ -62,6 +62,18 @@ $elfOutAA64 = if ([System.IO.Path]::IsPathRooted($OutElfAA64)) { $OutElfAA64 } e
 $elfOutX64  = if ([System.IO.Path]::IsPathRooted($OutElfX64))  { $OutElfX64 }  else { Join-Path $ProjectRoot $OutElfX64 }
 
 $sacxOut = if ([System.IO.Path]::IsPathRooted($OutSacx)) { $OutSacx } else { Join-Path $ProjectRoot $OutSacx }
+$objStem = [System.IO.Path]::GetFileNameWithoutExtension($sacxOut)
+
+function Get-SourceObjectKey([string]$SourcePath) {
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $signature = $SourcePath.ToLowerInvariant() + "|" + $Config + "|" + ($IncludeDir -join ";") + "|" + ($Define -join ";")
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($signature)
+    return (($sha.ComputeHash($bytes)[0..5] | ForEach-Object { $_.ToString("x2") }) -join "")
+  } finally {
+    $sha.Dispose()
+  }
+}
 
 New-Item -Force -ItemType Directory -Path $buildDir,$objDir | Out-Null
 New-Item -Force -ItemType Directory -Path ([System.IO.Path]::GetDirectoryName($elfOutAA64)),([System.IO.Path]::GetDirectoryName($elfOutX64)),([System.IO.Path]::GetDirectoryName($sacxOut)) | Out-Null
@@ -82,17 +94,31 @@ Write-Host "== Compile AA64 objects ==" -ForegroundColor Cyan
 for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
 {
   $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
-  $obj = Join-Path $objDir ("app_aa64_{0}_{1}.o" -f $i, $baseName)
+  $sourceKey = Get-SourceObjectKey $SourcePaths[$i]
+  $obj = Join-Path $objDir ("{0}_aa64_{1}_{2}.o" -f $objStem, $sourceKey, $baseName)
+  if ((Test-Path -LiteralPath $obj) -and
+      ((Get-Item -LiteralPath $obj).LastWriteTimeUtc -ge (Get-Item -LiteralPath $SourcePaths[$i]).LastWriteTimeUtc)) {
+    $objAA64 += $obj
+    continue
+  }
   $isC = [System.IO.Path]::GetExtension($SourcePaths[$i]).ToLowerInvariant() -eq ".c"
   $compiler = if ($isC) { $clang } else { $clangxx }
   $language = if ($isC) { "-std=c11" } else { "-std=c++17" }
+  $sourceIncludes = @()
+  foreach ($includeItem in $IncludeDir) {
+    $includePath = if ([System.IO.Path]::IsPathRooted($includeItem)) { $includeItem } else { Join-Path $ProjectRoot $includeItem }
+    $includePath = (Resolve-Path -LiteralPath $includePath).Path
+    if ($SourcePaths[$i].StartsWith($includePath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+      $sourceIncludes += @("-I", $includePath)
+    }
+  }
   & $compiler `
     "-target" "aarch64-unknown-none-elf" `
     "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
     "-fPIE" $language `
     $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
     $opt "-g" `
-    "-I" $sdkInc $extraIncludes $extraDefines `
+    "-I" $sdkInc $sourceIncludes $extraIncludes $extraDefines `
     "-c" $SourcePaths[$i] "-o" $obj
   if ($LASTEXITCODE) { throw "AA64 clang++ failed on $($SourcePaths[$i])" }
   $objAA64 += $obj
@@ -114,17 +140,31 @@ if ($BuildX64)
   for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
   {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
-    $obj = Join-Path $objDir ("app_x64_{0}_{1}.o" -f $i, $baseName)
+    $sourceKey = Get-SourceObjectKey $SourcePaths[$i]
+    $obj = Join-Path $objDir ("{0}_x64_{1}_{2}.o" -f $objStem, $sourceKey, $baseName)
+    if ((Test-Path -LiteralPath $obj) -and
+        ((Get-Item -LiteralPath $obj).LastWriteTimeUtc -ge (Get-Item -LiteralPath $SourcePaths[$i]).LastWriteTimeUtc)) {
+      $objX64 += $obj
+      continue
+    }
     $isC = [System.IO.Path]::GetExtension($SourcePaths[$i]).ToLowerInvariant() -eq ".c"
     $compiler = if ($isC) { $clang } else { $clangxx }
     $language = if ($isC) { "-std=c11" } else { "-std=c++17" }
+    $sourceIncludes = @()
+    foreach ($includeItem in $IncludeDir) {
+      $includePath = if ([System.IO.Path]::IsPathRooted($includeItem)) { $includeItem } else { Join-Path $ProjectRoot $includeItem }
+      $includePath = (Resolve-Path -LiteralPath $includePath).Path
+      if ($SourcePaths[$i].StartsWith($includePath + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $sourceIncludes += @("-I", $includePath)
+      }
+    }
     & $compiler `
       "-target" "x86_64-unknown-none-elf" `
       "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
       "-fPIE" $language `
       $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
       $opt "-g" `
-      "-I" $sdkInc $extraIncludes $extraDefines `
+      "-I" $sdkInc $sourceIncludes $extraIncludes $extraDefines `
       "-c" $SourcePaths[$i] "-o" $obj
     if ($LASTEXITCODE) { throw "x64 clang++ failed on $($SourcePaths[$i])" }
     $objX64 += $obj

@@ -1147,7 +1147,8 @@ namespace
         for (uint32_t i = 0u; i < task_count && row_idx < MAX_APP_ROWS; ++i)
         {
             AppRow &row = app_rows_[row_idx];
-            uint64_t mem = (uint64_t)tasks[i].arena_size + (uint64_t)tasks[i].image_size;
+            uint64_t mem = (uint64_t)tasks[i].arena_size + (uint64_t)tasks[i].image_size +
+                           (uint64_t)tasks[i].memory_size;
             row.row_type = ROW_SACX;
             row.task_id = tasks[i].task_id;
             row.kernel_id = 0u;
