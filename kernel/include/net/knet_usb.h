@@ -23,6 +23,8 @@ typedef struct knet_usb_status
 
 int knet_usb_dhcp(uint32_t rounds);
 void knet_usb_get_status(knet_usb_status *out_status);
+/* Suppress terminal/UI logging while a request runs on a worker core. */
+void knet_usb_set_worker_quiet(uint32_t quiet);
 int knet_usb_get_url(const char *url, uint32_t max_bytes);
 int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
                        uint32_t *out_size, uint8_t *out_truncated,

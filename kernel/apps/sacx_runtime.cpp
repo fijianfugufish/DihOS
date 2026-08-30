@@ -27,6 +27,7 @@ extern "C"
 #include "system/dihos_time.h"
 #include "system/kbusy.h"
 #include "system/kwork.h"
+#include "system/smp.h"
 #include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
 
@@ -289,7 +290,22 @@ typedef struct sacx_task
 } sacx_task;
 
 static sacx_task G_tasks[SACX_MAX_TASKS];
-static sacx_task *G_current_task = 0;
+/*
+ * SACX callbacks may run on the scheduler core or on a kwork core.  A single
+ * current-task pointer made one app's API calls depend on which callback
+ * happened to be executing on another CPU.  Keep the execution context local
+ * to the logical CPU instead.  This isolates task bookkeeping; it does not
+ * make global device drivers safe to call from arbitrary workers.
+ */
+static sacx_task *G_current_tasks[SMP_MAX_CORES];
+static sacx_task **sacx_current_task_slot(void)
+{
+    uint32_t core = smp_current_logical_id();
+    if (core >= SMP_MAX_CORES)
+        core = 0u;
+    return &G_current_tasks[core];
+}
+#define G_current_task (*sacx_current_task_slot())
 static uint32_t G_next_task_id = 1u;
 static uint32_t G_rr_cursor = 0u;
 static const kfont *G_runtime_font = 0;
@@ -387,13 +403,17 @@ static void sacx_worker_thunk(void *ctx)
 {
     sacx_worker_slot *slot = (sacx_worker_slot *)ctx;
     sacx_task *task = slot ? slot->owner : 0;
+    sacx_task *saved;
     if (!slot || !task || !slot->fn)
         return;
     if (task->state == SACX_TASK_UNUSED)
         return;
     if (!sacx_ptr_in_image(task, (const void *)slot->fn))
         return;
+    saved = G_current_task;
+    G_current_task = task;
     slot->fn(slot->user);
+    G_current_task = saved;
     sacx_task_clean_worker_memory(task);
 }
 
@@ -2720,11 +2740,13 @@ static void sacx_net_request_worker(void *ctx)
         slot->body_size = 0u;
         slot->truncated = 0u;
         memset(&slot->info, 0, sizeof(slot->info));
+        knet_usb_set_worker_quiet(smp_current_logical_id() != 0u);
         rc = knet_usb_fetch_request(current_url, slot->method,
                                     slot->request_body, slot->request_body_size,
                                     slot->content_type, slot->buffer, slot->capacity,
                                     &slot->raw_size, &slot->truncated, &slot->cancelled,
                                     slot->timeout_ms);
+        knet_usb_set_worker_quiet(0u);
         if (__atomic_load_n(&slot->cancelled, __ATOMIC_ACQUIRE))
         {
             __atomic_store_n(&slot->status, SACX_NET_STATUS_CANCELLED, __ATOMIC_RELEASE);
@@ -2839,8 +2861,10 @@ static int sacx_api_net_request_start_ex(const sacx_net_request_desc_ex *desc, u
     __atomic_store_n(&slot->status, SACX_NET_STATUS_QUEUED, __ATOMIC_RELEASE);
     asm_dma_clean_range(slot, sizeof(*slot));
 
-    /* xHCI controller state is currently main-core-owned. Run the shared
-       request implementation inline until USB transfers are cooperative. */
+    /*
+     * xHCI/USB Ethernet is currently owned by core 0.  Running it through a
+     * remote worker is not safe until the driver is genuinely SMP-safe.
+     */
     slot->job_id = 0u;
     sacx_net_request_worker(slot);
     *out_request_id = slot->id;
@@ -5177,7 +5201,9 @@ static void sacx_async_image_save_worker(void *ctx)
 
 static uint32_t sacx_async_image_save_write_step(sacx_async_image_save_slot *slot)
 {
-    uint32_t budget = 64u * 1024u;
+    /* Keep the main-core portion brief: each call is made from an app update
+       and must yield back to painting/input between USB-backed writes. */
+    uint32_t budget = 16u * 1024u;
 
     if (!slot || !slot->used)
         return KWORK_STATUS_EMPTY;

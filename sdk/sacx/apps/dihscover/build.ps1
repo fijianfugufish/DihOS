@@ -45,6 +45,7 @@ $sources = @(
   "sdk\sacx\apps\dihscover\main.cpp",
   "sdk\sacx\apps\dihscover\netsurf_backend.cpp",
   "sdk\sacx\apps\dihscover\netsurf_fetch.cpp",
+  "sdk\sacx\apps\dihscover\netsurf_dihos_image.c",
   "sdk\sacx\apps\dihscover\netsurf_libc.cpp",
   "sdk\sacx\apps\dihscover\netsurf_optional_stubs.c",
   "sdk\sacx\apps\dihscover\runtime.cpp",

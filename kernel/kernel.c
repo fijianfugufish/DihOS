@@ -34,6 +34,8 @@
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "hardware_probes/acpi_probe_xhci.h"
 #include "hardware_probes/acpi_probe_pci_lookup.h"
+#include "gpu/adreno_x1_85.h"
+#include "gpu/gpu_core.h"
 #include "pci/pci_ecam_lookup.h"
 #include "pci/pci_ecam_map_plan.h"
 #include "memory/mmio_map.h"
@@ -331,6 +333,7 @@ void kmain(boot_info *bi)
 
     terminal_initialize(font);
     terminal_print("terminal online");
+    (void)gpu_core_init(bi);
     if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
         terminal_success("crash map: source locations ready");
     else
@@ -481,6 +484,13 @@ void kmain(boot_info *bi)
 
     for (;;)
     {
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+        /* A worker-core exception is a kernel-wide failure.  Do not let the
+           scheduler/compositor overwrite the panic frame it produced. */
+        if (asm_aa64_panic_active())
+            for (;;)
+                asm_wait();
+#endif
         ++g_dihos_tick;
         task_accounting_frame_begin();
 

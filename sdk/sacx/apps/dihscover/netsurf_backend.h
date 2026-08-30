@@ -23,3 +23,4 @@ uint32_t dihscover_netsurf_failed_fetches(void);
 void dihscover_netsurf_pump(uint64_t now_ticks);
 uint32_t dihscover_netsurf_page_state(void);
 void dihscover_netsurf_mouse(int32_t x, int32_t y, uint8_t buttons, int32_t wheel);
+void dihscover_netsurf_key(uint32_t key);

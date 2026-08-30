@@ -40,6 +40,10 @@
 #include "image/webp.h"
 #include "image/image.h"
 
+#ifdef DIHSCOVER_FREESTANDING
+extern nserror dihos_image_init(void);
+#endif
+
 /**
  * Initialise image content handlers
  *
@@ -48,6 +52,12 @@
 nserror image_init(void)
 {
 	nserror error = NSERROR_OK;
+
+#ifdef DIHSCOVER_FREESTANDING
+	error = dihos_image_init();
+	if (error != NSERROR_OK)
+		return error;
+#endif
 
 #ifdef WITH_BMP
 	error = nsbmp_init();

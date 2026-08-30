@@ -94,6 +94,7 @@ volatile uint32_t g_xhci_last_ev_len = 0;    // transfer length field (from Tran
 volatile uint32_t g_xhci_last_addr_cc = 0;
 volatile uint32_t g_xhci_last_addr_slot = 0;
 volatile uint32_t g_xhci_last_addr_portsc = 0;
+static volatile uint32_t g_background_network_busy;
 
 /* ---------- tiny on-screen dots ---------- */
 extern volatile uint32_t *g_fb32;
@@ -116,6 +117,10 @@ static inline void dot(int n, uint32_t rgb)
 // exported debug dot for other modules
 void usbh_dbg_dot(int n, uint32_t rgb)
 {
+    /* The compositor owns the framebuffer. Do not let a worker's USB trace
+       race its dirty-region presentation. */
+    if (__atomic_load_n(&g_background_network_busy, __ATOMIC_ACQUIRE))
+        return;
     dot(n, rgb);
 }
 
@@ -367,6 +372,28 @@ typedef struct
 
 static xhci_t G;
 static uint8_t g_xhci_initialized = 0;
+/* One controller has shared command, transfer and event rings. A transfer
+ * owns those rings from state restore through completion and state save. */
+static volatile uint32_t g_xhci_io_lock;
+
+static int xhci_io_try_lock(void)
+{
+    uint32_t expected = 0u;
+    /*
+     * A transfer holds this lock while it polls the controller.  Spinning on
+     * another core here has no cancellation path and used to strand remote
+     * network jobs forever if the owner stopped making progress.
+     */
+    return __atomic_compare_exchange_n(&g_xhci_io_lock, &expected, 1u, 0,
+                                       __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)
+               ? 0
+               : -1;
+}
+
+static void xhci_io_unlock(void)
+{
+    __atomic_store_n(&g_xhci_io_lock, 0u, __ATOMIC_RELEASE);
+}
 static uint8_t g_claimed_ports[256];
 static xhci_saved_state_t g_saved_states[8];
 static uint32_t G_ctx_dwords = 16; /* default 64B contexts */
@@ -2306,11 +2333,17 @@ int usbh_control_xfer(usbh_dev_t *d,
     if (!d || !d->configured)
         return -1;
 
-    if (dev_state_load(d) != 0)
+    if (xhci_io_try_lock() != 0)
         return -1;
+    if (dev_state_load(d) != 0)
+    {
+        xhci_io_unlock();
+        return -1;
+    }
 
     rc = control_xfer(bmRequestType, bRequest, wValue, wIndex, data, wLength);
     dev_state_save(d);
+    xhci_io_unlock();
     return rc;
 }
 
@@ -4565,8 +4598,11 @@ int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *go
         return -1;
     }
 
+    if (xhci_io_try_lock() != 0)
+        return -1;
     if (dev_state_load(d) != 0)
     {
+        xhci_io_unlock();
         usbh_dbg_dot(169, 0xFF0000u);
         return -1;
     }
@@ -4620,6 +4656,7 @@ int usbh_bulk_out_got(usbh_dev_t *d, const void *buf, uint32_t len, uint32_t *go
 
 out:
     dev_state_save(d);
+    xhci_io_unlock();
     return rc;
 }
 
@@ -4651,8 +4688,11 @@ int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *g
         return -1;
     }
 
+    if (xhci_io_try_lock() != 0)
+        return -1;
     if (dev_state_load(d) != 0)
     {
+        xhci_io_unlock();
         usbh_dbg_dot(179, 0xFF0000u);
         return -1;
     }
@@ -4741,6 +4781,7 @@ int usbh_bulk_in_got_timeout(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *g
 
 out:
     dev_state_save(d);
+    xhci_io_unlock();
     return rc;
 }
 
@@ -4761,8 +4802,13 @@ int usbh_bulk_in_cancel_pending(usbh_dev_t *d)
 
     if (!d || !d->configured)
         return -1;
-    if (dev_state_load(d) != 0)
+    if (xhci_io_try_lock() != 0)
         return -1;
+    if (dev_state_load(d) != 0)
+    {
+        xhci_io_unlock();
+        return -1;
+    }
 
     epid = dci_from_ep(d->ep_bulk_in, 1);
     old_trbptr = d->bulk_in_pending_trbptr;
@@ -4806,10 +4852,12 @@ int usbh_bulk_in_cancel_pending(usbh_dev_t *d)
     d->bulk_in_pending_buf = 0;
     d->bulk_in_pending_len = 0u;
     dev_state_save(d);
+    xhci_io_unlock();
     return 0;
 
 failed:
     dev_state_save(d);
+    xhci_io_unlock();
     return -1;
 }
 
@@ -4860,8 +4908,13 @@ int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 
     if (__atomic_load_n(&g_background_network_busy, __ATOMIC_ACQUIRE))
         return 1;
+    if (xhci_io_try_lock() != 0)
+        return 1;
     if (dev_state_load(d) != 0)
+    {
+        xhci_io_unlock();
         return -1;
+    }
 
     if (!d->intr_buf)
     {
@@ -4963,6 +5016,7 @@ int usbh_intr_in_got(usbh_dev_t *d, void *buf, uint32_t len, uint32_t *got)
 
 out:
     dev_state_save(d);
+    xhci_io_unlock();
     return rc;
 }
 

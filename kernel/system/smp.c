@@ -11,7 +11,12 @@
 
 enum
 {
-    SMP_STACK_PAGES = 4u,
+    /*
+     * A remote network request builds a 6 KiB HTTP request on its call stack,
+     * then descends through DNS/TLS/xHCI.  The old 16 KiB secondary-core
+     * stack could overflow before the exception path had room to report it.
+     */
+    SMP_STACK_PAGES = 16u,
     SMP_MAGIC = 0x534D5043u,
     SMP_PSCI_NONE = 0u,
     SMP_PSCI_SMC = 1u,

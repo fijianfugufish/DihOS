@@ -11,6 +11,7 @@ extern "C" {
 #include "netsurf/layout.h"
 #include "netsurf/misc.h"
 #include "netsurf/mouse.h"
+#include "netsurf/keypress.h"
 #include "netsurf/plotters.h"
 #include "netsurf/window.h"
 #include "content/fetch.h"
@@ -28,11 +29,12 @@ struct scheduled_callback { uint64_t due;void (*callback)(void*);void *context;u
 static const sacx_api *g_api;
 static dihscover_netsurf_callbacks g_callbacks;
 static gui_window g_gui;
-static uint32_t g_parent,g_surface_image,g_surface_object,*g_surface_pixels,g_surface_stride;
+static uint32_t g_parent,g_surface_image,g_surface_object,g_caret_object,*g_surface_pixels,g_surface_stride;
 static uint32_t g_width=1u,g_height=1u;
 static int32_t g_scroll_x,g_scroll_y;
 static rect g_clip={0,0,1,1};
 static uint8_t g_dirty=1u,g_previous_buttons,g_initialised,g_page_loading;
+static int32_t g_mouse_down_x,g_mouse_down_y;
 static uint64_t g_now;
 static scheduled_callback g_schedule[64];
 static uint32_t g_plot_rects,g_plot_texts,g_plot_bitmaps,g_render_reports;
@@ -176,7 +178,13 @@ static void window_set_title(gui_window *window,const char *title){(void)window;
 static nserror window_set_url(gui_window *window,nsurl *url){(void)window;if(g_callbacks.url_changed)g_callbacks.url_changed(nsurl_access(url));return NSERROR_OK;}
 static void window_set_status(gui_window *window,const char *status){(void)window;if(g_callbacks.status_changed)g_callbacks.status_changed(status);}
 static void window_set_pointer(gui_window *window,gui_pointer_shape shape){(void)window;uint32_t pointer=shape==GUI_POINTER_POINT?SACX_MOUSE_CURSOR_LINK:shape==GUI_POINTER_CARET?SACX_MOUSE_CURSOR_BEAM:SACX_MOUSE_CURSOR_ARROW;if(g_callbacks.pointer_changed)g_callbacks.pointer_changed(pointer);}
-static gui_window_table g_window_table={window_create,window_destroy,window_invalidate,window_get_scroll,window_set_scroll,window_get_dimensions,window_event,window_set_title,window_set_url,0,window_set_status,window_set_pointer};
+static void window_place_caret(gui_window *window,int x,int y,int height,const rect *clip)
+{
+    (void)window;(void)clip;if(!g_api)return;
+    if(!g_caret_object){sacx_color c={22,42,60};if(g_api->gfx_obj_add_rect(0,0,2,16,4,c,0,&g_caret_object)!=0)return;(void)g_api->gfx_obj_set_parent(g_caret_object,g_parent);(void)g_api->gfx_obj_set_clip_to_parent(g_caret_object,1u);}
+    if(height<4)height=16;(void)g_api->gfx_obj_set_rect(g_caret_object,x,y,2u,(uint32_t)height);(void)g_api->gfx_obj_set_visible(g_caret_object,1u);
+}
+static gui_window_table g_window_table={window_create,window_destroy,window_invalidate,window_get_scroll,window_set_scroll,window_get_dimensions,window_event,window_set_title,window_set_url,0,window_set_status,window_set_pointer,window_place_caret};
 
 static uint8_t has_css_suffix(const char *path)
 {
@@ -267,6 +275,8 @@ static int normalize_address(const char *input,char *out,uint32_t cap)
 
 static void destroy_surface(void)
 {
+    if(g_caret_object)(void)g_api->gfx_obj_destroy(g_caret_object);
+    g_caret_object=0u;
     if(g_surface_object)(void)g_api->gfx_obj_destroy(g_surface_object);if(g_surface_image)(void)g_api->img_destroy(g_surface_image);
     g_surface_object=g_surface_image=0u;g_surface_pixels=0;g_surface_stride=0u;
 }
@@ -292,6 +302,9 @@ int dihscover_netsurf_init(const sacx_api *api,uint32_t parent,const dihscover_n
     nsoption_set_bool(foreground_images,true);
     nsoption_set_bool(background_images,true);
     nsoption_set_bool(animate_images,true);
+    /* NetSurf draws and handles its own select popup, which is the only
+       portable option in the small Dihscover frontend. */
+    nsoption_set_bool(core_select_menu,true);
     /* Reflow once the document has useful data instead of laying it out after
        every network fragment on the small cooperative DihOS runtime. */
     nsoption_set_bool(incremental_reflow,false);
@@ -336,6 +349,12 @@ void dihscover_netsurf_pump(uint64_t now_ticks)
 void dihscover_netsurf_mouse(int32_t x,int32_t y,uint8_t buttons,int32_t wheel)
 {
     if(!g_gui.browser)return;if(g_callbacks.pointer_changed)g_callbacks.pointer_changed(SACX_MOUSE_CURSOR_ARROW);if(wheel){g_scroll_y-=wheel*48;if(g_scroll_y<0)g_scroll_y=0;g_dirty=1u;}
-    browser_mouse_state state=BROWSER_MOUSE_HOVER;if(buttons&1u)state=(browser_mouse_state)(state|BROWSER_MOUSE_PRESS_1);if((g_previous_buttons&1u)&&!(buttons&1u))state=(browser_mouse_state)(state|BROWSER_MOUSE_CLICK_1);
+    browser_mouse_state state=BROWSER_MOUSE_HOVER;if((buttons&1u)&&!(g_previous_buttons&1u)){g_mouse_down_x=x;g_mouse_down_y=y;}
+    if(buttons&1u)state=(browser_mouse_state)(state|((g_previous_buttons&1u)&&(x!=g_mouse_down_x||y!=g_mouse_down_y)?BROWSER_MOUSE_DRAG_1:BROWSER_MOUSE_PRESS_1));if((g_previous_buttons&1u)&&!(buttons&1u))state=(browser_mouse_state)(state|BROWSER_MOUSE_CLICK_1);
     browser_window_mouse_track(g_gui.browser,state,x+g_scroll_x,y+g_scroll_y);if(state&BROWSER_MOUSE_CLICK_1)browser_window_mouse_click(g_gui.browser,state,x+g_scroll_x,y+g_scroll_y);g_previous_buttons=buttons;
+}
+
+void dihscover_netsurf_key(uint32_t key)
+{
+    if(g_gui.browser&&key){(void)browser_window_key_press(g_gui.browser,key);g_dirty=1u;}
 }

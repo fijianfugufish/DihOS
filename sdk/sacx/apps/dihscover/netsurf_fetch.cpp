@@ -70,6 +70,15 @@ static bool fetch_initialise(lwc_string *scheme){(void)scheme;return true;}
 static void fetch_finalise(lwc_string *scheme){(void)scheme;}
 static bool fetch_acceptable(const nsurl *url){(void)url;return true;}
 
+static int hex_value(char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;}
+static uint8_t duckduckgo_target(const char *url,char *out,uint32_t cap)
+{
+    const char *needle="duckduckgo.com/l/?uddg=";const char *at=url;uint32_t n=0u;
+    while(*at){const char *p=at,*q=needle;while(*p&&*q&&*p==*q){++p;++q;}if(!*q){at=p;break;}++at;}if(!*at)return 0u;
+    while(*at&&*at!='&'&&n+1u<cap){if(*at=='%'&&at[1]&&at[2]){int hi=hex_value(at[1]),lo=hex_value(at[2]);if(hi>=0&&lo>=0){out[n++]=(char)((hi<<4)|lo);at+=3;continue;}}out[n++]=*at=='+'?' ':*at;++at;}
+    out[n]=0;return n>8u&&((out[0]=='h'&&out[1]=='t'&&out[2]=='t'&&out[3]=='p'))?1u:0u;
+}
+
 static void *fetch_setup(struct fetch *parent,nsurl *url,bool only_2xx,bool downgrade_tls,
                          const char *post_urlenc,const struct fetch_multipart_data *post_multipart,
                          const char **headers)
@@ -84,6 +93,16 @@ static bool fetch_start(void *opaque)
 {
     dihos_fetch *ctx=(dihos_fetch*)opaque;const sacx_api *api=dihscover_netsurf_api();
     if(!api||!SACX_API_HAS(api,net_request_start))return false;
+    /* DuckDuckGo result links are tracking wrappers that this tiny network
+       stack receives as a 200-byte landing page rather than an HTTP redirect.
+       Unwrap the destination before the request reaches the network. */
+    {char target[DIHSCOVER_URL_CAP];if(duckduckgo_target(nsurl_access(ctx->url),target,sizeof(target))){
+        /* Do not emit FETCH_REDIRECT synchronously here: core redirect handling
+           can free this fetch context during its own callback.  Repoint this
+           request to the destination instead, which is equivalent for a GET
+           and avoids a use-after-free data abort. */
+        nsurl *destination=0;if(nsurl_create(target,&destination)==NSERROR_OK){nsurl_unref(ctx->url);ctx->url=destination;}
+    }}
     if(ctx->post_data&&SACX_API_HAS(api,net_request_start_ex)){
         sacx_net_request_desc_ex desc={};desc.url=nsurl_access(ctx->url);desc.max_response_bytes=8u*1024u*1024u;
         desc.timeout_ms=45000u;desc.redirect_limit=8u;desc.method="POST";desc.body=ctx->post_data;

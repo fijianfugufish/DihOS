@@ -50,6 +50,7 @@ static uint8_t g_fetch_truncated;
 static volatile uint32_t *g_fetch_cancelled;
 static volatile uint32_t g_fetch_busy;
 static uint64_t g_fetch_deadline;
+static volatile uint32_t g_worker_quiet;
 
 static uint64_t knet_now_ms(void);
 static uint32_t g_dhcp_xid = KNET_DHCP_XID;
@@ -89,12 +90,17 @@ static void knet_response_emit(const uint8_t *data, uint32_t len)
     }
 }
 
-static void knet_log_print(const char *text) { terminal_print(text); }
-static void knet_log_inline(const char *text) { terminal_print_inline(text); }
-static void knet_log_success(const char *text) { terminal_success(text); }
-static void knet_log_warn(const char *text) { terminal_warn(text); }
-static void knet_log_error(const char *text) { terminal_error(text); }
-static void knet_log_hex32(uint32_t value) { terminal_print_inline_hex32(value); }
+static uint8_t knet_log_enabled(void)
+{
+    return __atomic_load_n(&g_worker_quiet, __ATOMIC_ACQUIRE) == 0u;
+}
+static void knet_log_print(const char *text) { if (knet_log_enabled()) terminal_print(text); }
+static void knet_log_inline(const char *text) { if (knet_log_enabled()) terminal_print_inline(text); }
+static void knet_log_success(const char *text) { if (knet_log_enabled()) terminal_success(text); }
+static void knet_log_warn(const char *text) { if (knet_log_enabled()) terminal_warn(text); }
+static void knet_log_error(const char *text) { if (knet_log_enabled()) terminal_error(text); }
+static void knet_log_hex32(uint32_t value) { if (knet_log_enabled()) terminal_print_inline_hex32(value); }
+static void knet_log_flush(void) { if (knet_log_enabled()) terminal_flush_log(); }
 
 #define terminal_print knet_log_print
 #define terminal_print_inline knet_log_inline
@@ -102,6 +108,7 @@ static void knet_log_hex32(uint32_t value) { terminal_print_inline_hex32(value);
 #define terminal_warn knet_log_warn
 #define terminal_error knet_log_error
 #define terminal_print_inline_hex32 knet_log_hex32
+#define terminal_flush_log knet_log_flush
 
 static void knet_x509_start_chain(const br_x509_class **ctx, const char *server_name)
 {
@@ -1625,6 +1632,11 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 int knet_usb_get_url(const char *url, uint32_t max_bytes)
 {
     return knet_usb_request_url(url, max_bytes, "GET", 0, 0u, 0);
+}
+
+void knet_usb_set_worker_quiet(uint32_t quiet)
+{
+    __atomic_store_n(&g_worker_quiet, quiet ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
 int knet_usb_fetch_request(const char *url, const char *method,

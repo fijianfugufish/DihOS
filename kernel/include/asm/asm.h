@@ -20,6 +20,7 @@ extern "C"
     void asm_sync_executable_range(const void *ptr, uint64_t len);
     void asm_aa64_install_exception_vectors(void);
     void asm_aa64_panic_renderer_init(const struct kfont *font);
+    uint32_t asm_aa64_panic_active(void);
     void asm_aa64_set_probe_trace(int enabled);
     int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value);
     int asm_aa64_try_write32(uint64_t addr, uint32_t value);

@@ -382,11 +382,26 @@ $imageEditorImports = Join-Path $ProjectRoot "sdk\sacx\imports\default.imports.t
 if ($LASTEXITCODE) { throw "image editor SACX build failed" }
 
 # ---- USB copy (U:\) if present ----
+$FirmwareSource = Join-Path $ProjectRoot "OS\Firmware"
+if (!(Test-Path -LiteralPath $FirmwareSource)) {
+  throw "Firmware source tree not found: $FirmwareSource"
+}
+
+function Copy-DihosFirmware {
+  param([Parameter(Mandatory = $true)][string]$Destination)
+
+  New-Item -Force -ItemType Directory -Path $Destination | Out-Null
+  # Copy the contents, rather than nesting a second Firmware directory.
+  Get-ChildItem -LiteralPath $FirmwareSource -Force |
+    Copy-Item -Destination $Destination -Recurse -Force
+}
+
 $UsbRoot = "U:\"
 if (Test-Path $UsbRoot) {
   $destBoot = Join-Path $UsbRoot "EFI\BOOT"
   $destAA64 = Join-Path $UsbRoot "OS\aa64"
   $destX64  = Join-Path $UsbRoot "OS\x64"
+  $destFirmware = Join-Path $UsbRoot "OS\Firmware"
   $destImageEditor = Join-Path $UsbRoot "OS\System\Programs\Image Viewer"
   New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
 
@@ -395,6 +410,7 @@ if (Test-Path $UsbRoot) {
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
   Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
   Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
+  Copy-DihosFirmware -Destination $destFirmware
   if (!$ArmOnly) {
     Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
     Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
@@ -405,6 +421,7 @@ if (Test-Path $UsbRoot) {
   Write-Host "  U:\EFI\BOOT\BOOTAA64.EFI"
   Write-Host "  U:\OS\aa64\STAGE2.EFI"
   Write-Host "  U:\OS\aa64\KERNEL.ELF"
+  Write-Host "  U:\OS\Firmware\..."
   Write-Host "  U:\OS\System\Programs\Image Viewer\image_viewer.sacx"
   if (!$ArmOnly) {
     Write-Host "  U:\EFI\BOOT\BOOTX64.EFI"
@@ -456,6 +473,7 @@ if ($VhdAccessible) {
     $destBoot = Join-Path $VhdRoot "EFI\BOOT"
     $destAA64 = Join-Path $VhdRoot "OS\aa64"
     $destX64  = Join-Path $VhdRoot "OS\x64"
+    $destFirmware = Join-Path $VhdRoot "OS\Firmware"
     $destImageEditor = Join-Path $VhdRoot "OS\System\Programs\Image Viewer"
 
     New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
@@ -465,6 +483,7 @@ if ($VhdAccessible) {
     Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
     Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
     Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
+    Copy-DihosFirmware -Destination $destFirmware
     if (!$ArmOnly) {
       Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
       Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")

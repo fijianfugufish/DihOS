@@ -880,6 +880,21 @@ int project_export_step_async(uint32_t row_budget, uint32_t *out_progress)
     }
     else if (G_export_job.phase == ASYNC_EXPORT_ENCODE_WAIT)
     {
+        if (SACX_API_HAS(g_api, img_save_async) &&
+            SACX_API_HAS(g_api, img_save_status) &&
+            SACX_API_HAS(g_api, img_save_release))
+        {
+            rc = g_api->img_save_async(G_export_job.image, G_export_job.temp_path,
+                                       G_export_job.format, G_export_job.quality,
+                                       &G_export_job.save_id);
+            if (rc != 0 || !G_export_job.save_id)
+                goto fail;
+            G_export_job.phase = ASYNC_EXPORT_ENCODE;
+            if (out_progress)
+                *out_progress = 90u;
+            return 1;
+        }
+
         rc = g_api->img_save(G_export_job.image, G_export_job.temp_path,
                              G_export_job.format, G_export_job.quality);
         if (rc != 0)

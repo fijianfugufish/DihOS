@@ -1,5 +1,8 @@
 #include "netsurf_backend.h"
 #include "sacx_keys.h"
+extern "C" {
+#include "netsurf/keypress.h"
+}
 
 enum { ACTION_NONE, ACTION_BACK, ACTION_FORWARD, ACTION_RELOAD, ACTION_GO };
 enum { UI_TITLEBAR_H=34, UI_TOOLBAR_Y=42, UI_STATUS_Y=84, UI_PROGRESS_Y=101, UI_DOCUMENT_Y=112 };
@@ -117,6 +120,35 @@ static void poll_toolbar(void)
     if(focused&&(g_api->input_key_pressed(SACX_KEY_ENTER)||g_api->input_key_pressed(SACX_KEY_KP_ENTER)))g_action=ACTION_GO;
 }
 
+static uint32_t netsurf_key_for_usage(uint8_t usage,uint8_t shift)
+{
+    if(usage>=SACX_KEY_A&&usage<=SACX_KEY_Z)return (uint32_t)((shift?'A':'a')+usage-SACX_KEY_A);
+    if(usage>=SACX_KEY_1&&usage<=SACX_KEY_9){static const char normal[]="123456789",shifted[]="!@#$%^&*(";return(uint8_t)(shift?shifted[usage-SACX_KEY_1]:normal[usage-SACX_KEY_1]);}
+    if(usage==SACX_KEY_0)return shift?')':'0';
+    switch(usage){
+    case SACX_KEY_SPACE:return ' ';case SACX_KEY_MINUS:return shift?'_':'-';case SACX_KEY_EQUAL:return shift?'+':'=';
+    case SACX_KEY_LEFTBRACE:return shift?'{':'[';case SACX_KEY_RIGHTBRACE:return shift?'}':']';case SACX_KEY_BACKSLASH:return shift?'|':'\\';
+    case SACX_KEY_SEMICOLON:return shift?':':';';case SACX_KEY_APOSTROPHE:return shift?'\"':'\'';case SACX_KEY_GRAVE:return shift?'~':'`';
+    case SACX_KEY_COMMA:return shift?'<':',';case SACX_KEY_DOT:return shift?'>':'.';case SACX_KEY_SLASH:return shift?'?':'/';
+    case SACX_KEY_BACKSPACE:return NS_KEY_DELETE_LEFT;case SACX_KEY_DELETE:return NS_KEY_DELETE_RIGHT;case SACX_KEY_ENTER:case SACX_KEY_KP_ENTER:return NS_KEY_CR;
+    case SACX_KEY_TAB:return shift?NS_KEY_SHIFT_TAB:NS_KEY_TAB;case SACX_KEY_ESCAPE:return NS_KEY_ESCAPE;case SACX_KEY_LEFT:return NS_KEY_LEFT;
+    case SACX_KEY_RIGHT:return NS_KEY_RIGHT;case SACX_KEY_UP:return NS_KEY_UP;case SACX_KEY_DOWN:return NS_KEY_DOWN;case SACX_KEY_HOME:return NS_KEY_LINE_START;
+    case SACX_KEY_END:return NS_KEY_LINE_END;case SACX_KEY_PAGEUP:return NS_KEY_PAGE_UP;case SACX_KEY_PAGEDOWN:return NS_KEY_PAGE_DOWN;default:return 0u;}
+}
+
+static void poll_page_keys(void)
+{
+    if(g_api->textbox_focused(g_address)>0)return;
+    uint8_t shift=(g_api->input_key_down(SACX_KEY_LSHIFT)||g_api->input_key_down(SACX_KEY_RSHIFT))?1u:0u;
+    /* Letter/punctuation HID usages only.  Control usages below are handled
+       separately; scanning both was sending Backspace twice. */
+    for(uint8_t usage=SACX_KEY_A;usage<=SACX_KEY_0;++usage)if(g_api->input_key_pressed(usage)){uint32_t key=netsurf_key_for_usage(usage,shift);if(key)dihscover_netsurf_key(key);}
+    static const uint8_t punctuation[]={SACX_KEY_SPACE,SACX_KEY_MINUS,SACX_KEY_EQUAL,SACX_KEY_LEFTBRACE,SACX_KEY_RIGHTBRACE,SACX_KEY_BACKSLASH,SACX_KEY_SEMICOLON,SACX_KEY_APOSTROPHE,SACX_KEY_GRAVE,SACX_KEY_COMMA,SACX_KEY_DOT,SACX_KEY_SLASH};
+    for(uint32_t i=0;i<sizeof(punctuation);++i)if(g_api->input_key_pressed(punctuation[i])){uint32_t key=netsurf_key_for_usage(punctuation[i],shift);if(key)dihscover_netsurf_key(key);}
+    static const uint8_t special[]={SACX_KEY_BACKSPACE,SACX_KEY_DELETE,SACX_KEY_ENTER,SACX_KEY_KP_ENTER,SACX_KEY_TAB,SACX_KEY_ESCAPE,SACX_KEY_LEFT,SACX_KEY_RIGHT,SACX_KEY_UP,SACX_KEY_DOWN,SACX_KEY_HOME,SACX_KEY_END,SACX_KEY_PAGEUP,SACX_KEY_PAGEDOWN};
+    for(uint32_t i=0;i<sizeof(special);++i)if(g_api->input_key_pressed(special[i])){uint32_t key=netsurf_key_for_usage(special[i],shift);if(key)dihscover_netsurf_key(key);}
+}
+
 static void handle_action(void)
 {
     uint32_t action=g_action;g_action=ACTION_NONE;
@@ -163,7 +195,7 @@ static void update_progress(uint64_t now)
 static int update(const sacx_api *api)
 {
     if(!api->window_visible(g_window)){dihscover_netsurf_shutdown();return api->app_exit(0,"Dihscover closed");}
-    uint64_t now=api->time_ticks();layout_ui();poll_toolbar();handle_action();dihscover_netsurf_pump(now);update_progress(now);
+    uint64_t now=api->time_ticks();layout_ui();poll_toolbar();poll_page_keys();handle_action();dihscover_netsurf_pump(now);update_progress(now);
     sacx_mouse_state mouse;
     if(api->mouse_get_state(&mouse)==0&&api->window_focused(g_window)){
         int32_t local_x=mouse.x-g_root_x,local_y=mouse.y-g_root_y;

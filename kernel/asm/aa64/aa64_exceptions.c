@@ -17,6 +17,16 @@ static volatile uint32_t g_aa64_probe_trace = 0u;
 void aa64_exception_panic(void) __attribute__((noreturn));
 static volatile uint32_t g_aa64_panicking;
 static const kfont *g_aa64_panic_font;
+/*
+ * Do not build a fault frame on the interrupted stack.  A worker can fault
+ * because that stack is already exhausted or corrupt; using it again for the
+ * exception frame would turn a reportable abort into a silent reset.
+ *
+ * MPIDR affinity 0 is used only to choose an emergency slot.  The first fault
+ * owns the panic display, so aliasing after 16 logical CPUs is harmless.
+ */
+static uint8_t g_aa64_panic_stacks[16u][4096u]
+    __attribute__((aligned(16), used));
 typedef struct { uint64_t x[31], esr, far, elr, spsr; } aa64_fault_frame;
 
 static const char *aa64_reason(uint64_t esr)
@@ -38,14 +48,49 @@ static void aa64_terminal_source(const kcrash_location *source)
     terminal_print_inline("source: "); terminal_print(source->file);
     terminal_print_inline("line: "); terminal_print(line);
 }
+static void aa64_terminal_register(const char *name, uint64_t value)
+{
+    terminal_print_inline(name); terminal_print_inline("=");
+    terminal_print_inline_hex64(value); terminal_print("");
+}
+static void aa64_terminal_panic_report(const aa64_fault_frame *f,
+                                       const kcrash_location *source,
+                                       int have_source)
+{
+    static const char *const x_names[31] = {
+        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+        "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+        "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
+        "x24", "x25", "x26", "x27", "x28", "x29", "x30"
+    };
+    terminal_error("your pc died");
+    terminal_print_inline("why? \""); terminal_print_inline(aa64_reason(f->esr)); terminal_print("\"");
+    terminal_print("you cant do anything to fix this. restart your pc.");
+    terminal_print("info for nerds");
+    aa64_terminal_register("esr_el1", f->esr);
+    aa64_terminal_register("far_el1", f->far);
+    aa64_terminal_register("elr_el1", f->elr);
+    aa64_terminal_register("spsr_el1", f->spsr);
+    for (uint32_t i = 0u; i < 31u; ++i)
+        aa64_terminal_register(x_names[i], f->x[i]);
+    if (have_source) aa64_terminal_source(source);
+    else terminal_warn("source location unavailable");
+}
 void asm_aa64_panic_renderer_init(const kfont *font) { if (!g_aa64_panicking) g_aa64_panic_font=font; }
+uint32_t asm_aa64_panic_active(void)
+{
+    return __atomic_load_n(&g_aa64_panicking, __ATOMIC_ACQUIRE);
+}
 void aa64_exception_dispatch(const aa64_fault_frame *f) __attribute__((noreturn));
 void aa64_exception_dispatch(const aa64_fault_frame *f)
 {
     char h[19]; kcrash_location source = {0};
     kcolor text_white={245,248,255}, pale={210,225,255};
     __asm__ __volatile__("msr daifset, #0xf" ::: "memory");
-    if (g_aa64_panicking) aa64_exception_panic(); g_aa64_panicking=1u;
+    /* The first fault owns the report.  Every other core must halt rather
+       than continue updating shared UI/driver state after a kernel fault. */
+    if (__atomic_exchange_n(&g_aa64_panicking, 1u, __ATOMIC_ACQ_REL))
+        aa64_exception_panic();
     extern const boot_info *k_bootinfo_ptr;
     int have_source = k_bootinfo_ptr &&
         kcrash_map_lookup(f->elr, k_bootinfo_ptr->kernel_base_phys, &source) == 0;
@@ -77,16 +122,16 @@ void aa64_exception_dispatch(const aa64_fault_frame *f)
         }
     }
     kgfx_panic_present();
-    terminal_error("your pc died");
-    terminal_error(aa64_reason(f->esr));
-    terminal_print_inline("elr_el1="); terminal_print_inline_hex64(f->elr); terminal_print("");
-    if (have_source) aa64_terminal_source(&source);
-    else terminal_warn("source location unavailable");
+    aa64_terminal_panic_report(f, &source, have_source);
     terminal_flush_log(); aa64_exception_panic();
 }
 
 void aa64_exception_panic(void)
 {
+    __atomic_store_n(&g_aa64_panicking, 1u, __ATOMIC_RELEASE);
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    __asm__ __volatile__("sev" ::: "memory");
+#endif
     for (;;)
         __asm__ __volatile__("wfe" ::: "memory");
 }
@@ -138,6 +183,14 @@ __attribute__((naked)) void aa64_sync_current_el_spx(void)
 __attribute__((naked)) void aa64_exception_common(void)
 {
     __asm__ __volatile__(
+        "mrs x16, mpidr_el1\n"
+        "and x16, x16, #0xf\n"
+        "adrp x17, g_aa64_panic_stacks\n"
+        "add x17, x17, :lo12:g_aa64_panic_stacks\n"
+        "mov x18, #0x1000\n"
+        "madd x17, x16, x18, x17\n"
+        "add x17, x17, #0x1000\n"
+        "mov sp, x17\n"
         "sub sp, sp, #0x120\n"
         "stp x0,x1,[sp,#0]\n" "stp x2,x3,[sp,#16]\n" "stp x4,x5,[sp,#32]\n" "stp x6,x7,[sp,#48]\n"
         "stp x8,x9,[sp,#64]\n" "stp x10,x11,[sp,#80]\n" "stp x12,x13,[sp,#96]\n" "stp x14,x15,[sp,#112]\n"
@@ -148,20 +201,22 @@ __attribute__((naked)) void aa64_exception_common(void)
         "mov x0,sp\n" "bl aa64_exception_dispatch\n" "b aa64_exception_panic\n");
 }
 
-__attribute__((naked)) void aa64_irq_current_el_sp0(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_fiq_current_el_sp0(void) { __asm__ __volatile__("b aa64_exception_panic"); }
+/* Every fatal vector must report.  Previously IRQ/FIQ took the halt-only
+ * path, leaving the desktop frozen with no panic screen or register dump. */
+__attribute__((naked)) void aa64_irq_current_el_sp0(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_fiq_current_el_sp0(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_serr_current_el_sp0(void) { __asm__ __volatile__("b aa64_sync_current_el_spx"); }
-__attribute__((naked)) void aa64_irq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_fiq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_panic"); }
+__attribute__((naked)) void aa64_irq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_fiq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_serr_current_el_spx(void) { __asm__ __volatile__("b aa64_sync_current_el_spx"); }
-__attribute__((naked)) void aa64_sync_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_irq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_fiq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_serr_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_sync_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_irq_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_fiq_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_panic"); }
-__attribute__((naked)) void aa64_serr_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_panic"); }
+__attribute__((naked)) void aa64_sync_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_irq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_fiq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_serr_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_sync_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_irq_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_fiq_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_serr_lower_el_a32(void) { __asm__ __volatile__("b aa64_exception_common"); }
 
 __attribute__((naked, aligned(2048))) static void aa64_vector_table(void)
 {
