@@ -23,6 +23,10 @@ typedef struct gpu_firmware_file
     gpu_firmware_role role;
     uint32_t required;
     uint32_t expected_size;
+    /* Bytes stripped from the source container before staging the
+     * device-visible image.  Use zero for firmware whose file begins with
+     * executable/device data. */
+    uint32_t payload_offset;
 } gpu_firmware_file;
 
 typedef struct gpu_firmware_manifest
@@ -44,6 +48,7 @@ typedef struct gpu_firmware_inventory
 typedef struct gpu_firmware_blob
 {
     gpu_firmware_role role;
+    uint32_t payload_offset;
     gpu_buffer buffer;
 } gpu_firmware_blob;
 
@@ -63,3 +68,12 @@ int gpu_firmware_scan(const gpu_firmware_manifest *manifest,
 int gpu_firmware_load(const gpu_firmware_manifest *manifest,
                       gpu_firmware_set *out);
 void gpu_firmware_release(gpu_firmware_set *set);
+
+/* Returns a staged blob by its semantic role.  GPU-family code must not rely
+ * on the manifest's incidental file ordering when binding firmware IOVAs. */
+const gpu_firmware_blob *gpu_firmware_find(const gpu_firmware_set *set,
+                                           gpu_firmware_role role);
+
+/* Returns the aligned address of a staged device-visible image.  Returns zero
+ * until the payload is valid and the blob has been mapped. */
+uint64_t gpu_firmware_payload_iova(const gpu_firmware_blob *blob);

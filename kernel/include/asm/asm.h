@@ -36,6 +36,17 @@ extern "C"
                          uint64_t *x2,
                          uint64_t *x3,
                          uint64_t *out_esr);
+    /* Guarded SMC variant for Qualcomm SCM calls that carry four arguments
+     * in x2..x5.  The function returns an exception-probe result; secure
+     * firmware's own status remains in x0. */
+    int asm_aa64_try_smc6(uint32_t immediate,
+                          uint64_t *x0,
+                          uint64_t *x1,
+                          uint64_t *x2,
+                          uint64_t *x3,
+                          uint64_t *x4,
+                          uint64_t *x5,
+                          uint64_t *out_esr);
     int asm_aa64_try_hv_set_vpreg(uint32_t reg,
                                   uint64_t value,
                                   uint64_t *out_status,

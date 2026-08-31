@@ -4,8 +4,10 @@
 #include "gpu/gpu_gmu_boot.h"
 #include "gpu/gpu_gmu_image.h"
 #include "gpu/gpu_gmu_memory.h"
+#include "gpu/gpu_cp.h"
 #include "gpu/gpu_iommu.h"
 #include "gpu/gpu_mmio.h"
+#include "gpu/gpu_qcom_scm.h"
 #include "gpu/gpu_smmu_v2.h"
 #include "gpu/gpu_ring.h"
 #include "gpu/rpmh_cmd_db.h"
@@ -18,6 +20,8 @@ static gpu_iommu_domain g_iommu_domain;
 static gpu_iommu_topology g_iommu_topology;
 static gpu_iommu_attach_plan g_iommu_attach_plan;
 static gpu_command_ring g_submission_ring;
+static gpu_buffer g_cp_shadow;
+static gpu_buffer g_cp_pwrup;
 static gpu_scanout_target g_scanout_target;
 static gpu_mmio_window g_gpu_regs_window;
 static gpu_mmio_window g_gpu_pdc_window;
@@ -38,14 +42,21 @@ static uint32_t g_gmu_reset_signature;
 
 #define GPU_SMMUV2_FSR_FAULT_MASK 0xC00001FEu
 
-#define GPU_CORE_STAGING_IOVA_BASE 0x0000000100000000ull
-#define GPU_CORE_SUBMISSION_IOVA   0x0000000110000000ull
-#define GPU_CORE_SUBMISSION_BYTES  0x00004000u
-#define GPU_CORE_SCANOUT_IOVA      0x0000000120000000ull
+#define GPU_CORE_STAGING_IOVA_BASE 0x0000000010000000ull
+#define GPU_CORE_SUBMISSION_IOVA   0x0000000020000000ull
+#define GPU_CORE_SUBMISSION_BYTES  0x00008000u
+#define GPU_CORE_CP_SHADOW_IOVA     0x0000000020010000ull
+#define GPU_CORE_CP_PWRUP_IOVA      0x0000000020011000ull
+#define GPU_CORE_SCANOUT_IOVA      0x0000000030000000ull
 
-/* X1E's adreno-smmu assigns render SIDs 0/1 to CB0 and GMU SID 5 to CB1.
- * IORT aggregates further firmware-owned lanes under GPU0; those are not
- * claimed by this EL1 driver. */
+/* Gen7's hardware shadow layout is rptr, fence, then BV rptr.  The fence
+ * slot is CPU bookkeeping, not a second hardware rptr destination. */
+#define GPU_CORE_CP_BR_RPTR_OFFSET  0u
+#define GPU_CORE_CP_BV_RPTR_OFFSET  8u
+
+/* X1E exposes two EL1-programmable render stream-match slots.  Further
+ * GPU-local IORT lanes are retained by the platform firmware; do not attempt
+ * to claim them from DihOS because the SMMU correctly blocks that write. */
 #define ADRENO_X1_85_RENDER_SID_COUNT 2u
 #define ADRENO_X1_85_GMU_SID_COUNT    1u
 #define ADRENO_X1_85_DRIVER_SID_COUNT \
@@ -119,6 +130,49 @@ static int gpu_smmuv2_select_streams(const gpu_iommu_attach_plan *source,
     return 0;
 }
 
+static void gpu_smmuv2_log_stream_binding(uint32_t stream_id)
+{
+    gpu_smmuv2_stream_binding binding = {0};
+    int rc = gpu_smmuv2_find_stream_binding(&g_gpu_smmu_window,
+                                            &g_gpu_smmu_caps, stream_id,
+                                            &binding);
+
+    terminal_print(" [SID ");
+    terminal_print_inline_hex64(stream_id);
+    if (rc == 0)
+    {
+        terminal_print(" -> SMR ");
+        terminal_print_inline_hex64(binding.smr_index);
+        terminal_print(" S2CR=");
+        terminal_print_inline_hex64(binding.s2cr);
+    }
+    else
+        terminal_print(" -> no stream match]");
+}
+
+static void gpu_smmuv2_log_render_binding(void)
+{
+    gpu_smmuv2_context_state state = {0};
+
+    if (gpu_smmuv2_read_context_state(&g_gpu_smmu_window,
+                                      &g_gpu_smmu_caps,
+                                      g_gpu_smmu_context_bank, &state) != 0)
+        return;
+    terminal_print("[K:GPU] SMMU CB0 state SCTLR=");
+    terminal_print_inline_hex64(state.sctlr);
+    terminal_print(" TCR2=");
+    terminal_print_inline_hex64(state.tcr2);
+    terminal_print(" TCR=");
+    terminal_print_inline_hex64(state.tcr);
+    terminal_print(" TTBR0=");
+    terminal_print_inline_hex64(state.ttbr0);
+    terminal_print(" MAIR0=");
+    terminal_print_inline_hex64(state.mair0);
+    for (uint32_t i = 0u; i < ADRENO_X1_85_RENDER_SID_COUNT; ++i)
+        gpu_smmuv2_log_stream_binding(g_adreno_x1_85_render_sids[i]);
+    terminal_flush_log();
+}
+
 static int gpu_smmuv2_attach_staged_domain(void *context)
 {
     gpu_iommu_attach_plan render_plan;
@@ -168,6 +222,7 @@ static int gpu_smmuv2_attach_staged_domain(void *context)
     terminal_print(" streams bound=");
     terminal_print_inline_hex64(g_gpu_smmu_bound_stream_count);
     terminal_flush_log();
+    gpu_smmuv2_log_render_binding();
     return 0;
 }
 
@@ -351,6 +406,8 @@ static int map_staged_firmware(void)
 
     gpu_iommu_domain_release(&g_iommu_domain);
     gpu_ring_release(&g_submission_ring);
+    gpu_buffer_release(&g_cp_shadow);
+    gpu_buffer_release(&g_cp_pwrup);
     if (gpu_iommu_domain_init(&g_iommu_domain, GPU_IOMMU_MAX_VA_BITS) != 0)
         return -1;
     for (uint32_t i = 0u; i < g_firmware.blob_count; ++i)
@@ -366,23 +423,38 @@ static int map_staged_firmware(void)
     if (gpu_ring_init(&g_submission_ring, GPU_CORE_SUBMISSION_BYTES) != 0 ||
         gpu_iommu_map_buffer(&g_iommu_domain, &g_submission_ring.buffer,
                              GPU_CORE_SUBMISSION_IOVA) != 0 ||
-        gpu_ring_seal(&g_submission_ring) != 0)
+        gpu_buffer_alloc(&g_cp_shadow, 0x1000u,
+                         GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
+        gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_shadow,
+                             GPU_CORE_CP_SHADOW_IOVA) != 0 ||
+        gpu_buffer_alloc(&g_cp_pwrup, 0x1000u,
+                         GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
+        gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_pwrup,
+                             GPU_CORE_CP_PWRUP_IOVA) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_buffer_release(&g_cp_shadow);
+        gpu_buffer_release(&g_cp_pwrup);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -3;
     }
+    gpu_buffer_prepare_for_device(&g_cp_shadow);
+    gpu_buffer_prepare_for_device(&g_cp_pwrup);
     if (g_scanout_target.buffer.cpu &&
         gpu_iommu_map_buffer(&g_iommu_domain, &g_scanout_target.buffer,
                              GPU_CORE_SCANOUT_IOVA) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_buffer_release(&g_cp_shadow);
+        gpu_buffer_release(&g_cp_pwrup);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -4;
     }
     if (gpu_gmu_memory_map(&g_iommu_domain, &g_gmu_memory) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_buffer_release(&g_cp_shadow);
+        gpu_buffer_release(&g_cp_pwrup);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -5;
     }
@@ -411,6 +483,8 @@ int gpu_core_init(const boot_info *boot)
     g_scanout_target = (gpu_scanout_target){0};
     gpu_iommu_domain_release(&g_iommu_domain);
     gpu_ring_release(&g_submission_ring);
+    gpu_buffer_release(&g_cp_shadow);
+    gpu_buffer_release(&g_cp_pwrup);
     gpu_firmware_release(&g_firmware);
     gpu_mmio_unmap_window(&g_gpu_regs_window);
     gpu_mmio_unmap_window(&g_gpu_pdc_window);
@@ -648,6 +722,12 @@ int gpu_core_init(const boot_info *boot)
                 terminal_print_inline_hex64(g_iommu_domain.mapping_count);
                 terminal_print("[K:GPU] staged command ring IOVA=");
                 terminal_print_inline_hex64(g_submission_ring.buffer.iova);
+                terminal_print(" dwords=");
+                terminal_print_inline_hex64(g_submission_ring.write_dwords);
+                terminal_print("[K:GPU] staged CP shadow IOVA=");
+                terminal_print_inline_hex64(g_cp_shadow.iova);
+                terminal_print(" pwrup IOVA=");
+                terminal_print_inline_hex64(g_cp_pwrup.iova);
                 if (g_scanout_target.buffer.iova)
                 {
                     terminal_print("[K:GPU] staged scanout IOVA=");
@@ -769,7 +849,7 @@ int gpu_core_init(const boot_info *boot)
                                                 start_rc = gpu_gmu_hfi_gen7_set_gx_bw(
                                                     &g_gpu_gmu_window, &g_gmu_memory,
                                                     g_hfi_perf_table.gx_level_count - 1u,
-                                                    1u);
+                                                    g_hfi_bw_table.level_count - 1u);
                                             if (start_rc == 0)
                                                 terminal_print("[K:GPU] Gen7 HFI core, GMU start and GX vote accepted");
                                             else
@@ -778,6 +858,8 @@ int gpu_core_init(const boot_info *boot)
                                             {
                                                 uint32_t gx_ack = 0u;
                                                 uint32_t gx_hw_version = 0u;
+                                                gpu_cp_snapshot cp = {0};
+                                                const gpu_firmware_blob *sqe;
                                                 int gx_rc = gpu_gmu_gen7_acquire_gpu(
                                                     &g_gpu_gmu_window, &gx_ack);
 
@@ -792,7 +874,267 @@ int gpu_core_init(const boot_info *boot)
                                                         terminal_print_inline_hex64(gx_ack);
                                                         terminal_print("[K:GPU] GX live RBBM HW version=");
                                                         terminal_print_inline_hex64(gx_hw_version);
+                                                        if (gpu_cp_snapshot_read(
+                                                                &g_gpu_regs_window,
+                                                                adreno_x1_85_cp_layout(),
+                                                                &cp) == 0)
+                                                        {
+                                                            terminal_print("[K:GPU] GX live CP rptr=");
+                                                            terminal_print_inline_hex64(cp.rb_rptr);
+                                                            terminal_print(" wptr=");
+                                                            terminal_print_inline_hex64(cp.rb_wptr);
+                                                            terminal_print(" sqe=");
+                                                            terminal_print_inline_hex64(cp.sqe_control);
+                                                            terminal_print(" hw-fault=");
+                                                            terminal_print_inline_hex64(cp.hw_fault);
+                                                            terminal_print(" protect=");
+                                                            terminal_print_inline_hex64(cp.protect_status);
+                                                        }
+                                                        else
+                                                            terminal_warn("[K:GPU] CP live-register probe faulted");
+
+                                                        sqe = gpu_firmware_find(
+                                                            &g_firmware,
+                                                            GPU_FIRMWARE_SQE);
+                                                        if (!sqe || !sqe->buffer.iova)
+                                                            terminal_warn("[K:GPU] SQE firmware IOVA unavailable; CP command withheld");
+                                                        else if (cp.hw_fault || cp.protect_status)
+                                                            terminal_warn("[K:GPU] CP reports a pre-existing fault; CP command withheld");
+                                                        else
+                                                        {
+                                                            gpu_cp_bind_config cp_config = {
+                                                                gpu_firmware_payload_iova(sqe),
+                                                                g_submission_ring.buffer.iova,
+                                                                g_cp_shadow.iova + GPU_CORE_CP_BR_RPTR_OFFSET,
+                                                                g_cp_shadow.iova + GPU_CORE_CP_BV_RPTR_OFFSET,
+                                                                (uint32_t)g_submission_ring.buffer.size_bytes,
+                                                                ADRENO_X1_85_CP_RB_CNTL_BOOT,
+                                                                /* A7xx does not use the legacy CP address-mode
+                                                                 * register.  The SMMU remains 64-bit; writing
+                                                                 * CP_ADDR_MODE_CNTL here hits a reserved register
+                                                                 * on X1-85 (readback: DEAFBEAD). */
+                                                                0u,
+                                                                ADRENO_X1_85_CP_BR_APRIV_MASK,
+                                                                ADRENO_X1_85_CP_AUX_APRIV_MASK,
+                                                                ADRENO_X1_85_CP_AUX_APRIV_MASK,
+                                                            };
+                                                            int cp_rc;
+                                                            uint64_t scm_available = 0u;
+                                                            uint64_t scm_status = 0u;
+                                                            uint64_t scm_esr = 0u;
+
+                                                            cp_rc = gpu_qcom_scm_open_gpu_smmu_aperture(
+                                                                g_gpu_smmu_context_bank,
+                                                                &scm_available, &scm_status,
+                                                                &scm_esr);
+                                                            terminal_print("[K:GPU] Qualcomm CB0 aperture rc=");
+                                                            terminal_print_inline_hex64(
+                                                                (uint64_t)(uint32_t)(-cp_rc));
+                                                            terminal_print(" available=");
+                                                            terminal_print_inline_hex64(scm_available);
+                                                            terminal_print(" status=");
+                                                            terminal_print_inline_hex64(scm_status);
+                                                            if (scm_esr)
+                                                            {
+                                                                terminal_print(" ESR=");
+                                                                terminal_print_inline_hex64(scm_esr);
+                                                            }
+                                                            terminal_flush_log();
+                                                            if (cp_rc != 0)
+                                                            {
+                                                                terminal_warn("[K:GPU] CB0 aperture service did not complete; continuing with the existing SMMUv2 mapping");
+                                                                terminal_flush_log();
+                                                            }
+                                                            cp_rc = adreno_x1_85_prepare_cp_host(
+                                                                &g_gpu_regs_window);
+                                                            terminal_print("[K:GPU] applying Gen7 host CP setup");
+                                                            terminal_flush_log();
+                                                            if (cp_rc != 0)
+                                                            {
+                                                                terminal_warn("[K:GPU] Gen7 host CP setup failed; CP command withheld");
+                                                                terminal_print_inline_hex64((uint64_t)(uint32_t)(-cp_rc));
+                                                                terminal_flush_log();
+                                                            }
+                                                            else
+                                                            {
+                                                            cp_rc = adreno_x1_85_build_cp_pwrup_record(
+                                                                &g_gpu_regs_window, &g_cp_pwrup);
+                                                            if (cp_rc == 0)
+                                                                cp_rc = adreno_x1_85_emit_minimal_cp_init(
+                                                                    &g_submission_ring,
+                                                                    g_cp_pwrup.iova);
+                                                            if (cp_rc == 0)
+                                                                cp_rc = gpu_ring_seal(
+                                                                    &g_submission_ring);
+                                                            if (cp_rc != 0)
+                                                            {
+                                                                terminal_warn("[K:GPU] Gen7 CP power-up record or init ring failed; CP command withheld");
+                                                                terminal_print_inline_hex64(
+                                                                    (uint64_t)(uint32_t)(-cp_rc));
+                                                                terminal_flush_log();
+                                                            }
+                                                            if (cp_rc == 0)
+                                                            {
+                                                            terminal_print("[K:GPU] binding Gen7 SQE IOVA=");
+                                                            terminal_print_inline_hex64(cp_config.sqe_iova);
+                                                            terminal_print(" ring IOVA=");
+                                                            terminal_print_inline_hex64(cp_config.ring_iova);
+                                                            terminal_flush_log();
+                                                            cp_rc = gpu_cp_bind(
+                                                                &g_gpu_regs_window,
+                                                                adreno_x1_85_cp_layout(),
+                                                                &cp_config);
+                                                            if (cp_rc == 0 &&
+                                                                gpu_cp_snapshot_read(
+                                                                    &g_gpu_regs_window,
+                                                                    adreno_x1_85_cp_layout(),
+                                                                    &cp) == 0)
+                                                            {
+                                                                terminal_print("[K:GPU] CP bind readback SQE=");
+                                                                terminal_print_inline_hex64(cp.sqe_instruction_base);
+                                                                terminal_print(" ring=");
+                                                                terminal_print_inline_hex64(cp.rb_base);
+                                                                terminal_print(" BR-shadow=");
+                                                                terminal_print_inline_hex64(cp.rb_rptr_address);
+                                                                terminal_print(" BV-shadow=");
+                                                                terminal_print_inline_hex64(cp.bv_rb_rptr_address);
+                                                                terminal_print(" rb-cntl=");
+                                                                terminal_print_inline_hex64(cp.rb_control);
+                                                                terminal_print(" addr-mode=");
+                                                                terminal_print_inline_hex64(cp.address_mode_control);
+                                                                terminal_print(" apriv=");
+                                                                terminal_print_inline_hex64(cp.apriv_control);
+                                                                terminal_flush_log();
+                                                            }
+                                                            if (cp_rc == 0)
+                                                            {
+                                                                terminal_print("[K:GPU] submitting minimal Gen7 CP init");
+                                                                terminal_flush_log();
+                                                                cp_rc = gpu_cp_submit_fenced(
+                                                                    &g_gpu_regs_window,
+                                                                    &g_gpu_gmu_window,
+                                                                    ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
+                                                                    adreno_x1_85_cp_layout(),
+                                                                    &g_submission_ring);
+                                                            }
+                                                            if (cp_rc == 0)
+                                                                cp_rc = gpu_cp_wait_ring(
+                                                                    &g_gpu_regs_window,
+                                                                    adreno_x1_85_cp_layout(),
+                                                                    g_submission_ring.write_dwords,
+                                                                    100000u, &cp);
+                                                            if (cp_rc == 0 && !cp.hw_fault &&
+                                                                !cp.protect_status)
+                                                            {
+                                                                terminal_print("[K:GPU] CP minimal init consumed rptr=");
+                                                                terminal_print_inline_hex64(cp.rb_rptr);
+                                                                terminal_print(" wptr=");
+                                                                terminal_print_inline_hex64(cp.rb_wptr);
+                                                                terminal_print(" sqe=");
+                                                                terminal_print_inline_hex64(cp.sqe_control);
+                                                            }
+                                                            else
+                                                            {
+                                                                terminal_warn("[K:GPU] CP minimal init did not complete cleanly");
+                                                                terminal_print("[K:GPU] CP init rc=");
+                                                                terminal_print_inline_hex64(
+                                                                    (uint32_t)(-cp_rc));
+                                                                terminal_print(" rptr=");
+                                                                terminal_print_inline_hex64(cp.rb_rptr);
+                                                                terminal_print(" wptr=");
+                                                                terminal_print_inline_hex64(cp.rb_wptr);
+                                                                terminal_print(" fault=");
+                                                                terminal_print_inline_hex64(cp.hw_fault);
+                                                                terminal_print(" protect=");
+                                                                terminal_print_inline_hex64(cp.protect_status);
+                                                                terminal_print(" sqe=");
+                                                                terminal_print_inline_hex64(cp.sqe_control);
+                                                                {
+                                                                    uint32_t rbbm_interrupt = 0u;
+                                                                    uint32_t cp_interrupt = 0u;
+                                                                    uint32_t cp_to_gmu = 0u;
+                                                                    uint32_t roq_ring = 0u;
+                                                                    gpu_smmuv2_context_fault render_fault = {0};
+                                                                    gpu_smmuv2_global_fault global_fault = {0};
+
+                                                                    if (gpu_mmio_try_read32(
+                                                                            &g_gpu_regs_window,
+                                                                            ADRENO_X1_85_RBBM_INT_STATUS,
+                                                                            &rbbm_interrupt) == 0 &&
+                                                                        gpu_mmio_try_read32(
+                                                                            &g_gpu_regs_window,
+                                                                            ADRENO_X1_85_CP_INTERRUPT_STATUS,
+                                                                            &cp_interrupt) == 0 &&
+                                                                        gpu_mmio_try_read32(
+                                                                            &g_gpu_regs_window,
+                                                                            ADRENO_X1_85_CP_CP2GMU_STATUS,
+                                                                            &cp_to_gmu) == 0 &&
+                                                                        gpu_mmio_try_read32(
+                                                                            &g_gpu_regs_window,
+                                                                            ADRENO_X1_85_CP_ROQ_RB_STATUS,
+                                                                            &roq_ring) == 0)
+                                                                    {
+                                                                        terminal_print(" RBBM-irq=");
+                                                                        terminal_print_inline_hex64(rbbm_interrupt);
+                                                                        terminal_print(" CP-irq=");
+                                                                        terminal_print_inline_hex64(cp_interrupt);
+                                                                        terminal_print(" CP2GMU=");
+                                                                        terminal_print_inline_hex64(cp_to_gmu);
+                                                                        terminal_print(" ROQ-RB=");
+                                                                        terminal_print_inline_hex64(roq_ring);
+                                                                    }
+
+                                                                    if (gpu_smmuv2_read_context_fault(
+                                                                            &g_gpu_smmu_window,
+                                                                            &g_gpu_smmu_caps,
+                                                                            g_gpu_smmu_context_bank,
+                                                                            &render_fault) == 0 &&
+                                                                        (render_fault.fsr &
+                                                                         GPU_SMMUV2_FSR_FAULT_MASK) != 0u)
+                                                                    {
+                                                                        terminal_print(" SMMU-CB0-FSR=");
+                                                                        terminal_print_inline_hex64(render_fault.fsr);
+                                                                        terminal_print(" FAR=");
+                                                                        terminal_print_inline_hex64(
+                                                                            render_fault.fault_address);
+                                                                        terminal_print(" FSYNR0=");
+                                                                        terminal_print_inline_hex64(
+                                                                            render_fault.fsynr0);
+                                                                        terminal_print(" FSYNR1=");
+                                                                        terminal_print_inline_hex64(
+                                                                            render_fault.fsynr1);
+                                                                    }
+                                                                    else
+                                                                        terminal_print(
+                                                                            " SMMU-CB0=no translation fault");
+                                                                    if (gpu_smmuv2_read_global_fault(
+                                                                            &g_gpu_smmu_window,
+                                                                            &global_fault) == 0 &&
+                                                                        global_fault.gfsr != 0u)
+                                                                    {
+                                                                        terminal_print(" SMMU-global-FSR=");
+                                                                        terminal_print_inline_hex64(
+                                                                            global_fault.gfsr);
+                                                                        terminal_print(" SYNR0=");
+                                                                        terminal_print_inline_hex64(
+                                                                            global_fault.gfsynr0);
+                                                                        terminal_print(" SYNR1=");
+                                                                        terminal_print_inline_hex64(
+                                                                            global_fault.gfsynr1);
+                                                                        terminal_print(" SYNR2=");
+                                                                        terminal_print_inline_hex64(
+                                                                            global_fault.gfsynr2);
+                                                                    }
+                                                                    else
+                                                                        terminal_print(
+                                                                            " SMMU-global=no unmatched-stream fault");
+                                                            }
+                                                            }
+                                                        }
+                                                            terminal_flush_log();
+                                                        }
                                                     }
+                                                }
                                                     else
                                                         terminal_warn("[K:GPU] GX RBBM read failed while lease held");
                                                     if (gpu_gmu_gen7_release_gpu(

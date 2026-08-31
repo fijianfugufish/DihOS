@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "gpu/gpu_firmware.h"
 #include "gpu/gpu_bringup.h"
+#include "gpu/gpu_cp.h"
 #include "gpu/gpu_gmu_hfi.h"
 #include "gpu/gpu_iommu.h"
 #include "gpu/gpu_mmio.h"
@@ -41,6 +42,77 @@
  * are the first preflight only; neither one changes GPU state. */
 #define ADRENO_X1_85_RBBM_HW_VERSION      0x0000u
 #define ADRENO_X1_85_RBBM_STATUS          0x0010u
+
+/* Gen7 CP offsets are recorded in Mesa/Freedreno as dword register indices;
+ * DihOS MMIO accesses use bytes, hence the explicit x4 conversion here. */
+#define ADRENO_X1_85_CP_RB_RPTR           (0x0806u * 4u)
+#define ADRENO_X1_85_CP_RB_WPTR           (0x0807u * 4u)
+#define ADRENO_X1_85_CP_SQE_CNTL          (0x0808u * 4u)
+#define ADRENO_X1_85_CP_HW_FAULT          (0x0821u * 4u)
+#define ADRENO_X1_85_CP_PROTECT_STATUS    (0x0824u * 4u)
+#define ADRENO_X1_85_CP_PROTECT_CNTL      (0x084fu * 4u)
+#define ADRENO_X1_85_CP_PROTECT_BASE      (0x0850u * 4u)
+#define ADRENO_X1_85_CP_RB_BASE            (0x0800u * 4u)
+#define ADRENO_X1_85_CP_RB_CNTL            (0x0802u * 4u)
+#define ADRENO_X1_85_CP_RB_RPTR_ADDR       (0x0804u * 4u)
+#define ADRENO_X1_85_CP_ADDR_MODE_CNTL     (0x0842u * 4u)
+#define ADRENO_X1_85_CP_APRIV_CNTL         (0x0844u * 4u)
+#define ADRENO_X1_85_CP_SQE_INSTR_BASE     (0x0830u * 4u)
+#define ADRENO_X1_85_CP_BV_RB_RPTR_ADDR    (0x0A98u * 4u)
+#define ADRENO_X1_85_CP_BV_APRIV_CNTL      (0x0AD0u * 4u)
+#define ADRENO_X1_85_CP_LPAC_APRIV_CNTL    (0x0B31u * 4u)
+#define ADRENO_X1_85_GMU_AHB_FENCE_STATUS  (0x9313u * 4u)
+
+/* 32 KiB ring and 32-byte blocks.  Gen7.2 has hardware RPTR shadow support;
+ * the boot path provides both BR and BV shadow locations before enabling CP. */
+#define ADRENO_X1_85_CP_RB_CNTL_BOOT       0x0000020Cu
+#define ADRENO_X1_85_CP_ADDR_MODE_64BIT     0x00000001u
+#define ADRENO_X1_85_CP_BR_APRIV_MASK       0x0000003Fu
+#define ADRENO_X1_85_CP_AUX_APRIV_MASK      0x0000000Fu
+
+/* Gen7.2 host-side state that must be established after GX is live and
+ * before CP is allowed to fetch either SQE firmware or ring commands.  The
+ * upstream register database specifies these in dword indices; retain the
+ * byte conversion here so the MMIO layer cannot be called with units mixed. */
+#define ADRENO_X1_85_GBIF_HALT               (0x3c45u * 4u)
+#define ADRENO_X1_85_GBIF_HALT_ACK           (0x3c46u * 4u)
+#define ADRENO_X1_85_GBIF_QSB_SIDE0           (0x3c03u * 4u)
+#define ADRENO_X1_85_GBIF_QSB_SIDE1           (0x3c04u * 4u)
+#define ADRENO_X1_85_GBIF_QSB_SIDE2           (0x3c05u * 4u)
+#define ADRENO_X1_85_GBIF_QSB_SIDE3           (0x3c06u * 4u)
+#define ADRENO_X1_85_RBBM_GBIF_HALT          (0x0016u * 4u)
+#define ADRENO_X1_85_RBBM_SECVID_TSB_BASE    (0xf800u * 4u)
+#define ADRENO_X1_85_RBBM_SECVID_TSB_SIZE    (0xf802u * 4u)
+#define ADRENO_X1_85_RBBM_SECVID_TSB_CNTL    (0xf803u * 4u)
+#define ADRENO_X1_85_RBBM_GBIF_QOS           (0x0011u * 4u)
+#define ADRENO_X1_85_RBBM_INT_CLEAR          (0x0037u * 4u)
+#define ADRENO_X1_85_RBBM_INT_MASK           (0x0038u * 4u)
+#define ADRENO_X1_85_RBBM_INT_STATUS         (0x0036u * 4u)
+#define ADRENO_X1_85_RBBM_BUSY_MASK           (0x050bu * 4u)
+#define ADRENO_X1_85_RBBM_PERFCTR_CNTL        (0x0500u * 4u)
+#define ADRENO_X1_85_RBBM_INTERFACE_HANG_CNTL (0x001fu * 4u)
+#define ADRENO_X1_85_UCHE_CACHE_WAYS         (0x0e17u * 4u)
+#define ADRENO_X1_85_UCHE_CLIENT_PF           (0x0e19u * 4u)
+#define ADRENO_X1_85_TPL1_NC_MODE_CNTL         (0xb604u * 4u)
+#define ADRENO_X1_85_SP_NC_MODE_CNTL           (0xae02u * 4u)
+#define ADRENO_X1_85_CP_DBG_ECO_CNTL           (0x0843u * 4u)
+#define ADRENO_X1_85_UCHE_WRITE_THRU_BASE    (0x0e07u * 4u)
+#define ADRENO_X1_85_UCHE_TRAP_BASE          (0x0e09u * 4u)
+#define ADRENO_X1_85_UCHE_GMEM_RANGE_MIN     (0x0e0bu * 4u)
+#define ADRENO_X1_85_UCHE_GMEM_RANGE_MAX     (0x0e0du * 4u)
+#define ADRENO_X1_85_UCHE_GBIF_GX_CONFIG     (0x0e3au * 4u)
+#define ADRENO_X1_85_UCHE_CMDQ_CONFIG        (0x0e3cu * 4u)
+#define ADRENO_X1_85_CP_AHB_CNTL             (0x098du * 4u)
+#define ADRENO_X1_85_CP_INTERRUPT_STATUS     (0x0822u * 4u)
+#define ADRENO_X1_85_CP_CP2GMU_STATUS        (0x0812u * 4u)
+#define ADRENO_X1_85_CP_ROQ_RB_STATUS        (0x0939u * 4u)
+#define ADRENO_X1_85_RB_CMP_DBG_ECO_CNTL     (0x8e28u * 4u)
+#define ADRENO_X1_85_TPL1_BICUBIC_BASE        (0xb608u * 4u)
+
+/* Keep the fault sources visible while the first CP submission is being
+ * diagnosed.  This is the A7xx RBBM interrupt mask from the upstream DRM
+ * driver, expressed without kernel-only bit helpers. */
+#define ADRENO_X1_85_RBBM_INT_MASK_BOOT      0x33d283c2u
 
 /* X1E GPU sub-blocks. Their ranges are constrained against GPU0's ACPI
  * aperture before a driver is allowed to use them. */
@@ -82,6 +154,24 @@ int adreno_x1_85_resolve_iommu(uint64_t rsdp_phys,
 int adreno_x1_85_resolve_blocks(const adreno_x1_85_profile *profile,
                                 adreno_x1_85_block_map *out);
 const gpu_bringup_plan *adreno_x1_85_bringup_plan(void);
+const gpu_cp_register_layout *adreno_x1_85_cp_layout(void);
+
+/* Programs the non-firmware-owned Gen7.2 state required for CP memory
+ * access.  This must be called only with a live GX lease, and remains
+ * separate from gpu_cp_bind so a future GPU profile can supply its own
+ * hardware-init sequence. */
+int adreno_x1_85_prepare_cp_host(const gpu_mmio_window *gfx);
+
+/* Builds the CPU/GPU spinlock record consumed by A7xx CP_ME_INIT.  The
+ * record is populated only from CP registers that this profile owns and
+ * has already programmed; it is then cache-cleaned before submission. */
+int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
+                                       gpu_buffer *record);
+
+/* Emits the first CP-owned work for Gen7.2.  `pwrup_record_iova` identifies
+ * the mapped spinlock/register-init record prepared for this live GX lease. */
+int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
+                                      uint64_t pwrup_record_iova);
 
 /* Programs the documented X1E CX-side, RSCC and PDC prerequisites for a Gen7
  * GMU cold boot.  It does not release reset, enable GX, or submit GPU work. */

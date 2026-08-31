@@ -582,6 +582,85 @@ int asm_aa64_try_smc(uint32_t immediate,
     return g_aa64_probe_faulted ? -1 : 0;
 }
 
+int asm_aa64_try_smc6(uint32_t immediate,
+                      uint64_t *x0,
+                      uint64_t *x1,
+                      uint64_t *x2,
+                      uint64_t *x3,
+                      uint64_t *x4,
+                      uint64_t *x5,
+                      uint64_t *out_esr)
+{
+    uint64_t old_vbar = 0u;
+    uint64_t old_daif = 0u;
+    uintptr_t probe_vbar = (uintptr_t)&aa64_vector_table;
+    register uint64_t r0 __asm__("x0") = x0 ? *x0 : 0u;
+    register uint64_t r1 __asm__("x1") = x1 ? *x1 : 0u;
+    register uint64_t r2 __asm__("x2") = x2 ? *x2 : 0u;
+    register uint64_t r3 __asm__("x3") = x3 ? *x3 : 0u;
+    register uint64_t r4 __asm__("x4") = x4 ? *x4 : 0u;
+    register uint64_t r5 __asm__("x5") = x5 ? *x5 : 0u;
+
+    g_aa64_probe_faulted = 0u;
+    g_aa64_probe_active = 1u;
+    g_aa64_probe_last_esr = 0u;
+    __asm__ __volatile__(
+        "mrs %0, vbar_el1\n"
+        "mrs %1, daif\n"
+        "msr daifset, #0xf\n"
+        "msr vbar_el1, %2\n"
+        "isb\n"
+        : "=&r"(old_vbar), "=&r"(old_daif)
+        : "r"(probe_vbar)
+        : "memory");
+
+    if (immediate == 0u)
+    {
+        __asm__ __volatile__(
+            "adr x9, 1f\n"
+            "adrp x10, g_aa64_probe_resume_elr\n"
+            "add x10, x10, :lo12:g_aa64_probe_resume_elr\n"
+            "str x9, [x10]\n"
+            "smc #0\n"
+            "1:\n"
+            : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4),
+              "+r"(r5)
+            :
+            : "x9", "x10", "memory");
+    }
+    else
+    {
+        __asm__ __volatile__(
+            "adr x9, 1f\n"
+            "adrp x10, g_aa64_probe_resume_elr\n"
+            "add x10, x10, :lo12:g_aa64_probe_resume_elr\n"
+            "str x9, [x10]\n"
+            "smc #1\n"
+            "1:\n"
+            : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4),
+              "+r"(r5)
+            :
+            : "x9", "x10", "memory");
+    }
+
+    __asm__ __volatile__(
+        "msr vbar_el1, %0\n"
+        "msr daif, %1\n"
+        "isb\n"
+        :
+        : "r"(old_vbar), "r"(old_daif)
+        : "memory");
+    g_aa64_probe_active = 0u;
+    if (x0) *x0 = r0;
+    if (x1) *x1 = r1;
+    if (x2) *x2 = r2;
+    if (x3) *x3 = r3;
+    if (x4) *x4 = r4;
+    if (x5) *x5 = r5;
+    if (out_esr) *out_esr = g_aa64_probe_last_esr;
+    return g_aa64_probe_faulted ? -1 : 0;
+}
+
 int asm_aa64_try_hv_set_vpreg(uint32_t reg,
                               uint64_t value,
                               uint64_t *out_status,
@@ -694,6 +773,27 @@ int asm_aa64_try_smc(uint32_t immediate,
     (void)x1;
     (void)x2;
     (void)x3;
+    if (out_esr)
+        *out_esr = 0u;
+    return -1;
+}
+
+int asm_aa64_try_smc6(uint32_t immediate,
+                      uint64_t *x0,
+                      uint64_t *x1,
+                      uint64_t *x2,
+                      uint64_t *x3,
+                      uint64_t *x4,
+                      uint64_t *x5,
+                      uint64_t *out_esr)
+{
+    (void)immediate;
+    (void)x0;
+    (void)x1;
+    (void)x2;
+    (void)x3;
+    (void)x4;
+    (void)x5;
     if (out_esr)
         *out_esr = 0u;
     return -1;

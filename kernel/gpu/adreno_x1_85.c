@@ -3,9 +3,12 @@
 #include "terminal/terminal_api.h"
 
 static const gpu_firmware_file g_adreno_x1_85_firmware[] = {
-    {"gen70500_gmu.bin", GPU_FIRMWARE_GMU, 1u, 81312u},
-    {"gen70500_sqe.fw", GPU_FIRMWARE_SQE, 1u, 77332u},
-    {"gen70500_zap.mbn", GPU_FIRMWARE_SECURE, 1u, 12088u},
+    {"gen70500_gmu.bin", GPU_FIRMWARE_GMU, 1u, 81312u, 0u},
+    /* The SQE file has a four-byte container header.  Stage its payload at
+     * the naturally aligned instruction-buffer base, as the upstream driver
+     * does, rather than making CP fetch that header. */
+    {"gen70500_sqe.fw", GPU_FIRMWARE_SQE, 1u, 77332u, 4u},
+    {"gen70500_zap.mbn", GPU_FIRMWARE_SECURE, 1u, 12088u, 0u},
 };
 
 static const gpu_firmware_manifest g_adreno_x1_85_manifest = {
@@ -15,26 +18,30 @@ static const gpu_firmware_manifest g_adreno_x1_85_manifest = {
     (uint32_t)(sizeof(g_adreno_x1_85_firmware) / sizeof(g_adreno_x1_85_firmware[0])),
 };
 
-/* X1E's published OPP set, from highest GX level to the conservative
- * 300 MHz level.  The numbers are RPMh regulator levels, not voltages.
- * Keeping these facts in the device profile lets the common Gen7 HFI layer
- * stay reusable by a future GPU driver. */
+/* X1E's published OPP set in Gen7 HFI index order: the mandatory OFF state,
+ * followed by the performance states from lowest to highest.  The power-vote
+ * numbers are RPMh regulator levels, not voltages.  HFI uses these indices in
+ * subsequent GX/BW votes, so this order must also match the bandwidth table.
+ * Keeping those device facts here lets the common Gen7 HFI layer remain
+ * reusable by a future GPU driver. */
 static const gpu_gmu_hfi_gen7_perf_table g_adreno_x1_85_perf_table = {
-    9u, 2u,
+    10u, 3u,
     {
-        {416u, 0xffffffffu, 1100000u},
-        {384u, 0xffffffffu, 1000000u},
-        {320u, 0xffffffffu,  925000u},
-        {256u, 0xffffffffu,  800000u},
-        {224u, 0xffffffffu,  744000u},
-        {192u, 0xffffffffu,  687000u},
-        {128u, 0xffffffffu,  550000u},
-        { 64u, 0xffffffffu,  390000u},
+        {  0u, 0xffffffffu,       0u},
         { 56u, 0xffffffffu,  300000u},
+        { 64u, 0xffffffffu,  390000u},
+        {128u, 0xffffffffu,  550000u},
+        {192u, 0xffffffffu,  687000u},
+        {224u, 0xffffffffu,  744000u},
+        {256u, 0xffffffffu,  800000u},
+        {320u, 0xffffffffu,  925000u},
+        {384u, 0xffffffffu, 1000000u},
+        {416u, 0xffffffffu, 1100000u},
     },
     {
-        {128u, 550000u},
+        {  0u,      0u},
         { 64u, 220000u},
+        {128u, 550000u},
     },
 };
 
@@ -679,4 +686,428 @@ int adreno_x1_85_prepare_gmu_cold_boot(const gpu_mmio_window *gfx,
 const gpu_bringup_plan *adreno_x1_85_bringup_plan(void)
 {
     return &g_adreno_x1_85_bringup_plan;
+}
+
+const gpu_cp_register_layout *adreno_x1_85_cp_layout(void)
+{
+    static const gpu_cp_register_layout layout = {
+        ADRENO_X1_85_CP_RB_BASE,
+        ADRENO_X1_85_CP_RB_CNTL,
+        ADRENO_X1_85_CP_RB_RPTR_ADDR,
+        ADRENO_X1_85_CP_BV_RB_RPTR_ADDR,
+        ADRENO_X1_85_CP_ADDR_MODE_CNTL,
+        ADRENO_X1_85_CP_APRIV_CNTL,
+        ADRENO_X1_85_CP_BV_APRIV_CNTL,
+        ADRENO_X1_85_CP_LPAC_APRIV_CNTL,
+        ADRENO_X1_85_CP_RB_RPTR,
+        ADRENO_X1_85_CP_RB_WPTR,
+        ADRENO_X1_85_CP_SQE_CNTL,
+        ADRENO_X1_85_CP_SQE_INSTR_BASE,
+        ADRENO_X1_85_CP_HW_FAULT,
+        ADRENO_X1_85_CP_PROTECT_STATUS,
+    };
+    return &layout;
+}
+
+static int adreno_x1_85_write_host_state(const gpu_mmio_window *gfx,
+                                         uint32_t offset, uint32_t value)
+{
+    return gpu_mmio_try_write32(gfx, offset, value) == 0 ? 0 : -1;
+}
+
+static int adreno_x1_85_write_host_state64(const gpu_mmio_window *gfx,
+                                           uint32_t offset, uint64_t value)
+{
+    if (adreno_x1_85_write_host_state(gfx, offset, (uint32_t)value) ||
+        adreno_x1_85_write_host_state(gfx, offset + 4u,
+                                      (uint32_t)(value >> 32)))
+        return -1;
+    return 0;
+}
+
+typedef struct adreno_x1_85_reg_value
+{
+    uint32_t offset;
+    uint32_t value;
+} adreno_x1_85_reg_value;
+
+/* X1-85 uses the upstream A740 hardware clock-gating programme.  These are
+ * byte offsets, transcribed from its named register table after resolving
+ * the Gen7 register database.  In particular, CLOCK_MODE_CP is required
+ * before the command processor can consume its first ring. */
+static const adreno_x1_85_reg_value g_adreno_x1_85_hwcg[] = {
+    {0x000b0u * 4u, 0x02222222u}, {0x000b4u * 4u, 0x22022222u},
+    {0x000bcu * 4u, 0x003cf3cfu}, {0x000b8u * 4u, 0x00000080u},
+    {0x000c0u * 4u, 0x22222220u}, {0x000c4u * 4u, 0x22222222u},
+    {0x000c8u * 4u, 0x22222222u}, {0x000ccu * 4u, 0x00222222u},
+    {0x000e0u * 4u, 0x77777777u}, {0x000e4u * 4u, 0x77777777u},
+    {0x000e8u * 4u, 0x77777777u}, {0x000ecu * 4u, 0x00077777u},
+    {0x000d0u * 4u, 0x11111111u}, {0x000d4u * 4u, 0x11111111u},
+    {0x000d8u * 4u, 0x11111111u}, {0x000dcu * 4u, 0x00011111u},
+    {0x0010bu * 4u, 0x22222222u}, {0x0010cu * 4u, 0x00222222u},
+    {0x00110u * 4u, 0x00000444u}, {0x0010fu * 4u, 0x00000222u},
+    {0x000f0u * 4u, 0x22222222u}, {0x000f4u * 4u, 0x01002222u},
+    {0x000f8u * 4u, 0x00002220u}, {0x00100u * 4u, 0x44000f00u},
+    {0x00104u * 4u, 0x25222022u}, {0x00105u * 4u, 0x00555555u},
+    {0x00106u * 4u, 0x00000011u}, {0x00107u * 4u, 0x00440044u},
+    {0x00108u * 4u, 0x04222222u}, {0x00286u * 4u, 0x00000222u},
+    {0x00285u * 4u, 0x00222222u}, {0x00114u * 4u, 0x02222223u},
+    {0x00111u * 4u, 0x00222222u}, {0x00288u * 4u, 0x00222222u},
+    {0x00287u * 4u, 0x00002222u}, {0x0010au * 4u, 0x00000000u},
+    {0x00116u * 4u, 0x04104004u}, {0x00113u * 4u, 0x00000000u},
+    {0x00109u * 4u, 0x00000000u}, {0x00115u * 4u, 0x00000200u},
+    {0x00112u * 4u, 0x00000000u}, {0x0011bu * 4u, 0x00002222u},
+    {0x0011cu * 4u, 0x00000000u}, {0x0011du * 4u, 0x00000000u},
+    {0x00284u * 4u, 0x55555552u}, {0x0012fu * 4u, 0x00000000u},
+    {0x00260u * 4u, 0x00000222u}, {0x000aeu * 4u, 0x8aa8aa82u},
+    {0x00533u * 4u, 0x00000182u}, {0x00044u * 4u, 0x00000000u},
+    {0x00042u * 4u, 0x00000000u}, {0x00118u * 4u, 0x00000222u},
+    {0x00119u * 4u, 0x00000111u}, {0x0011au * 4u, 0x00000555u},
+};
+
+int adreno_x1_85_prepare_cp_host(const gpu_mmio_window *gfx)
+{
+    uint32_t rb_cmp_dbg;
+    uint32_t gbif_ack;
+    const uint64_t uche_l2_bypass_base = 0x0001fffffffff000ull;
+    static const uint32_t bicubic_weights[] = {
+        0u, 0x3fe05ff4u, 0x3fa0ebeeu, 0x3f5193edu, 0x3f0243f0u,
+    };
+
+    /* CP protection values are declarative register spans from the upstream
+     * X1E/A730 profile.  Install them before CP starts so any later packet
+     * cannot rewrite host-owned GX setup. */
+    static const uint32_t protect[48] = {
+        0x13fc0000u, 0x0160050bu, 0x8000050eu, 0x80000510u,
+        0x80000534u, 0x027405fbu, 0x87a40699u, 0x802008a0u,
+        0x809008abu, 0x800408deu, 0x052c08e7u, 0x81340900u,
+        0x82c8098du, 0x86f80a41u, 0x80040df0u, 0x80000e01u,
+        0x80200e07u, 0x830c3c00u, 0x7ffc3cc4u, 0x873c8630u,
+        0x80008e00u, 0x80008e08u, 0x807c8e50u, 0x8a008e80u,
+        0x876c9624u, 0x80009e40u, 0x80349e64u, 0x861c9e78u,
+        0x873ca630u, 0x8000ae02u, 0x803cae50u, 0x800cae66u,
+        0x800cae6fu, 0x800cb604u, 0xbffcec00u,
+        0x7ffcfc00u, 0x814c8400u, 0x00108454u, 0xfffc8459u,
+        0xfffca459u, 0xfffcc459u, 0x910cf400u, 0x01ecf844u,
+        0x8001f860u, 0x80a8f878u, 0u, 0u, 0x8001f8c0u,
+    };
+
+    if (!gfx)
+        return -1;
+
+    /* A previous GX transition can leave either side of the memory fabric
+     * halted.  The read-backs and barrier are intentional: CP fetch must not
+     * race ahead of the fabric unhalt on the first command submission. */
+    if (adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_GBIF_HALT, 0u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_RBBM_GBIF_HALT, 0u))
+        return -2;
+    if (gpu_mmio_try_read32(gfx, ADRENO_X1_85_GBIF_HALT, &rb_cmp_dbg) != 0 ||
+        gpu_mmio_try_read32(gfx, ADRENO_X1_85_RBBM_GBIF_HALT,
+                            &rb_cmp_dbg) != 0)
+        return -3;
+    asm_mmio_barrier();
+
+    /* A7xx's documented unhalt sequence ends with the clear writes above;
+     * it does not wait for GBIF_HALT_ACK to become zero.  On this X1E the
+     * readback can retain the prior client/arb halt state (0x3) after a valid
+     * clear, so treating it as a CP-start veto deadlocks bring-up before the
+     * first real submission.  Record it for diagnostics but follow the
+     * hardware sequence and let the guarded CP/SMMU paths report any fault. */
+    if (gpu_mmio_try_read32(gfx, ADRENO_X1_85_GBIF_HALT_ACK, &gbif_ack) != 0)
+        return -4;
+    if (gbif_ack != 0u)
+    {
+        terminal_print("[K:GPU] GBIF halt ACK retained after unhalt=");
+        terminal_print_inline_hex64(gbif_ack);
+        terminal_print("; continuing A7xx CP bring-up");
+        terminal_flush_log();
+    }
+
+    for (uint32_t i = 0u;
+         i < sizeof(g_adreno_x1_85_hwcg) / sizeof(g_adreno_x1_85_hwcg[0]);
+         ++i)
+    {
+        if (adreno_x1_85_write_host_state(gfx, g_adreno_x1_85_hwcg[i].offset,
+                                           g_adreno_x1_85_hwcg[i].value))
+            return -4;
+    }
+    asm_mmio_barrier();
+
+    /* These six registers form the X1-85-specific prefix of the upstream
+     * IFPC restore list.  Program them before publishing that list to CP so
+     * an IFPC transition cannot restore uninitialised values. */
+    for (uint32_t i = 0u; i < sizeof(bicubic_weights) / sizeof(bicubic_weights[0]); ++i)
+    {
+        if (adreno_x1_85_write_host_state(gfx,
+                                          ADRENO_X1_85_TPL1_BICUBIC_BASE + i * 4u,
+                                          bicubic_weights[i]))
+            return -5;
+    }
+
+    /* DihOS has no secure rendering path yet.  Explicitly remove any stale
+     * trusted range so its reset-time address aperture cannot cover normal
+     * GPU IOVAs. */
+    if (adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_SECVID_TSB_CNTL, 0u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_SECVID_TSB_BASE, 0u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_SECVID_TSB_BASE + 4u,
+                                      0u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_SECVID_TSB_SIZE, 0u))
+        return -5;
+
+    /* On A7xx these UCHE bases are not allocation addresses: both receive
+     * the documented high-address sentinel which disables L2 bypass for the
+     * whole usable GPU virtual-address range.  Pointing them at a small
+     * DihOS buffer can prevent CP from fetching its first ring command. */
+    if (adreno_x1_85_write_host_state64(gfx,
+                                        ADRENO_X1_85_UCHE_WRITE_THRU_BASE,
+                                        uche_l2_bypass_base) ||
+        adreno_x1_85_write_host_state64(gfx, ADRENO_X1_85_UCHE_TRAP_BASE,
+                                        uche_l2_bypass_base) ||
+        adreno_x1_85_write_host_state64(gfx,
+                                        ADRENO_X1_85_UCHE_GMEM_RANGE_MIN,
+                                        0x01000000ull) ||
+        adreno_x1_85_write_host_state64(gfx,
+                                        ADRENO_X1_85_UCHE_GMEM_RANGE_MAX,
+                                        0x012fffffull) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_GBIF_QSB_SIDE0,
+                                      0x00071620u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_GBIF_QSB_SIDE1,
+                                      0x00071620u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_GBIF_QSB_SIDE2,
+                                      0x00071620u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_GBIF_QSB_SIDE3,
+                                      0x00071620u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_RBBM_GBIF_QOS,
+                                      0x02120212u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_UCHE_GBIF_GX_CONFIG,
+                                      0x010240e0u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_UCHE_CACHE_WAYS,
+                                      1u << 23) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_CP_AHB_CNTL, 1u) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_UCHE_CMDQ_CONFIG,
+                                      0x0006690eu) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_UCHE_CLIENT_PF,
+                                      0x00000081u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_PERFCTR_CNTL, 1u) ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RBBM_INTERFACE_HANG_CNTL,
+                                      0x40cfffffu) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_RBBM_BUSY_MASK,
+                                      0xffffffffu) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_RBBM_INT_CLEAR,
+                                      0xffffffffu) ||
+        adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_RBBM_INT_MASK,
+                                      ADRENO_X1_85_RBBM_INT_MASK_BOOT))
+        return -6;
+
+    if (adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_CP_PROTECT_CNTL,
+                                      0x0000000bu))
+        return -7;
+    for (uint32_t i = 0u; i < 47u; ++i)
+    {
+        if (i == 45u || i == 46u)
+            continue;
+        if (adreno_x1_85_write_host_state(gfx,
+                                          ADRENO_X1_85_CP_PROTECT_BASE + i * 4u,
+                                          protect[i]))
+            return -8;
+    }
+    if (adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_CP_PROTECT_BASE + 47u * 4u,
+                                      protect[47u]))
+        return -9;
+
+    if (gpu_mmio_try_read32(gfx, ADRENO_X1_85_RB_CMP_DBG_ECO_CNTL,
+                            &rb_cmp_dbg) != 0 ||
+        adreno_x1_85_write_host_state(gfx,
+                                      ADRENO_X1_85_RB_CMP_DBG_ECO_CNTL,
+                                      rb_cmp_dbg | (1u << 11)))
+        return -10;
+    /* Do not submit a ring if host-owned state did not stick.  These reads
+     * are deliberately narrow: they validate the L2 fetch route and the CP
+     * protection gate without touching firmware-owned registers. */
+    {
+        uint32_t trap_lo;
+        uint32_t trap_hi;
+        uint32_t protect_cntl;
+
+        if (gpu_mmio_try_read32(gfx, ADRENO_X1_85_UCHE_TRAP_BASE,
+                                &trap_lo) != 0 ||
+            gpu_mmio_try_read32(gfx, ADRENO_X1_85_UCHE_TRAP_BASE + 4u,
+                                &trap_hi) != 0 ||
+            gpu_mmio_try_read32(gfx, ADRENO_X1_85_CP_PROTECT_CNTL,
+                                &protect_cntl) != 0)
+            return -11;
+        terminal_print("[K:GPU] UCHE trap readback=");
+        terminal_print_inline_hex64((uint64_t)trap_lo |
+                                    ((uint64_t)trap_hi << 32));
+        terminal_print(" CP protect control=");
+        terminal_print_inline_hex64(protect_cntl);
+        terminal_flush_log();
+        /* The Gen7 UCHE base registers are write-only on this X1E firmware
+         * revision: valid writes read back as zero while CP protection does
+         * read back.  The MMIO write itself succeeded, so record the fact but
+         * let the real CP/SMMU fault paths decide whether a fetch is valid. */
+        if (trap_lo != (uint32_t)uche_l2_bypass_base ||
+            trap_hi != (uint32_t)(uche_l2_bypass_base >> 32))
+            terminal_warn("[K:GPU] UCHE trap base is write-only; continuing CP probe");
+        /* LAST_SPAN_INF_RANGE is a latch/command bit on this CP revision
+         * and may read back clear even though protection was accepted.  The
+         * host write is still valid; do not prevent initial CP fetch based
+         * on that non-sticky bit. */
+        if ((protect_cntl & 0x3u) != 0x3u)
+            terminal_warn("[K:GPU] CP protection control readback is partial; continuing guarded CP probe");
+    }
+    asm_mmio_barrier();
+    return 0;
+}
+
+int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
+                                       gpu_buffer *record)
+{
+    uint32_t *words;
+    uint32_t ifpc_pairs = 0u;
+    uint32_t pwrup_pairs = 0u;
+    static const uint32_t ifpc_readback_regs[] = {
+        ADRENO_X1_85_RBBM_PERFCTR_CNTL,
+        ADRENO_X1_85_TPL1_NC_MODE_CNTL,
+        ADRENO_X1_85_SP_NC_MODE_CNTL,
+        ADRENO_X1_85_CP_DBG_ECO_CNTL,
+        ADRENO_X1_85_CP_PROTECT_CNTL,
+    };
+    static const uint32_t bicubic_weights[] = {
+        0u, 0x3fe05ff4u, 0x3fa0ebeeu, 0x3f5193edu, 0x3f0243f0u,
+    };
+
+    /* struct cpu_gpu_lock starts with three request/turn words followed by
+     * u8 ifpc_list_len, u8 preemption_list_len and u16 dynamic_list_len.
+     * The lists themselves hold (register-index, value) pairs. */
+    if (!gfx || !record || !record->cpu || record->size_bytes < 512u)
+        return -1;
+    words = (uint32_t *)record->cpu;
+    for (uint32_t i = 0u; i < record->size_bytes / sizeof(*words); ++i)
+        words[i] = 0u;
+
+    for (uint32_t i = 0u; i < sizeof(bicubic_weights) / sizeof(bicubic_weights[0]); ++i)
+    {
+        words[4u + ifpc_pairs * 2u] =
+            (ADRENO_X1_85_TPL1_BICUBIC_BASE / 4u) + i;
+        words[5u + ifpc_pairs * 2u] = bicubic_weights[i];
+        ++ifpc_pairs;
+    }
+    /* The X1-85/A750 IFPC list also preserves these host-programmed
+     * controls.  Capture their actual values, rather than relying on reset
+     * defaults, because CP restores this list after a power collapse. */
+    for (uint32_t i = 0u;
+         i < sizeof(ifpc_readback_regs) / sizeof(ifpc_readback_regs[0]); ++i)
+    {
+        uint32_t value;
+
+        if (gpu_mmio_try_read32(gfx, ifpc_readback_regs[i], &value) != 0)
+            return -2;
+        words[4u + ifpc_pairs * 2u] = ifpc_readback_regs[i] / 4u;
+        words[5u + ifpc_pairs * 2u] = value;
+        ++ifpc_pairs;
+    }
+
+    /* These protection registers are the stable, profile-owned part of the
+     * X1E IFPC list.  They give CP a real spinlock-backed restore list rather
+     * than the all-zero placeholder used during early bring-up. */
+    for (uint32_t i = 0u; i < 48u; ++i)
+    {
+        uint32_t value;
+
+        if (gpu_mmio_try_read32(gfx,
+                                ADRENO_X1_85_CP_PROTECT_BASE + i * 4u,
+                                &value) != 0)
+            return -3;
+        words[4u + ifpc_pairs * 2u] =
+            (ADRENO_X1_85_CP_PROTECT_BASE / 4u) + i;
+        words[5u + ifpc_pairs * 2u] = value;
+        ++ifpc_pairs;
+    }
+    /* CP_ME_INIT distinguishes its IFPC and preemption sections.  Keep the
+     * host-owned power-up registers in the latter instead of describing the
+     * complete record as IFPC-only; that is the A7xx lock-record format. */
+    {
+        static const uint32_t pwrup_regs[] = {
+            ADRENO_X1_85_UCHE_TRAP_BASE,
+            ADRENO_X1_85_UCHE_TRAP_BASE + 4u,
+            ADRENO_X1_85_UCHE_WRITE_THRU_BASE,
+            ADRENO_X1_85_UCHE_WRITE_THRU_BASE + 4u,
+            ADRENO_X1_85_UCHE_GMEM_RANGE_MIN,
+            ADRENO_X1_85_UCHE_GMEM_RANGE_MIN + 4u,
+            ADRENO_X1_85_UCHE_GMEM_RANGE_MAX,
+            ADRENO_X1_85_UCHE_GMEM_RANGE_MAX + 4u,
+            ADRENO_X1_85_UCHE_CACHE_WAYS,
+            ADRENO_X1_85_RB_CMP_DBG_ECO_CNTL,
+            ADRENO_X1_85_UCHE_GBIF_GX_CONFIG,
+            ADRENO_X1_85_UCHE_CLIENT_PF,
+        };
+
+        for (uint32_t i = 0u;
+             i < sizeof(pwrup_regs) / sizeof(pwrup_regs[0]); ++i)
+        {
+            uint32_t value;
+
+            if (gpu_mmio_try_read32(gfx, pwrup_regs[i], &value) != 0)
+                return -4;
+            words[4u + (ifpc_pairs + pwrup_pairs) * 2u] =
+                pwrup_regs[i] / 4u;
+            words[5u + (ifpc_pairs + pwrup_pairs) * 2u] = value;
+            ++pwrup_pairs;
+        }
+    }
+    if (ifpc_pairs > 0xffu || pwrup_pairs > 0xffu)
+        return -4;
+    words[3] = ifpc_pairs | (pwrup_pairs << 8);
+    gpu_buffer_prepare_for_device(record);
+    return 0;
+}
+
+static uint32_t adreno_packet_parity(uint32_t value)
+{
+    value ^= value >> 4;
+    value ^= value >> 8;
+    value ^= value >> 16;
+    return (0x9669u >> (value & 0x0fu)) & 1u;
+}
+
+static uint32_t adreno_pkt7(uint32_t opcode, uint32_t count)
+{
+    return 0x70000000u | count |
+           (adreno_packet_parity(count) << 15) |
+           ((opcode & 0x7fu) << 16) |
+           (adreno_packet_parity(opcode) << 23);
+}
+
+int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
+                                      uint64_t pwrup_record_iova)
+{
+    /* CP_THREAD_CONTROL, then CP_ME_INIT.  On A7xx, bit 8 in the CP init
+     * mask enables the register-init spinlock list, so it must be paired
+     * with the mapped list address and bit 31 in the final parameter. */
+    uint32_t words[10];
+
+    if (!pwrup_record_iova)
+        return -1;
+
+    words[0] = adreno_pkt7(0x17u, 1u);
+    words[1] = 0x08000000u;
+    words[2] = adreno_pkt7(0x48u, 7u);
+    words[3] = 0x0000014bu;
+    words[4] = 0x00000003u;
+    words[5] = 0x20000000u;
+    words[6] = 0x00000002u;
+    words[7] = (uint32_t)pwrup_record_iova;
+    words[8] = (uint32_t)(pwrup_record_iova >> 32);
+    words[9] = 0x80000000u;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
 }

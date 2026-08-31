@@ -2,6 +2,10 @@
 #include "asm/asm.h"
 
 #define SMMU_GR0_SCR0             0x0000u
+#define SMMU_GR0_GFSR             0x0048u
+#define SMMU_GR0_GFSYNR0          0x0050u
+#define SMMU_GR0_GFSYNR1          0x0054u
+#define SMMU_GR0_GFSYNR2          0x0058u
 #define SMMU_GR0_ID0              0x0020u
 #define SMMU_GR0_ID1              0x0024u
 #define SMMU_GR0_ID2              0x0028u
@@ -70,6 +74,19 @@ static int write64(const gpu_mmio_window *window, uint32_t offset,
     if (gpu_mmio_try_write32(window, offset + 4u, (uint32_t)(value >> 32)) != 0)
         return -1;
     return gpu_mmio_try_write32(window, offset, (uint32_t)value);
+}
+
+static int read64(const gpu_mmio_window *window, uint32_t offset,
+                  uint64_t *out)
+{
+    uint32_t lo;
+    uint32_t hi;
+
+    if (!out || gpu_mmio_try_read32(window, offset, &lo) != 0 ||
+        gpu_mmio_try_read32(window, offset + 4u, &hi) != 0)
+        return -1;
+    *out = (uint64_t)lo | ((uint64_t)hi << 32);
+    return 0;
 }
 
 static int smmu_offset(const gpu_smmuv2_caps *caps, uint32_t page,
@@ -153,6 +170,73 @@ int gpu_smmuv2_read_context_fault(const gpu_mmio_window *window,
     return 0;
 }
 
+int gpu_smmuv2_read_context_state(const gpu_mmio_window *window,
+                                  const gpu_smmuv2_caps *caps,
+                                  uint32_t context_bank,
+                                  gpu_smmuv2_context_state *out)
+{
+    uint32_t cb_offset;
+
+    if (!window || !caps || !out || context_bank >= caps->context_bank_count ||
+        smmu_offset(caps, caps->page_count + context_bank, 0u, &cb_offset) != 0 ||
+        cb_offset > window->size_bytes ||
+        window->size_bytes - cb_offset < SMMU_CB_MAIR0 + 4u)
+        return -1;
+    *out = (gpu_smmuv2_context_state){0};
+    if (gpu_mmio_try_read32(window, cb_offset + SMMU_CB_SCTLR,
+                            &out->sctlr) != 0 ||
+        gpu_mmio_try_read32(window, cb_offset + SMMU_CB_TCR2,
+                            &out->tcr2) != 0 ||
+        read64(window, cb_offset + SMMU_CB_TTBR0, &out->ttbr0) != 0 ||
+        gpu_mmio_try_read32(window, cb_offset + SMMU_CB_TCR,
+                            &out->tcr) != 0 ||
+        gpu_mmio_try_read32(window, cb_offset + SMMU_CB_MAIR0,
+                            &out->mair0) != 0)
+        return -2;
+    return 0;
+}
+
+int gpu_smmuv2_read_global_fault(const gpu_mmio_window *window,
+                                 gpu_smmuv2_global_fault *out)
+{
+    if (!window || !out)
+        return -1;
+    *out = (gpu_smmuv2_global_fault){0};
+    if (gpu_mmio_try_read32(window, SMMU_GR0_GFSR, &out->gfsr) != 0 ||
+        gpu_mmio_try_read32(window, SMMU_GR0_GFSYNR0, &out->gfsynr0) != 0 ||
+        gpu_mmio_try_read32(window, SMMU_GR0_GFSYNR1, &out->gfsynr1) != 0 ||
+        gpu_mmio_try_read32(window, SMMU_GR0_GFSYNR2, &out->gfsynr2) != 0)
+        return -2;
+    return 0;
+}
+
+int gpu_smmuv2_find_stream_binding(const gpu_mmio_window *window,
+                                   const gpu_smmuv2_caps *caps,
+                                   uint32_t stream_id,
+                                   gpu_smmuv2_stream_binding *out)
+{
+    uint32_t smr;
+
+    if (!window || !caps || !out)
+        return -1;
+    *out = (gpu_smmuv2_stream_binding){0};
+    for (uint32_t index = 0u; index < caps->stream_group_count; ++index)
+    {
+        if (gpu_mmio_try_read32(window, SMMU_GR0_SMR(index), &smr) != 0)
+            return -2;
+        if ((smr & SMMU_SMR_VALID) != 0u &&
+            (smr & 0xffffu) == (stream_id & 0xffffu))
+        {
+            out->stream_id = stream_id;
+            out->smr_index = index;
+            out->smr = smr;
+            return gpu_mmio_try_read32(window, SMMU_GR0_S2CR(index),
+                                       &out->s2cr) == 0 ? 0 : -3;
+        }
+    }
+    return 1;
+}
+
 int gpu_smmuv2_attach_context(const gpu_mmio_window *window,
                               const gpu_smmuv2_caps *caps,
                               const gpu_iommu_attach_plan *plan,
@@ -222,10 +306,12 @@ int gpu_smmuv2_attach_context(const gpu_mmio_window *window,
                              SMMU_CBA2R_VA64) != 0 ||
         gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TCR2,
                              SMMU_TCR2_AS | ((caps->id2 >> 4) & 0xfu)) != 0 ||
+        /* TCR determines how TTBR ASID bits are interpreted.  Program it
+         * before TTBR0, matching the ARM SMMUv2-required ordering. */
+        gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TCR, tcr) != 0 ||
         write64(window, cb_offset + SMMU_CB_TTBR0,
                 ((uint64_t)SMMU_ATTACH_ASID << 48) |
                 plan->domain_root_phys) != 0 ||
-        gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TCR, tcr) != 0 ||
         gpu_mmio_try_write32(window, cb_offset + SMMU_CB_MAIR0, 0xffu) != 0 ||
         gpu_mmio_try_write32(window, cb_offset + SMMU_CB_FSR, 0xffffffffu) != 0 ||
         gpu_mmio_try_write32(window, cb_offset + SMMU_CB_SCTLR,

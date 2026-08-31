@@ -66,6 +66,27 @@ void gpu_firmware_release(gpu_firmware_set *set)
     *set = (gpu_firmware_set){0};
 }
 
+const gpu_firmware_blob *gpu_firmware_find(const gpu_firmware_set *set,
+                                           gpu_firmware_role role)
+{
+    if (!set)
+        return 0;
+    for (uint32_t i = 0u; i < set->blob_count; ++i)
+    {
+        if (set->blobs[i].role == role)
+            return &set->blobs[i];
+    }
+    return 0;
+}
+
+uint64_t gpu_firmware_payload_iova(const gpu_firmware_blob *blob)
+{
+    if (!blob || !blob->buffer.iova ||
+        blob->payload_offset >= blob->buffer.size_bytes)
+        return 0u;
+    return blob->buffer.iova + blob->payload_offset;
+}
+
 int gpu_firmware_load(const gpu_firmware_manifest *manifest,
                       gpu_firmware_set *out)
 {
@@ -90,6 +111,7 @@ int gpu_firmware_load(const gpu_firmware_manifest *manifest,
         }
         bytes = kfile_size(&file);
         if (!bytes || bytes > 0xffffffffull ||
+            desc->payload_offset >= bytes ||
             (desc->expected_size && bytes != desc->expected_size) ||
             gpu_buffer_alloc(&blob->buffer, bytes,
                              GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0)
@@ -98,6 +120,7 @@ int gpu_firmware_load(const gpu_firmware_manifest *manifest,
             goto fail;
         }
         blob->role = desc->role;
+        blob->payload_offset = desc->payload_offset;
         ++set.blob_count;
         if (kfile_read(&file, blob->buffer.cpu, (uint32_t)bytes, &read) != 0 ||
             read != bytes)
@@ -106,8 +129,25 @@ int gpu_firmware_load(const gpu_firmware_manifest *manifest,
             goto fail;
         }
         kfile_close(&file);
+        if (blob->payload_offset)
+        {
+            uint8_t *image = (uint8_t *)blob->buffer.cpu;
+            uint32_t offset = blob->payload_offset;
+            uint32_t payload_bytes = (uint32_t)bytes - offset;
+
+            /* Some Qualcomm firmware files wrap the device image in a small
+             * host-side header.  Keep the IOVA naturally page-aligned: move
+             * the payload down in the staging allocation instead of handing
+             * device execution an arbitrarily offset address. */
+            for (uint32_t at = 0u; at < payload_bytes; ++at)
+                image[at] = image[at + offset];
+            for (uint32_t at = payload_bytes; at < (uint32_t)bytes; ++at)
+                image[at] = 0u;
+            blob->buffer.size_bytes = payload_bytes;
+            blob->payload_offset = 0u;
+        }
         gpu_buffer_prepare_for_device(&blob->buffer);
-        set.total_bytes += bytes;
+        set.total_bytes += blob->buffer.size_bytes;
     }
     *out = set;
     return 0;
