@@ -11,6 +11,7 @@
 #include "gpu/gpu_smmu_v2.h"
 #include "gpu/gpu_ring.h"
 #include "gpu/rpmh_cmd_db.h"
+#include "asm/asm.h"
 #include "hardware_probes/acpi_probe_net_candidates.h"
 #include "terminal/terminal_api.h"
 
@@ -22,6 +23,7 @@ static gpu_iommu_attach_plan g_iommu_attach_plan;
 static gpu_command_ring g_submission_ring;
 static gpu_buffer g_cp_shadow;
 static gpu_buffer g_cp_pwrup;
+static gpu_buffer g_cp_completion;
 static gpu_scanout_target g_scanout_target;
 static gpu_mmio_window g_gpu_regs_window;
 static gpu_mmio_window g_gpu_pdc_window;
@@ -47,12 +49,19 @@ static uint32_t g_gmu_reset_signature;
 #define GPU_CORE_SUBMISSION_BYTES  0x00008000u
 #define GPU_CORE_CP_SHADOW_IOVA     0x0000000020010000ull
 #define GPU_CORE_CP_PWRUP_IOVA      0x0000000020011000ull
+#define GPU_CORE_CP_COMPLETION_IOVA 0x0000000020012000ull
 #define GPU_CORE_SCANOUT_IOVA      0x0000000030000000ull
 
 /* Gen7's hardware shadow layout is rptr, fence, then BV rptr.  The fence
  * slot is CPU bookkeeping, not a second hardware rptr destination. */
 #define GPU_CORE_CP_BR_RPTR_OFFSET  0u
 #define GPU_CORE_CP_BV_RPTR_OFFSET  8u
+#define GPU_CORE_CP_COMPLETION_MAGIC 0x43504F4Bu /* "CPOK" */
+#define GPU_CORE_GOP_BGRX_8888       1u
+/* One-shot visual checkpoint for the first GPU-written triangle.  This is
+ * intentionally temporary: it stops the boot after GPU completion so normal
+ * terminal/compositor work cannot repaint the scanout before it is observed. */
+#define GPU_CORE_HOLD_AFTER_SCANOUT_TRIANGLE 1u
 
 /* X1E exposes two EL1-programmable render stream-match slots.  Further
  * GPU-local IORT lanes are retained by the platform firmware; do not attempt
@@ -408,6 +417,7 @@ static int map_staged_firmware(void)
     gpu_ring_release(&g_submission_ring);
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
+    gpu_buffer_release(&g_cp_completion);
     if (gpu_iommu_domain_init(&g_iommu_domain, GPU_IOMMU_MAX_VA_BITS) != 0)
         return -1;
     for (uint32_t i = 0u; i < g_firmware.blob_count; ++i)
@@ -430,16 +440,22 @@ static int map_staged_firmware(void)
         gpu_buffer_alloc(&g_cp_pwrup, 0x1000u,
                          GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
         gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_pwrup,
-                             GPU_CORE_CP_PWRUP_IOVA) != 0)
+                             GPU_CORE_CP_PWRUP_IOVA) != 0 ||
+        gpu_buffer_alloc(&g_cp_completion, 0x1000u,
+                         GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
+        gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_completion,
+                             GPU_CORE_CP_COMPLETION_IOVA) != 0)
     {
         gpu_ring_release(&g_submission_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
+        gpu_buffer_release(&g_cp_completion);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -3;
     }
     gpu_buffer_prepare_for_device(&g_cp_shadow);
     gpu_buffer_prepare_for_device(&g_cp_pwrup);
+    gpu_buffer_prepare_for_device(&g_cp_completion);
     if (g_scanout_target.buffer.cpu &&
         gpu_iommu_map_buffer(&g_iommu_domain, &g_scanout_target.buffer,
                              GPU_CORE_SCANOUT_IOVA) != 0)
@@ -447,6 +463,7 @@ static int map_staged_firmware(void)
         gpu_ring_release(&g_submission_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
+        gpu_buffer_release(&g_cp_completion);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -4;
     }
@@ -455,6 +472,7 @@ static int map_staged_firmware(void)
         gpu_ring_release(&g_submission_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
+        gpu_buffer_release(&g_cp_completion);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -5;
     }
@@ -485,6 +503,7 @@ int gpu_core_init(const boot_info *boot)
     gpu_ring_release(&g_submission_ring);
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
+    gpu_buffer_release(&g_cp_completion);
     gpu_firmware_release(&g_firmware);
     gpu_mmio_unmap_window(&g_gpu_regs_window);
     gpu_mmio_unmap_window(&g_gpu_pdc_window);
@@ -964,6 +983,41 @@ int gpu_core_init(const boot_info *boot)
                                                                     &g_submission_ring,
                                                                     g_cp_pwrup.iova);
                                                             if (cp_rc == 0)
+                                                            {
+                                                                *(uint32_t *)g_cp_completion.cpu = 0u;
+                                                                gpu_buffer_prepare_for_device(
+                                                                    &g_cp_completion);
+                                                                cp_rc = adreno_x1_85_emit_cp_memory_probe(
+                                                                    &g_submission_ring,
+                                                                    g_cp_completion.iova,
+                                                                    GPU_CORE_CP_COMPLETION_MAGIC);
+                                                            }
+                                                            if (cp_rc == 0 &&
+                                                                g_scanout_target.buffer.iova &&
+                                                                g_scanout_target.buffer.size_bytes <=
+                                                                    0xffffffffull &&
+                                                                g_scanout_target.pixel_format ==
+                                                                    GPU_CORE_GOP_BGRX_8888)
+                                                            {
+                                                                terminal_print(
+                                                                    "[K:GPU] emitting visible CP scanout triangle");
+                                                                /* Flush any CPU-owned scanout cache lines before
+                                                                 * CP overwrites the centre test region.  The later
+                                                                 * wait packet makes those CP writes visible before
+                                                                 * the GX lease is released. */
+                                                                asm_dma_clean_range(
+                                                                    g_scanout_target.buffer.cpu,
+                                                                    g_scanout_target.buffer.size_bytes);
+                                                                cp_rc =
+                                                                    adreno_x1_85_emit_cp_scanout_triangle(
+                                                                        &g_submission_ring,
+                                                                        g_scanout_target.buffer.iova,
+                                                                        (uint32_t)g_scanout_target.buffer.size_bytes,
+                                                                        g_scanout_target.width,
+                                                                        g_scanout_target.height,
+                                                                        g_scanout_target.pitch);
+                                                            }
+                                                            if (cp_rc == 0)
                                                                 cp_rc = gpu_ring_seal(
                                                                     &g_submission_ring);
                                                             if (cp_rc != 0)
@@ -1008,7 +1062,7 @@ int gpu_core_init(const boot_info *boot)
                                                             }
                                                             if (cp_rc == 0)
                                                             {
-                                                                terminal_print("[K:GPU] submitting minimal Gen7 CP init");
+                                                                terminal_print("[K:GPU] submitting Gen7 CP init + memory probe");
                                                                 terminal_flush_log();
                                                                 cp_rc = gpu_cp_submit_fenced(
                                                                     &g_gpu_regs_window,
@@ -1023,10 +1077,48 @@ int gpu_core_init(const boot_info *boot)
                                                                     adreno_x1_85_cp_layout(),
                                                                     g_submission_ring.write_dwords,
                                                                     100000u, &cp);
+                                                            if (cp_rc == 0)
+                                                            {
+                                                                uint32_t completion;
+
+                                                                asm_dma_invalidate_range(
+                                                                    g_cp_completion.cpu,
+                                                                    sizeof(completion));
+                                                                completion = *(uint32_t *)g_cp_completion.cpu;
+                                                                if (completion !=
+                                                                    GPU_CORE_CP_COMPLETION_MAGIC)
+                                                                    cp_rc = -17;
+                                                                else
+                                                                {
+                                                                    terminal_print(
+                                                                        "[K:GPU] CP memory probe completed value=");
+                                                                    terminal_print_inline_hex64(completion);
+                                                                    if (g_scanout_target.buffer.iova &&
+                                                                        g_scanout_target.buffer.size_bytes <=
+                                                                            0xffffffffull &&
+                                                                        g_scanout_target.pixel_format ==
+                                                                            GPU_CORE_GOP_BGRX_8888)
+                                                                    {
+                                                                        asm_dma_invalidate_range(
+                                                                            g_scanout_target.buffer.cpu,
+                                                                            g_scanout_target.buffer.size_bytes);
+                                                                        terminal_print(
+                                                                            "[K:GPU] CP scanout triangle submitted");
+                                                                        if (GPU_CORE_HOLD_AFTER_SCANOUT_TRIANGLE)
+                                                                        {
+                                                                            terminal_print(
+                                                                                "[K:GPU] triangle test held; restart to continue");
+                                                                            terminal_flush_log();
+                                                                            for (;;)
+                                                                                asm_wait();
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                             if (cp_rc == 0 && !cp.hw_fault &&
                                                                 !cp.protect_status)
                                                             {
-                                                                terminal_print("[K:GPU] CP minimal init consumed rptr=");
+                                                                terminal_print("[K:GPU] CP startup ring consumed rptr=");
                                                                 terminal_print_inline_hex64(cp.rb_rptr);
                                                                 terminal_print(" wptr=");
                                                                 terminal_print_inline_hex64(cp.rb_wptr);
@@ -1035,8 +1127,8 @@ int gpu_core_init(const boot_info *boot)
                                                             }
                                                             else
                                                             {
-                                                                terminal_warn("[K:GPU] CP minimal init did not complete cleanly");
-                                                                terminal_print("[K:GPU] CP init rc=");
+                                                                terminal_warn("[K:GPU] CP startup ring did not complete cleanly");
+                                                                terminal_print("[K:GPU] CP startup rc=");
                                                                 terminal_print_inline_hex64(
                                                                     (uint32_t)(-cp_rc));
                                                                 terminal_print(" rptr=");

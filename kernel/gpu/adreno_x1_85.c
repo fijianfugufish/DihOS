@@ -1111,3 +1111,62 @@ int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
     return gpu_ring_emit_many(ring, words,
                               sizeof(words) / sizeof(words[0]));
 }
+
+int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
+                                      uint64_t destination_iova,
+                                      uint32_t value)
+{
+    /* CP_MEM_WRITE has a 64-bit destination followed by one 32-bit word.
+     * It is issued after CP_ME_INIT so this verifies normal SQE packet
+     * execution and the render SMMU domain, without touching graphics state. */
+    uint32_t words[4];
+
+    if (!destination_iova || (destination_iova & 3u))
+        return -1;
+    words[0] = adreno_pkt7(0x3du, 3u); /* CP_MEM_WRITE */
+    words[1] = (uint32_t)destination_iova;
+    words[2] = (uint32_t)(destination_iova >> 32);
+    words[3] = value;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
+int adreno_x1_85_emit_cp_scanout_triangle(gpu_command_ring *ring,
+                                          uint64_t target_iova,
+                                          uint32_t target_bytes,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          uint32_t pitch)
+{
+    enum { triangle_height = 64u, triangle_max_width = 127u };
+    const uint32_t color = 0xffff00ffu; /* opaque magenta in BGRX memory */
+    const uint32_t center_x = width / 2u;
+    const uint32_t first_y = (height - triangle_height) / 2u;
+
+    if (!ring || !target_iova || width < triangle_max_width ||
+        height < triangle_height || pitch < width * 4u ||
+        target_bytes < (uint64_t)pitch * height)
+        return -1;
+
+    /* Each row is one CP_MEM_WRITE packet: its two address dwords are
+     * followed by the row's odd number of pixels.  The complete 64-row
+     * triangle is only 4,289 ring dwords including the final write barrier. */
+    for (uint32_t row = 0u; row < triangle_height; ++row)
+    {
+        uint32_t words[3u + triangle_max_width];
+        const uint32_t pixels = row * 2u + 1u;
+        const uint32_t x = center_x - row;
+        const uint64_t offset = (uint64_t)(first_y + row) * pitch +
+                                (uint64_t)x * 4u;
+        const uint64_t address = target_iova + offset;
+
+        words[0] = adreno_pkt7(0x3du, 2u + pixels); /* CP_MEM_WRITE */
+        words[1] = (uint32_t)address;
+        words[2] = (uint32_t)(address >> 32);
+        for (uint32_t pixel = 0u; pixel < pixels; ++pixel)
+            words[3u + pixel] = color;
+        if (gpu_ring_emit_many(ring, words, 3u + pixels) != 0)
+            return -2;
+    }
+    return gpu_ring_emit(ring, adreno_pkt7(0x12u, 0u)); /* CP_WAIT_MEM_WRITES */
+}

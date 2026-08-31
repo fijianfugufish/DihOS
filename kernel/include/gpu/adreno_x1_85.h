@@ -173,6 +173,23 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
 int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
                                       uint64_t pwrup_record_iova);
 
+/* Emits a direct CP memory write after CP_ME_INIT.  This is deliberately
+ * graphics-independent: its completion proves that normal ring packets can
+ * reach a mapped system-memory destination before a render submission does. */
+int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
+                                      uint64_t destination_iova,
+                                      uint32_t value);
+
+/* Emits a compact visible triangle made of CP memory writes into an already
+ * mapped XRGB/BGRX scanout.  This verifies CP-to-scanout writes; it is not a
+ * substitute for the later SP/RB 3D draw path. */
+int adreno_x1_85_emit_cp_scanout_triangle(gpu_command_ring *ring,
+                                          uint64_t target_iova,
+                                          uint32_t target_bytes,
+                                          uint32_t width,
+                                          uint32_t height,
+                                          uint32_t pitch);
+
 /* Programs the documented X1E CX-side, RSCC and PDC prerequisites for a Gen7
  * GMU cold boot.  It does not release reset, enable GX, or submit GPU work. */
 int adreno_x1_85_prepare_gmu_cold_boot(const gpu_mmio_window *gfx,
