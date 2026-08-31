@@ -4,6 +4,7 @@
 #include "bootinfo.h"
 #include "gpu/gpu_firmware.h"
 #include "gpu/gpu_iommu.h"
+#include "gpu/gpu_scheduler.h"
 
 typedef enum gpu_device_state
 {
@@ -51,3 +52,6 @@ const gpu_device_info *gpu_core_primary(void);
 const gpu_firmware_set *gpu_core_firmware(void);
 const gpu_iommu_topology *gpu_core_iommu_topology(void);
 const gpu_scanout_target *gpu_core_scanout_target(void);
+/* Shared policy queue.  Only kernel graphics code may register a compositor
+ * client; the verified Mesa renderer service gets its own unprivileged client. */
+gpu_scheduler *gpu_core_scheduler(void);

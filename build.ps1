@@ -16,7 +16,12 @@ param(
   [ValidateSet("Release","Debug")]
   [string]$Config = "Release",
 
-  [switch]$ArmOnly
+  [switch]$ArmOnly,
+
+  # Crash maps are useful for symbolised panic reports but expensive to
+  # regenerate.  Opt in when investigating a crash; normal builds remove any
+  # stale deployed map so it cannot describe the wrong kernel.
+  [switch]$CrashMap
 )
 
 $ErrorActionPreference = "Stop"
@@ -351,8 +356,12 @@ $ldsAA64 = Join-Path $KerDir "kernel.ld"
 $ldsX64  = Join-Path $KerDir "kernel_x64.ld"
 Build-Kernel -Arch "aa64" -Target "aarch64-unknown-none-elf" -ObjDir $ObjKAA64 -OutFile $KernelAa64OutFull -LinkerScript $ldsAA64
 $CrashMapAa64 = Join-Path (Split-Path -Parent $KernelAa64OutFull) "KERNEL.CRASHMAP"
-& py -3 (Join-Path $ProjectRoot "tools\gen_crash_map.py") $KernelAa64OutFull $CrashMapAa64
-if ($LASTEXITCODE) { throw "crash map generation failed" }
+if ($CrashMap) {
+  & py -3 (Join-Path $ProjectRoot "tools\gen_crash_map.py") $KernelAa64OutFull $CrashMapAa64
+  if ($LASTEXITCODE) { throw "crash map generation failed" }
+} else {
+  Write-Host "Skipping crash map generation (pass -CrashMap to enable it)." -ForegroundColor DarkGray
+}
 if (!$ArmOnly) {
   Build-Kernel -Arch "x64" -Target "x86_64-unknown-none-elf" -ObjDir $ObjKX64 -OutFile $KernelX64OutFull -LinkerScript $ldsX64
 }
@@ -408,7 +417,11 @@ if (Test-Path $UsbRoot) {
   Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
   Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
   Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
-  Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
+  if ($CrashMap) {
+    Copy-Item -Force $CrashMapAa64 (Join-Path $destAA64 "KERNEL.CRASHMAP")
+  } else {
+    Remove-Item -LiteralPath (Join-Path $destAA64 "KERNEL.CRASHMAP") -Force -ErrorAction SilentlyContinue
+  }
   Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
   Copy-DihosFirmware -Destination $destFirmware
   if (!$ArmOnly) {
@@ -481,7 +494,11 @@ if ($VhdAccessible) {
     Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
     Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
     Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
-    Copy-Item -Force $CrashMapAa64      (Join-Path $destAA64 "KERNEL.CRASHMAP")
+    if ($CrashMap) {
+      Copy-Item -Force $CrashMapAa64 (Join-Path $destAA64 "KERNEL.CRASHMAP")
+    } else {
+      Remove-Item -LiteralPath (Join-Path $destAA64 "KERNEL.CRASHMAP") -Force -ErrorAction SilentlyContinue
+    }
     Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
     Copy-DihosFirmware -Destination $destFirmware
     if (!$ArmOnly) {

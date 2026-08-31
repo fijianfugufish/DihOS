@@ -20,6 +20,7 @@ static gpu_firmware_set g_firmware;
 static gpu_iommu_domain g_iommu_domain;
 static gpu_iommu_topology g_iommu_topology;
 static gpu_iommu_attach_plan g_iommu_attach_plan;
+static gpu_scheduler g_scheduler;
 static gpu_command_ring g_submission_ring;
 static gpu_buffer g_cp_shadow;
 static gpu_buffer g_cp_pwrup;
@@ -58,10 +59,6 @@ static uint32_t g_gmu_reset_signature;
 #define GPU_CORE_CP_BV_RPTR_OFFSET  8u
 #define GPU_CORE_CP_COMPLETION_MAGIC 0x43504F4Bu /* "CPOK" */
 #define GPU_CORE_GOP_BGRX_8888       1u
-/* One-shot visual checkpoint for the first GPU-written triangle.  This is
- * intentionally temporary: it stops the boot after GPU completion so normal
- * terminal/compositor work cannot repaint the scanout before it is observed. */
-#define GPU_CORE_HOLD_AFTER_SCANOUT_TRIANGLE 1u
 
 /* X1E exposes two EL1-programmable render stream-match slots.  Further
  * GPU-local IORT lanes are retained by the platform firmware; do not attempt
@@ -486,6 +483,7 @@ int gpu_core_init(const boot_info *boot)
     int rc;
 
     g_primary = (gpu_device_info){0};
+    gpu_scheduler_init(&g_scheduler);
     g_iommu_topology = (gpu_iommu_topology){0};
     g_iommu_attach_plan = (gpu_iommu_attach_plan){0};
     g_gpu_smmu_caps = (gpu_smmuv2_caps){0};
@@ -1104,14 +1102,6 @@ int gpu_core_init(const boot_info *boot)
                                                                             g_scanout_target.buffer.size_bytes);
                                                                         terminal_print(
                                                                             "[K:GPU] CP scanout triangle submitted");
-                                                                        if (GPU_CORE_HOLD_AFTER_SCANOUT_TRIANGLE)
-                                                                        {
-                                                                            terminal_print(
-                                                                                "[K:GPU] triangle test held; restart to continue");
-                                                                            terminal_flush_log();
-                                                                            for (;;)
-                                                                                asm_wait();
-                                                                        }
                                                                     }
                                                                 }
                                                             }
@@ -1296,4 +1286,9 @@ const gpu_iommu_topology *gpu_core_iommu_topology(void)
 const gpu_scanout_target *gpu_core_scanout_target(void)
 {
     return &g_scanout_target;
+}
+
+gpu_scheduler *gpu_core_scheduler(void)
+{
+    return &g_scheduler;
 }

@@ -1,4 +1,5 @@
 #include "asm/asm.h"
+#include "asm/aa64_user.h"
 #include "terminal/terminal_api.h"
 #include "kwrappers/kgfx.h"
 #include "system/kcrash_map.h"
@@ -209,7 +210,43 @@ __attribute__((naked)) void aa64_serr_current_el_sp0(void) { __asm__ __volatile_
 __attribute__((naked)) void aa64_irq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_fiq_current_el_spx(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_serr_current_el_spx(void) { __asm__ __volatile__("b aa64_sync_current_el_spx"); }
-__attribute__((naked)) void aa64_sync_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
+__attribute__((naked)) void aa64_sync_lower_el_a64(void)
+{
+    __asm__ __volatile__(
+        /* aa64_el0_frame: x[0..30], ESR, FAR, ELR, SPSR (280 bytes). */
+        "sub sp, sp, #0x120\n"
+        "stp x0,x1,[sp,#0]\n" "stp x2,x3,[sp,#16]\n"
+        "stp x4,x5,[sp,#32]\n" "stp x6,x7,[sp,#48]\n"
+        "stp x8,x9,[sp,#64]\n" "stp x10,x11,[sp,#80]\n"
+        "stp x12,x13,[sp,#96]\n" "stp x14,x15,[sp,#112]\n"
+        "stp x16,x17,[sp,#128]\n" "stp x18,x19,[sp,#144]\n"
+        "stp x20,x21,[sp,#160]\n" "stp x22,x23,[sp,#176]\n"
+        "stp x24,x25,[sp,#192]\n" "stp x26,x27,[sp,#208]\n"
+        "stp x28,x29,[sp,#224]\n" "str x30,[sp,#240]\n"
+        "mrs x1, esr_el1\n" "str x1,[sp,#248]\n"
+        "mrs x1, far_el1\n" "str x1,[sp,#256]\n"
+        "mrs x1, elr_el1\n" "str x1,[sp,#264]\n"
+        "mrs x1, spsr_el1\n" "str x1,[sp,#272]\n"
+        "mov x0, sp\n"
+        "bl aa64_el0_sync_dispatch\n"
+        "cbz x0, 1f\n"
+        /* The dispatcher may have changed ELR/SPSR for process exit.  Load
+         * them before restoring x16, which is a saved user register. */
+        "ldr x16,[sp,#264]\n" "msr elr_el1,x16\n"
+        "ldr x16,[sp,#272]\n" "msr spsr_el1,x16\n"
+        "ldp x0,x1,[sp,#0]\n" "ldp x2,x3,[sp,#16]\n"
+        "ldp x4,x5,[sp,#32]\n" "ldp x6,x7,[sp,#48]\n"
+        "ldp x8,x9,[sp,#64]\n" "ldp x10,x11,[sp,#80]\n"
+        "ldp x12,x13,[sp,#96]\n" "ldp x14,x15,[sp,#112]\n"
+        "ldp x16,x17,[sp,#128]\n" "ldp x18,x19,[sp,#144]\n"
+        "ldp x20,x21,[sp,#160]\n" "ldp x22,x23,[sp,#176]\n"
+        "ldp x24,x25,[sp,#192]\n" "ldp x26,x27,[sp,#208]\n"
+        "ldp x28,x29,[sp,#224]\n" "ldr x30,[sp,#240]\n"
+        "add sp,sp,#0x120\n"
+        "eret\n"
+        "1:\n"
+        "b aa64_exception_common\n");
+}
 __attribute__((naked)) void aa64_irq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_fiq_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }
 __attribute__((naked)) void aa64_serr_lower_el_a64(void) { __asm__ __volatile__("b aa64_exception_common"); }

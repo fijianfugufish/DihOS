@@ -1,6 +1,7 @@
 #include "shell/dihos_shell.h"
 
 #include "bootinfo.h"
+#include "asm/aa64_user.h"
 #include "filesystem/dihos_path.h"
 #include "gpio/gpio.h"
 #include "hardware_probes/acpi_dump.h"
@@ -202,6 +203,7 @@ static int dihos_cmd_file_strings(dihos_shell_stage *stage);
 static int dihos_cmd_test_assert(dihos_shell_stage *stage);
 static int dihos_cmd_test_assert_eq(dihos_shell_stage *stage);
 static int dihos_cmd_test_fail(dihos_shell_stage *stage);
+static int dihos_cmd_process_selftest(dihos_shell_stage *stage);
 static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
 static int dihos_shell_fallback_available(const char *name, char *friendly, char *raw);
@@ -293,6 +295,7 @@ static const dihos_shell_command G_commands[] = {
     {"assert", "assert exists|isfile|isdir PATH", "Fail if a simple condition is false.", 0u, dihos_cmd_test_assert},
     {"assert_eq", "assert_eq [lhs] [rhs]", "Fail if two values differ.", 0u, dihos_cmd_test_assert_eq},
     {"fail", "fail [message...]", "Return failure for tests.", 0u, dihos_cmd_test_fail},
+    {"process:selftest", "process:selftest", "Run the isolated EL0 entry/exit smoke test.", 0u, dihos_cmd_process_selftest},
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
@@ -4575,6 +4578,30 @@ static int dihos_cmd_test_fail(dihos_shell_stage *stage)
     else
         terminal_error("fail");
     return -1;
+}
+
+static int dihos_cmd_process_selftest(dihos_shell_stage *stage)
+{
+    (void)stage;
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uint64_t status = 0u;
+    int rc = aa64_user_selftest(&status);
+
+    if (rc != 0)
+    {
+        terminal_error("EL0 process self-test failed rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        terminal_print(" status=");
+        terminal_print_inline_hex64(status);
+        return -1;
+    }
+    terminal_success("EL0 process self-test passed status=");
+    terminal_print_inline_hex64(status);
+    return 0;
+#else
+    terminal_error("EL0 process self-test is only available on AArch64");
+    return -1;
+#endif
 }
 
 static int dihos_cmd_demo_installfx(dihos_shell_stage *stage)
