@@ -2,6 +2,8 @@
 
 #include "bootinfo.h"
 #include "asm/aa64_user.h"
+#include "mesart/mesart_renderer.h"
+#include "process/dihos_process.h"
 #include "filesystem/dihos_path.h"
 #include "gpio/gpio.h"
 #include "hardware_probes/acpi_dump.h"
@@ -111,6 +113,7 @@ static dihos_shell_session *G_active_shell = &G_default_shell;
 static char G_console_scratch[DIHOS_SHELL_CAPTURE_CAP];
 static uint8_t G_shell_trace = 0u;
 static uint8_t G_shell_fallback_depth = 0u;
+static dihos_process_table G_mesart_processes;
 
 static void dihos_shell_default_print(const char *text, void *user);
 static void dihos_shell_default_print_inline(const char *text, void *user);
@@ -204,6 +207,7 @@ static int dihos_cmd_test_assert(dihos_shell_stage *stage);
 static int dihos_cmd_test_assert_eq(dihos_shell_stage *stage);
 static int dihos_cmd_test_fail(dihos_shell_stage *stage);
 static int dihos_cmd_process_selftest(dihos_shell_stage *stage);
+static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage);
 static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
 static int dihos_shell_fallback_available(const char *name, char *friendly, char *raw);
@@ -296,6 +300,7 @@ static const dihos_shell_command G_commands[] = {
     {"assert_eq", "assert_eq [lhs] [rhs]", "Fail if two values differ.", 0u, dihos_cmd_test_assert_eq},
     {"fail", "fail [message...]", "Return failure for tests.", 0u, dihos_cmd_test_fail},
     {"process:selftest", "process:selftest", "Run the isolated EL0 entry/exit smoke test.", 0u, dihos_cmd_process_selftest},
+    {"mesart:selftest", "mesart:selftest", "Verify, admit, and run the signed EL0 renderer stub.", 0u, dihos_cmd_mesart_selftest},
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
@@ -4600,6 +4605,75 @@ static int dihos_cmd_process_selftest(dihos_shell_stage *stage)
     return 0;
 #else
     terminal_error("EL0 process self-test is only available on AArch64");
+    return -1;
+#endif
+}
+
+static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
+{
+    (void)stage;
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    mesart_renderer_service service = {0};
+    dihos_process_info info;
+    uint64_t status = 0u;
+    int enter_rc;
+    int rc;
+
+    dihos_process_init(&G_mesart_processes);
+    rc = mesart_renderer_admit(&G_mesart_processes, "0:/OS/MesaRuntime",
+                               &service);
+    if (rc != 0)
+    {
+        terminal_error("Mesart admission rejected rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        terminal_flush_log();
+        return -1;
+    }
+    if (dihos_process_set_running(&G_mesart_processes, service.process) != 0)
+    {
+        terminal_error("Mesart admitted but could not enter RUNNING state");
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    enter_rc = aa64_user_enter_with_handler(&service.vm, service.image.entry_va,
+                                            service.stack_top_va, &status,
+                                            mesart_renderer_syscall, &service);
+    if (enter_rc != 0 || (status & DIHOS_EL0_EXIT_FAULT) ||
+        status != 0x4d535254u)
+    {
+        terminal_error("Mesart EL0 stub failed enter-rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-enter_rc));
+        terminal_print(" status=");
+        terminal_print_inline_hex64(status);
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    if (dihos_process_exit(&G_mesart_processes, service.process) != 0 ||
+        dihos_process_query(&G_mesart_processes, service.process, &info) != 0)
+    {
+        terminal_error("Mesart process supervisor finalization failed");
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    mesart_renderer_release(&service);
+    (void)dihos_process_reap(&G_mesart_processes, info.handle);
+    terminal_success("Mesart signed EL0 renderer/device-broker stub passed status=");
+    terminal_print_inline_hex64(status);
+    terminal_print(" address-space=");
+    terminal_print_inline_hex64(info.address_space_id);
+    terminal_flush_log();
+    return 0;
+#else
+    terminal_error("Mesart EL0 self-test is only available on AArch64");
     return -1;
 #endif
 }

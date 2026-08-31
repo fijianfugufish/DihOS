@@ -13,6 +13,12 @@ typedef struct aa64_el0_frame
     uint64_t spsr;
 } aa64_el0_frame;
 
+/* A service-specific EL0 syscall broker.  It receives only the register frame
+ * and its kernel-owned context; it must return nonzero only when it handled
+ * the request. */
+typedef int (*aa64_user_syscall_handler)(aa64_el0_frame *frame,
+                                         void *context);
+
 /* Deliberately tiny initial syscall surface.  More operations are admitted
  * only through process capabilities, never by exposing a Linux ABI. */
 #define DIHOS_EL0_SYSCALL_EXIT 0u
@@ -25,6 +31,14 @@ typedef struct aa64_el0_frame
  * translation root; no process is started automatically. */
 int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
                     uint64_t user_stack_top, uint64_t *out_exit_status);
+/* Same isolated entry path, with a narrowly scoped kernel broker for one
+ * verified service.  Passing a null handler is equivalent to aa64_user_enter.
+ */
+int aa64_user_enter_with_handler(const aarch64_user_vm *vm, uint64_t entry_va,
+                                 uint64_t user_stack_top,
+                                 uint64_t *out_exit_status,
+                                 aa64_user_syscall_handler handler,
+                                 void *handler_context);
 /* Explicit smoke test for the EL0 entry/exit path; never invoked at boot. */
 int aa64_user_selftest(uint64_t *out_exit_status);
 

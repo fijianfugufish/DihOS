@@ -19,6 +19,8 @@ typedef struct aa64_user_context
     uint64_t active;             /* 24 */
     uint64_t kernel_spsr;        /* 32 */
     uint64_t saved_x18_to_x30[13]; /* 40 .. 136 */
+    uint64_t syscall_handler;    /* 144 */
+    uint64_t syscall_context;    /* 152 */
 } aa64_user_context;
 
 static aa64_user_context g_aa64_user_contexts[AA64_USER_CONTEXT_MAX_CORES]
@@ -48,7 +50,7 @@ void aa64_user_return_trampoline(void)
         "and x16, x16, #0xf\n"
         "adrp x17, g_aa64_user_contexts\n"
         "add x17, x17, :lo12:g_aa64_user_contexts\n"
-        "mov x15, #144\n"
+        "mov x15, #160\n"
         "madd x17, x16, x15, x17\n"
         "ldr x0, [x17, #8]\n"
         "cbz x0, 1f\n"
@@ -89,6 +91,12 @@ int aa64_el0_sync_dispatch(aa64_el0_frame *frame)
     }
     if (frame->x[8] != DIHOS_EL0_SYSCALL_EXIT)
     {
+        aa64_user_syscall_handler handler =
+            (aa64_user_syscall_handler)(uintptr_t)context->syscall_handler;
+
+        if (handler && handler(frame,
+                               (void *)(uintptr_t)context->syscall_context))
+            return 1;
         frame->x[0] = (uint64_t)-38; /* ENOSYS without importing libc. */
         return 1;
     }
@@ -101,11 +109,17 @@ int aa64_el0_sync_dispatch(aa64_el0_frame *frame)
     return 1;
 }
 
-int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
-                    uint64_t user_stack_top, uint64_t *out_exit_status)
+static int aa64_user_enter_raw(const aarch64_user_vm *vm, uint64_t entry_va,
+                               uint64_t user_stack_top,
+                               uint64_t *out_exit_status,
+                               aa64_user_syscall_handler handler,
+                               void *handler_context)
     __attribute__((naked));
-int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
-                    uint64_t user_stack_top, uint64_t *out_exit_status)
+static int aa64_user_enter_raw(const aarch64_user_vm *vm, uint64_t entry_va,
+                               uint64_t user_stack_top,
+                               uint64_t *out_exit_status,
+                               aa64_user_syscall_handler handler,
+                               void *handler_context)
 {
     __asm__ __volatile__(
         "cbz x0, 9f\n"
@@ -115,7 +129,7 @@ int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
         "and x9, x9, #0xf\n"
         "adrp x10, g_aa64_user_contexts\n"
         "add x10, x10, :lo12:g_aa64_user_contexts\n"
-        "mov x11, #144\n"
+        "mov x11, #160\n"
         "madd x10, x9, x11, x10\n"
         "ldr x11, [x10, #24]\n"
         "cbnz x11, 8f\n"
@@ -133,6 +147,8 @@ int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
         "stp x25, x26, [x10, #96]\n"
         "stp x27, x28, [x10, #112]\n"
         "stp x29, x30, [x10, #128]\n"
+        "str x4, [x10, #144]\n"
+        "str x5, [x10, #152]\n"
         "mov x11, #1\n"
         "str x11, [x10, #24]\n"
         "dsb ishst\n"
@@ -151,6 +167,23 @@ int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
         "9:\n"
         "mov x0, #-1\n"
         "ret\n");
+}
+
+int aa64_user_enter_with_handler(const aarch64_user_vm *vm, uint64_t entry_va,
+                                 uint64_t user_stack_top,
+                                 uint64_t *out_exit_status,
+                                 aa64_user_syscall_handler handler,
+                                 void *handler_context)
+{
+    return aa64_user_enter_raw(vm, entry_va, user_stack_top, out_exit_status,
+                               handler, handler_context);
+}
+
+int aa64_user_enter(const aarch64_user_vm *vm, uint64_t entry_va,
+                    uint64_t user_stack_top, uint64_t *out_exit_status)
+{
+    return aa64_user_enter_with_handler(vm, entry_va, user_stack_top,
+                                        out_exit_status, 0, 0);
 }
 
 int aa64_user_selftest(uint64_t *out_exit_status)

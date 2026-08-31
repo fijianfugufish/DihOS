@@ -70,6 +70,7 @@ $SrcDir = Join-Path $ProjectRoot "src"
 $IncDir = Join-Path $ProjectRoot "include"
 $KerDir = Join-Path $ProjectRoot "kernel"
 $KerInc = Join-Path $KerDir "include"
+$MesartInc = Join-Path $ProjectRoot "mesart\include"
 $BearDir = Join-Path $ProjectRoot "third_party\BearSSL"
 $BearSrc = Join-Path $BearDir "src"
 $BearInc = Join-Path $BearDir "inc"
@@ -107,6 +108,7 @@ function Kernel-Include-Dirs {
     (Join-Path $KerDir "asm\$Arch"),
     $IncDir,
     $KerInc,
+    $MesartInc,
     $SimpleWebPCompat,
     $SimpleWebPDir,
     $BearInc
@@ -150,6 +152,11 @@ function New-Kernel-CFlags {
   if ($Arch -eq "x64") {
     $flags += "-mno-red-zone"
   }
+  if ($Config -eq "Debug") {
+    $flags += "-DDIHOS_BUILD_DEBUG=1"
+  } else {
+    $flags += "-DDIHOS_BUILD_DEBUG=0"
+  }
   $flags += Kernel-Arch-Defines -Arch $Arch
   $flags += Include-Flags -Dirs (Kernel-Include-Dirs -Arch $Arch)
   return ,$flags
@@ -170,6 +177,11 @@ function New-Kernel-CppFlags {
   )
   if ($Arch -eq "x64") {
     $flags += "-mno-red-zone"
+  }
+  if ($Config -eq "Debug") {
+    $flags += "-DDIHOS_BUILD_DEBUG=1"
+  } else {
+    $flags += "-DDIHOS_BUILD_DEBUG=0"
   }
   $flags += Kernel-Arch-Defines -Arch $Arch
   $flags += Include-Flags -Dirs (Kernel-Include-Dirs -Arch $Arch)
@@ -392,6 +404,7 @@ if ($LASTEXITCODE) { throw "image editor SACX build failed" }
 
 # ---- USB copy (U:\) if present ----
 $FirmwareSource = Join-Path $ProjectRoot "OS\Firmware"
+$MesaRuntimeSource = Join-Path $ProjectRoot "OS\MesaRuntime"
 if (!(Test-Path -LiteralPath $FirmwareSource)) {
   throw "Firmware source tree not found: $FirmwareSource"
 }
@@ -405,12 +418,25 @@ function Copy-DihosFirmware {
     Copy-Item -Destination $Destination -Recurse -Force
 }
 
+function Copy-DihosMesaRuntime {
+  param([Parameter(Mandatory = $true)][string]$Destination)
+
+  if (!(Test-Path -LiteralPath $MesaRuntimeSource)) {
+    Write-Host "Mesa runtime bundle not present; skipping deployment." -ForegroundColor DarkGray
+    return
+  }
+  New-Item -Force -ItemType Directory -Path $Destination | Out-Null
+  Get-ChildItem -LiteralPath $MesaRuntimeSource -Force |
+    Copy-Item -Destination $Destination -Recurse -Force
+}
+
 $UsbRoot = "U:\"
 if (Test-Path $UsbRoot) {
   $destBoot = Join-Path $UsbRoot "EFI\BOOT"
   $destAA64 = Join-Path $UsbRoot "OS\aa64"
   $destX64  = Join-Path $UsbRoot "OS\x64"
   $destFirmware = Join-Path $UsbRoot "OS\Firmware"
+  $destMesaRuntime = Join-Path $UsbRoot "OS\MesaRuntime"
   $destImageEditor = Join-Path $UsbRoot "OS\System\Programs\Image Viewer"
   New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
 
@@ -424,6 +450,7 @@ if (Test-Path $UsbRoot) {
   }
   Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
   Copy-DihosFirmware -Destination $destFirmware
+  Copy-DihosMesaRuntime -Destination $destMesaRuntime
   if (!$ArmOnly) {
     Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
     Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
@@ -435,6 +462,7 @@ if (Test-Path $UsbRoot) {
   Write-Host "  U:\OS\aa64\STAGE2.EFI"
   Write-Host "  U:\OS\aa64\KERNEL.ELF"
   Write-Host "  U:\OS\Firmware\..."
+  Write-Host "  U:\OS\MesaRuntime\..."
   Write-Host "  U:\OS\System\Programs\Image Viewer\image_viewer.sacx"
   if (!$ArmOnly) {
     Write-Host "  U:\EFI\BOOT\BOOTX64.EFI"
@@ -487,6 +515,7 @@ if ($VhdAccessible) {
     $destAA64 = Join-Path $VhdRoot "OS\aa64"
     $destX64  = Join-Path $VhdRoot "OS\x64"
     $destFirmware = Join-Path $VhdRoot "OS\Firmware"
+    $destMesaRuntime = Join-Path $VhdRoot "OS\MesaRuntime"
     $destImageEditor = Join-Path $VhdRoot "OS\System\Programs\Image Viewer"
 
     New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
@@ -501,6 +530,7 @@ if ($VhdAccessible) {
     }
     Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
     Copy-DihosFirmware -Destination $destFirmware
+    Copy-DihosMesaRuntime -Destination $destMesaRuntime
     if (!$ArmOnly) {
       Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
       Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
