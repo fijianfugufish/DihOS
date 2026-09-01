@@ -1,20 +1,17 @@
-# Ignore folders
 .vscode/
 backups/
 build/
 linux-firmware/
 hardware-dossiers/
 
-# Ignore all PowerShell scripts
 *.ps1
+*.sacx
 
-# BUT allow this one
 !build.ps1
 !build_sacx_app.ps1
 !test_image_editor.ps1
 !test_dihscover.ps1
 
-# Ignore specific files
 efi_main.S
 main.c
 cmds.md
