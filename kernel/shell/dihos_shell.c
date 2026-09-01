@@ -4615,7 +4615,9 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     mesart_renderer_service service = {0};
     dihos_process_info info;
+    gpu_scheduler_client scheduler_client;
     uint64_t status = 0u;
+    uint64_t completed_fence = 0u;
     int enter_rc;
     int rc;
 
@@ -4648,12 +4650,27 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
         terminal_print_inline_hex64((uint64_t)(uint32_t)(-enter_rc));
         terminal_print(" status=");
         terminal_print_inline_hex64(status);
+        terminal_print(" mesart-op=");
+        terminal_print_inline_hex64(service.last_syscall_operation);
+        terminal_print(" mesart-rc=");
+        terminal_print_inline_hex64(
+            (uint64_t)(uint32_t)(-service.last_syscall_result));
         (void)dihos_process_fault(&G_mesart_processes, service.process);
         mesart_renderer_release(&service);
         (void)dihos_process_reap(&G_mesart_processes, service.process);
         terminal_flush_log();
         return -1;
     }
+    if (mesart_renderer_test_complete_queued(&service) != 0)
+    {
+        terminal_error("Mesart queued test submission could not be completed");
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    completed_fence = service.command_buffer.completed_fence;
     if (dihos_process_exit(&G_mesart_processes, service.process) != 0 ||
         dihos_process_query(&G_mesart_processes, service.process, &info) != 0)
     {
@@ -4664,12 +4681,17 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
         terminal_flush_log();
         return -1;
     }
+    scheduler_client = service.scheduler_client;
     mesart_renderer_release(&service);
     (void)dihos_process_reap(&G_mesart_processes, info.handle);
     terminal_success("Mesart signed EL0 renderer/device-broker stub passed status=");
     terminal_print_inline_hex64(status);
     terminal_print(" address-space=");
     terminal_print_inline_hex64(info.address_space_id);
+    terminal_print(" scheduler-slot=");
+    terminal_print_inline_hex64(scheduler_client.slot);
+    terminal_print(" test-fence=");
+    terminal_print_inline_hex64(completed_fence);
     terminal_flush_log();
     return 0;
 #else
