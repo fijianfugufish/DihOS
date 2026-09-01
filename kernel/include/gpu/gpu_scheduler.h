@@ -14,6 +14,14 @@
 #define GPU_SCHEDULER_MAX_CLIENTS  16u
 #define GPU_SCHEDULER_MAX_JOBS     64u
 
+/* Policy metadata moves with a sealed job and is rechecked by the hardware
+ * backend.  It describes effects, not a user-controlled GPU capability. */
+#define GPU_SCHEDULER_POLICY_A7XX_NOP_ONLY       (1u << 0)
+#define GPU_SCHEDULER_POLICY_A7XX_RESOURCE_WRITE (1u << 1)
+/* CP_WAIT_MEM_WRITES has no address/register payload; this grants only
+ * ordering for an already-authorized batch effect. */
+#define GPU_SCHEDULER_POLICY_A7XX_SYNC           (1u << 2)
+
 typedef enum gpu_scheduler_client_kind
 {
     /* Trusted build-time compositor effects: wallpaper, composition, fades. */
@@ -47,6 +55,9 @@ typedef struct gpu_scheduler_submission
     const gpu_command_ring *ring;
     uint64_t bytes_in_flight;
     uint64_t user_tag;
+    uint64_t writable_gpu_va;
+    uint64_t writable_gpu_bytes;
+    uint32_t policy_flags;
 } gpu_scheduler_submission;
 
 typedef struct gpu_scheduler_job
@@ -56,6 +67,9 @@ typedef struct gpu_scheduler_job
     uint64_t fence;
     uint64_t bytes_in_flight;
     uint64_t user_tag;
+    uint64_t writable_gpu_va;
+    uint64_t writable_gpu_bytes;
+    uint32_t policy_flags;
 } gpu_scheduler_job;
 
 typedef struct gpu_scheduler_client_state

@@ -381,3 +381,29 @@ int gpu_smmuv2_attach(const gpu_mmio_window *window,
         *out_context_bank = 0u;
     return rc;
 }
+
+int gpu_smmuv2_invalidate_context(const gpu_mmio_window *window,
+                                  const gpu_smmuv2_caps *caps,
+                                  uint32_t context_bank)
+{
+    uint32_t cb_offset;
+
+    if (!window || !caps || !window->cpu_mapped ||
+        context_bank >= caps->context_bank_count || !caps->page_count ||
+        smmu_offset(caps, caps->page_count + context_bank, 0u,
+                    &cb_offset) != 0 ||
+        cb_offset > window->size_bytes ||
+        window->size_bytes - cb_offset < SMMU_CB_TLBSTATUS + 4u)
+        return -1;
+    /* CB0 was attached with SMMU_ATTACH_ASID.  Use the context-local
+     * invalidation rather than disturbing the GMU's independently attached
+     * context bank. */
+    asm_mmio_barrier();
+    if (gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TLBIASID,
+                             SMMU_ATTACH_ASID) != 0 ||
+        gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TLBSYNC, 0u) != 0 ||
+        poll_clear(window, cb_offset + SMMU_CB_TLBSTATUS,
+                   SMMU_TLBSTATUS_ACTIVE) != 0)
+        return -2;
+    return 0;
+}

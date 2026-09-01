@@ -55,3 +55,15 @@ const gpu_scanout_target *gpu_core_scanout_target(void);
 /* Shared policy queue.  Only kernel graphics code may register a compositor
  * client; the verified Mesa renderer service gets its own unprivileged client. */
 gpu_scheduler *gpu_core_scheduler(void);
+
+/* Executes the scheduler-selected sealed batch through the kernel-owned
+ * Adreno backend.  The first implementation copies only a broker-validated
+ * A7xx stream (inert NOPs, bounded renderer-arena writes, and ordering) into
+ * a boot-mapped kernel ring, then completes its fence after CP consumption.
+ * It never exposes MMIO, IOVA allocation, or a hardware fence to EL0. */
+int gpu_core_execute_next_scheduled(uint64_t *out_fence);
+
+/* Maps a kernel-allocated Mesart buffer into the renderer's fixed GPU-VA
+ * aperture during service admission.  It rejects active scheduler work and
+ * flushes only render CB0; this is not a general user-visible DMA mapper. */
+int gpu_core_map_mesart_buffer(gpu_buffer *buffer, uint64_t gpu_va);

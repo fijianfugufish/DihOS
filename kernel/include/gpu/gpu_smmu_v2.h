@@ -99,3 +99,9 @@ int gpu_smmuv2_attach(const gpu_mmio_window *window,
                       const gpu_iommu_attach_plan *plan,
                       uint32_t *out_context_bank,
                       uint32_t *out_bound_stream_count);
+
+/* Makes page-table changes visible to one already attached context bank.
+ * The caller must ensure no GPU job is executing against the changed range. */
+int gpu_smmuv2_invalidate_context(const gpu_mmio_window *window,
+                                  const gpu_smmuv2_caps *caps,
+                                  uint32_t context_bank);

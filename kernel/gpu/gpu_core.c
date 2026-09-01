@@ -22,6 +22,7 @@ static gpu_iommu_topology g_iommu_topology;
 static gpu_iommu_attach_plan g_iommu_attach_plan;
 static gpu_scheduler g_scheduler;
 static gpu_command_ring g_submission_ring;
+static gpu_command_ring g_runtime_ring;
 static gpu_buffer g_cp_shadow;
 static gpu_buffer g_cp_pwrup;
 static gpu_buffer g_cp_completion;
@@ -42,22 +43,28 @@ static rpmh_cmd_db_mapping g_rpmh_cmd_db;
 static gpu_gmu_hfi_gen7_perf_table g_hfi_perf_table;
 static gpu_gmu_hfi_gen7_bw_table g_hfi_bw_table;
 static uint32_t g_gmu_reset_signature;
+static uint8_t g_runtime_backend_ready;
 
 #define GPU_SMMUV2_FSR_FAULT_MASK 0xC00001FEu
 
 #define GPU_CORE_STAGING_IOVA_BASE 0x0000000010000000ull
 #define GPU_CORE_SUBMISSION_IOVA   0x0000000020000000ull
 #define GPU_CORE_SUBMISSION_BYTES  0x00008000u
+#define GPU_CORE_RUNTIME_RING_IOVA 0x0000000020008000ull
+#define GPU_CORE_RUNTIME_RING_BYTES 0x00008000u
 #define GPU_CORE_CP_SHADOW_IOVA     0x0000000020010000ull
 #define GPU_CORE_CP_PWRUP_IOVA      0x0000000020011000ull
 #define GPU_CORE_CP_COMPLETION_IOVA 0x0000000020012000ull
 #define GPU_CORE_SCANOUT_IOVA      0x0000000030000000ull
+#define GPU_CORE_MESART_GPU_VA_BASE 0x0000000040000000ull
+#define GPU_CORE_MESART_GPU_VA_END  0x0000000060000000ull
 
 /* Gen7's hardware shadow layout is rptr, fence, then BV rptr.  The fence
  * slot is CPU bookkeeping, not a second hardware rptr destination. */
 #define GPU_CORE_CP_BR_RPTR_OFFSET  0u
 #define GPU_CORE_CP_BV_RPTR_OFFSET  8u
 #define GPU_CORE_CP_COMPLETION_MAGIC 0x43504F4Bu /* "CPOK" */
+#define GPU_CORE_RUNTIME_COMPLETION_MAGIC 0x52554E00u /* "RUN\0" */
 #define GPU_CORE_GOP_BGRX_8888       1u
 
 /* X1E exposes two EL1-programmable render stream-match slots.  Further
@@ -412,6 +419,7 @@ static int map_staged_firmware(void)
 
     gpu_iommu_domain_release(&g_iommu_domain);
     gpu_ring_release(&g_submission_ring);
+    gpu_ring_release(&g_runtime_ring);
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
     gpu_buffer_release(&g_cp_completion);
@@ -430,6 +438,9 @@ static int map_staged_firmware(void)
     if (gpu_ring_init(&g_submission_ring, GPU_CORE_SUBMISSION_BYTES) != 0 ||
         gpu_iommu_map_buffer(&g_iommu_domain, &g_submission_ring.buffer,
                              GPU_CORE_SUBMISSION_IOVA) != 0 ||
+        gpu_ring_init(&g_runtime_ring, GPU_CORE_RUNTIME_RING_BYTES) != 0 ||
+        gpu_iommu_map_buffer(&g_iommu_domain, &g_runtime_ring.buffer,
+                             GPU_CORE_RUNTIME_RING_IOVA) != 0 ||
         gpu_buffer_alloc(&g_cp_shadow, 0x1000u,
                          GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
         gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_shadow,
@@ -444,6 +455,7 @@ static int map_staged_firmware(void)
                              GPU_CORE_CP_COMPLETION_IOVA) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_ring_release(&g_runtime_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
@@ -458,6 +470,7 @@ static int map_staged_firmware(void)
                              GPU_CORE_SCANOUT_IOVA) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_ring_release(&g_runtime_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
@@ -467,6 +480,7 @@ static int map_staged_firmware(void)
     if (gpu_gmu_memory_map(&g_iommu_domain, &g_gmu_memory) != 0)
     {
         gpu_ring_release(&g_submission_ring);
+        gpu_ring_release(&g_runtime_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
@@ -493,12 +507,14 @@ int gpu_core_init(const boot_info *boot)
     g_gmu_smmu_bound_stream_count = 0u;
     g_gmu_image = (gpu_gmu_image){0};
     g_gmu_reset_signature = 0u;
+    g_runtime_backend_ready = 0u;
     gpu_gmu_memory_release(&g_gmu_memory);
     rpmh_cmd_db_mapping_release(&g_rpmh_cmd_db);
     gpu_buffer_release(&g_scanout_target.buffer);
     g_scanout_target = (gpu_scanout_target){0};
     gpu_iommu_domain_release(&g_iommu_domain);
     gpu_ring_release(&g_submission_ring);
+    gpu_ring_release(&g_runtime_ring);
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
     gpu_buffer_release(&g_cp_completion);
@@ -1108,6 +1124,11 @@ int gpu_core_init(const boot_info *boot)
                                                             if (cp_rc == 0 && !cp.hw_fault &&
                                                                 !cp.protect_status)
                                                             {
+                                                                /* The automatic boot probe has consumed a complete
+                                                                 * CP init ring without an SMMU or CP fault.  Only
+                                                                 * now may Mesart's later scheduler path reacquire
+                                                                 * GX and use its separate, kernel-owned runtime ring. */
+                                                                g_runtime_backend_ready = 1u;
                                                                 terminal_print("[K:GPU] CP startup ring consumed rptr=");
                                                                 terminal_print_inline_hex64(cp.rb_rptr);
                                                                 terminal_print(" wptr=");
@@ -1291,4 +1312,247 @@ const gpu_scanout_target *gpu_core_scanout_target(void)
 gpu_scheduler *gpu_core_scheduler(void)
 {
     return &g_scheduler;
+}
+
+int gpu_core_map_mesart_buffer(gpu_buffer *buffer, uint64_t gpu_va)
+{
+    uint64_t bytes;
+
+    if (!buffer || !buffer->cpu || !buffer->phys || !buffer->size_bytes ||
+        buffer->iova || (gpu_va & (GPU_IOMMU_PAGE_SIZE - 1u)) ||
+        g_scheduler.job_count ||
+        g_gpu_smmu_bound_stream_count != ADRENO_X1_85_DRIVER_SID_COUNT ||
+        !(g_primary.caps.flags & GPU_CAP_DMA_ISOLATED) ||
+        !g_iommu_domain.root_phys)
+        return -1;
+    bytes = (buffer->size_bytes + GPU_IOMMU_PAGE_SIZE - 1u) &
+            ~(GPU_IOMMU_PAGE_SIZE - 1u);
+    if (!bytes || bytes < buffer->size_bytes ||
+        bytes > GPU_CORE_MESART_GPU_VA_END - GPU_CORE_MESART_GPU_VA_BASE ||
+        gpu_va < GPU_CORE_MESART_GPU_VA_BASE ||
+        gpu_va - GPU_CORE_MESART_GPU_VA_BASE >
+            (GPU_CORE_MESART_GPU_VA_END - GPU_CORE_MESART_GPU_VA_BASE) - bytes)
+        return -2;
+    if (gpu_iommu_map_buffer(&g_iommu_domain, buffer, gpu_va) != 0)
+        return -3;
+    gpu_iommu_domain_prepare_for_device(&g_iommu_domain);
+    if (gpu_smmuv2_invalidate_context(&g_gpu_smmu_window, &g_gpu_smmu_caps,
+                                      g_gpu_smmu_context_bank) != 0)
+    {
+        /* No job can run while this admission-only function is active.  Mark
+         * the buffer unusable instead of letting a failed TLB sync become a
+         * future GPU address capability; reboot reconstructs the domain. */
+        buffer->iova = 0u;
+        return -4;
+    }
+    return 0;
+}
+
+/* Keep the first runtime hardware path independently fail-closed.  Mesart
+ * already checked this same grammar before sealing its private snapshot, but
+ * the backend repeats the check at its final privilege boundary: a future
+ * scheduler caller cannot accidentally turn a generic sealed ring into raw
+ * GPU command authority. */
+static uint32_t gpu_core_odd_parity(uint32_t value)
+{
+    value ^= value >> 4;
+    value ^= value >> 8;
+    value ^= value >> 16;
+    return (0x9669u >> (value & 0x0fu)) & 1u;
+}
+
+static int gpu_core_validate_mesart_ring(const gpu_command_ring *ring,
+                                         uint64_t writable_gpu_va,
+                                         uint64_t writable_gpu_bytes,
+                                         uint32_t policy_flags)
+{
+    const uint32_t *words;
+    uint32_t at = 0u;
+
+    if (!ring || !ring->sealed || !ring->buffer.cpu || !ring->write_dwords ||
+        ring->write_dwords > ring->capacity_dwords)
+        return -1;
+    words = (const uint32_t *)ring->buffer.cpu;
+    while (at < ring->write_dwords)
+    {
+        uint32_t word = words[at];
+        uint32_t opcode;
+        uint32_t payload_dwords;
+
+        if ((word & 0xf0000000u) != 0x70000000u ||
+            (word & 0x0f000000u) != 0u)
+            return -2;
+        opcode = (word >> 16) & 0x7fu;
+        payload_dwords = word & 0x3fffu;
+        if (((word >> 23) & 1u) != gpu_core_odd_parity(opcode) ||
+            ((word >> 15) & 1u) != gpu_core_odd_parity(payload_dwords))
+            return -3;
+        if (payload_dwords > ring->write_dwords - at - 1u)
+            return -4;
+        if (opcode == 0x10u)
+        {
+            /* Inert CP_NOP packets remain valid in either policy. */
+        }
+        else if (opcode == 0x12u &&
+                 (policy_flags & GPU_SCHEDULER_POLICY_A7XX_SYNC))
+        {
+            /* CP_WAIT_MEM_WRITES is an address-free ordering primitive.  The
+             * exact zero-payload form is the only one accepted at this
+             * privilege boundary. */
+            if (payload_dwords != 0u)
+                return -5;
+        }
+        else if (opcode == 0x3du &&
+                 (policy_flags & GPU_SCHEDULER_POLICY_A7XX_RESOURCE_WRITE))
+        {
+            uint64_t destination;
+
+            if (!writable_gpu_va || writable_gpu_bytes < sizeof(uint32_t) ||
+                payload_dwords != 3u)
+                return -6;
+            destination = (uint64_t)words[at + 1u] |
+                          ((uint64_t)words[at + 2u] << 32);
+            if ((destination & 3u) || destination < writable_gpu_va ||
+                destination - writable_gpu_va >
+                    writable_gpu_bytes - sizeof(uint32_t))
+                return -7;
+        }
+        else
+            return -8;
+        at += payload_dwords + 1u;
+    }
+    return 0;
+}
+
+int gpu_core_execute_next_scheduled(uint64_t *out_fence)
+{
+    gpu_scheduler_job job;
+    const gpu_firmware_blob *sqe;
+    gpu_cp_bind_config cp_config;
+    gpu_cp_snapshot cp = {0};
+    uint32_t gx_ack = 0u;
+    uint32_t completion_magic;
+    uint32_t completion = 0u;
+    uint8_t gx_held = 0u;
+    uint8_t submitted = 0u;
+    int rc;
+
+    if (out_fence)
+        *out_fence = 0u;
+    if (!out_fence || !g_runtime_backend_ready ||
+        !g_gpu_regs_window.cpu_mapped || !g_gpu_gmu_window.cpu_mapped ||
+        !g_runtime_ring.buffer.iova || !g_cp_pwrup.iova || !g_cp_shadow.iova ||
+        !g_cp_completion.cpu || !g_cp_completion.iova)
+        return -1;
+    if (gpu_scheduler_peek_next(&g_scheduler, &job) != 0)
+        return -2;
+    if (gpu_core_validate_mesart_ring(job.ring, job.writable_gpu_va,
+                                      job.writable_gpu_bytes,
+                                      job.policy_flags) != 0)
+        return -3;
+    sqe = gpu_firmware_find(&g_firmware, GPU_FIRMWARE_SQE);
+    if (!sqe || !gpu_firmware_payload_iova(sqe))
+        return -4;
+    if (gpu_ring_reset(&g_runtime_ring) != 0)
+        return -5;
+    completion_magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC ^ (uint32_t)job.fence;
+    if (!completion_magic)
+        completion_magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC;
+    *(uint32_t *)g_cp_completion.cpu = 0u;
+    gpu_buffer_prepare_for_device(&g_cp_completion);
+
+    /* The boot-time probe reached a complete, fault-free CP submission before
+     * g_runtime_backend_ready was set.  Its pwrup record is kernel-owned and
+     * remains mapped for this boot, so each runtime lease rebuilds CP from
+     * that known-good record instead of repeating the much broader host-MMIO
+     * programming sequence.  Some X1E firmware revisions fault sporadically
+     * on those readback-sensitive host registers after a GX power transition;
+     * avoiding the redundant CPU accesses is both safer and more reliable.
+     * CP_ME_INIT below still reapplies the pwrup state before the sealed
+     * Mesart batch is appended. */
+    rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
+    if (rc != 0)
+        return -6;
+    gx_held = 1u;
+    if (gpu_cp_snapshot_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                             &cp) != 0 || cp.hw_fault || cp.protect_status)
+    {
+        rc = -7;
+        goto out;
+    }
+    if (adreno_x1_85_emit_minimal_cp_init(&g_runtime_ring,
+                                          g_cp_pwrup.iova) != 0 ||
+        gpu_ring_emit_many(&g_runtime_ring,
+                           (const uint32_t *)job.ring->buffer.cpu,
+                           job.ring->write_dwords) != 0 ||
+        /* This write is kernel-generated and targets only the pre-mapped,
+         * private completion page; it turns a consumed CP ring into a
+         * meaningful fence independent of the allowed resource write. */
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova,
+                                           completion_magic) != 0 ||
+        gpu_ring_seal(&g_runtime_ring) != 0)
+    {
+        rc = -8;
+        goto out;
+    }
+    cp_config = (gpu_cp_bind_config){
+        gpu_firmware_payload_iova(sqe),
+        g_runtime_ring.buffer.iova,
+        g_cp_shadow.iova + GPU_CORE_CP_BR_RPTR_OFFSET,
+        g_cp_shadow.iova + GPU_CORE_CP_BV_RPTR_OFFSET,
+        (uint32_t)g_runtime_ring.buffer.size_bytes,
+        ADRENO_X1_85_CP_RB_CNTL_BOOT,
+        0u,
+        ADRENO_X1_85_CP_BR_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+    };
+    if (gpu_cp_bind(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                    &cp_config) != 0)
+    {
+        rc = -9;
+        goto out;
+    }
+    rc = gpu_cp_submit_fenced(&g_gpu_regs_window, &g_gpu_gmu_window,
+                              ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
+                              adreno_x1_85_cp_layout(), &g_runtime_ring);
+    if (rc != 0)
+    {
+        rc = -10;
+        goto out;
+    }
+    submitted = 1u;
+    if (gpu_cp_wait_ring(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                         g_runtime_ring.write_dwords, 100000u, &cp) != 0 ||
+        cp.hw_fault || cp.protect_status)
+    {
+        rc = -11;
+        goto out;
+    }
+    asm_dma_invalidate_range(g_cp_completion.cpu, sizeof(completion));
+    completion = *(uint32_t *)g_cp_completion.cpu;
+    if (completion != completion_magic)
+    {
+        rc = -12;
+        goto out;
+    }
+    if (gpu_scheduler_complete(&g_scheduler, job.fence) != 0)
+    {
+        rc = -13;
+        goto out;
+    }
+    *out_fence = job.fence;
+    rc = 0;
+
+out:
+    if (gx_held && gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window) != 0 &&
+        rc == 0)
+        rc = -14;
+    /* Once CP binding or write-pointer publication has failed, the state of
+     * the live GX command front-end is uncertain.  Do not retry or reuse the
+     * runtime ring in this boot; a reboot restores the known-good baseline. */
+    if (rc != 0 && (submitted || gx_held))
+        g_runtime_backend_ready = 0u;
+    return rc;
 }

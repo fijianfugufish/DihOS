@@ -52,3 +52,12 @@ int gpu_ring_seal(gpu_command_ring *ring)
     ring->sealed = 1u;
     return 0;
 }
+
+int gpu_ring_reset(gpu_command_ring *ring)
+{
+    if (!ring || !ring->buffer.cpu || !ring->capacity_dwords)
+        return -1;
+    ring->write_dwords = 0u;
+    ring->sealed = 0u;
+    return 0;
+}

@@ -104,6 +104,15 @@ int gpu_scheduler_submit(gpu_scheduler *scheduler,
         !submission->ring->write_dwords ||
         submission->ring->write_dwords > submission->ring->capacity_dwords ||
         !submission->bytes_in_flight ||
+        !submission->policy_flags ||
+        (submission->policy_flags &
+         ~(GPU_SCHEDULER_POLICY_A7XX_NOP_ONLY |
+           GPU_SCHEDULER_POLICY_A7XX_RESOURCE_WRITE |
+           GPU_SCHEDULER_POLICY_A7XX_SYNC)) ||
+        ((submission->policy_flags & GPU_SCHEDULER_POLICY_A7XX_RESOURCE_WRITE) &&
+         (!submission->writable_gpu_va || !submission->writable_gpu_bytes ||
+          submission->writable_gpu_va + submission->writable_gpu_bytes <
+              submission->writable_gpu_va)) ||
         client_index(scheduler, client, &index) != 0)
         return -1;
     state = &scheduler->clients[index];
@@ -117,7 +126,8 @@ int gpu_scheduler_submit(gpu_scheduler *scheduler,
         fence = scheduler->next_fence++;
     scheduler->jobs[scheduler->job_count++] = (gpu_scheduler_job){
         client, submission->ring, fence, submission->bytes_in_flight,
-        submission->user_tag};
+        submission->user_tag, submission->writable_gpu_va,
+        submission->writable_gpu_bytes, submission->policy_flags};
     state->bytes_in_flight += submission->bytes_in_flight;
     ++state->jobs_in_flight;
     *out_fence = fence;

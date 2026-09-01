@@ -22,3 +22,9 @@ int gpu_ring_emit(gpu_command_ring *ring, uint32_t dword);
 int gpu_ring_emit_many(gpu_command_ring *ring, const uint32_t *dwords,
                        uint32_t count);
 int gpu_ring_seal(gpu_command_ring *ring);
+
+/* Reopens a ring only after its prior sealed batch has completed and the
+ * caller has stopped the device from fetching it.  This does not free or
+ * remap the backing allocation, so a pre-mapped kernel submission ring can
+ * be safely reused between GX power leases. */
+int gpu_ring_reset(gpu_command_ring *ring);

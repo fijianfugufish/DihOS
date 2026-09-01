@@ -4618,6 +4618,9 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     gpu_scheduler_client scheduler_client;
     uint64_t status = 0u;
     uint64_t completed_fence = 0u;
+    uint64_t bootstrap_gpu_va = 0u;
+    uint64_t command_gpu_va = 0u;
+    uint64_t resource_arena_gpu_va = 0u;
     int enter_rc;
     int rc;
 
@@ -4664,6 +4667,9 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     if (mesart_renderer_test_complete_queued(&service) != 0)
     {
         terminal_error("Mesart queued test submission could not be completed");
+        terminal_print(" backend-rc=");
+        terminal_print_inline_hex64(
+            (uint64_t)(uint32_t)(-service.last_backend_result));
         (void)dihos_process_fault(&G_mesart_processes, service.process);
         mesart_renderer_release(&service);
         (void)dihos_process_reap(&G_mesart_processes, service.process);
@@ -4682,9 +4688,12 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
         return -1;
     }
     scheduler_client = service.scheduler_client;
+    bootstrap_gpu_va = service.buffers[0].gpu_va;
+    resource_arena_gpu_va = service.buffers[1].gpu_va;
+    command_gpu_va = service.command_buffer.gpu_va;
     mesart_renderer_release(&service);
     (void)dihos_process_reap(&G_mesart_processes, info.handle);
-    terminal_success("Mesart signed EL0 renderer/device-broker stub passed status=");
+    terminal_success("Mesart Mesa runtime/winsys + ordered hardware resource-write/fence test passed status=");
     terminal_print_inline_hex64(status);
     terminal_print(" address-space=");
     terminal_print_inline_hex64(info.address_space_id);
@@ -4692,6 +4701,12 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     terminal_print_inline_hex64(scheduler_client.slot);
     terminal_print(" test-fence=");
     terminal_print_inline_hex64(completed_fence);
+    terminal_print(" bootstrap-gpu-va=");
+    terminal_print_inline_hex64(bootstrap_gpu_va);
+    terminal_print(" command-gpu-va=");
+    terminal_print_inline_hex64(command_gpu_va);
+    terminal_print(" resource-arena-gpu-va=");
+    terminal_print_inline_hex64(resource_arena_gpu_va);
     terminal_flush_log();
     return 0;
 #else

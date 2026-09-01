@@ -6,6 +6,8 @@
 #define MESART_A7XX_TYPE7_OPCODE_MASK  0x007f0000u
 #define MESART_A7XX_TYPE7_COUNT_MASK   0x00003fffu
 #define MESART_A7XX_CP_NOP             0x10u
+#define MESART_A7XX_CP_WAIT_MEM_WRITES 0x12u
+#define MESART_A7XX_CP_MEM_WRITE       0x3du
 
 static uint32_t mesart_odd_parity(uint32_t value)
 {
@@ -31,6 +33,7 @@ static int mesart_is_a7xx_type7(uint32_t word)
 }
 
 int mesart_validate_a7xx_cp_stream(const uint32_t *dwords, uint32_t count,
+                                   const mesart_packet_policy *policy,
                                    mesart_packet_validation *out_validation)
 {
     uint32_t at = 0u;
@@ -52,8 +55,39 @@ int mesart_validate_a7xx_cp_stream(const uint32_t *dwords, uint32_t count,
         payload_dwords = header & MESART_A7XX_TYPE7_COUNT_MASK;
         if (payload_dwords > count - at - 1u)
             return -3;
-        if (opcode != MESART_A7XX_CP_NOP)
-            return -4;
+        if (opcode == MESART_A7XX_CP_NOP)
+        {
+            /* NOP payload is inert and remains universally allowed. */
+        }
+        else if (opcode == MESART_A7XX_CP_WAIT_MEM_WRITES)
+        {
+            /* This packet only orders prior CP writes.  It has neither a
+             * register address nor a memory address, so a zero-payload form
+             * is safe once the broker has explicitly enabled synchronization
+             * for this sealed batch. */
+            if (!policy || !policy->allow_wait_mem_writes ||
+                payload_dwords != 0u)
+                return -4;
+        }
+        else if (opcode == MESART_A7XX_CP_MEM_WRITE)
+        {
+            uint64_t destination;
+
+            if (!policy || !policy->allow_resource_write ||
+                !policy->writable_gpu_va || !policy->writable_gpu_bytes ||
+                policy->writable_gpu_bytes < sizeof(uint32_t) ||
+                payload_dwords != 3u)
+                return -5;
+            destination = (uint64_t)dwords[at + 1u] |
+                          ((uint64_t)dwords[at + 2u] << 32);
+            if ((destination & 3u) ||
+                destination < policy->writable_gpu_va ||
+                destination - policy->writable_gpu_va >
+                    policy->writable_gpu_bytes - sizeof(uint32_t))
+                return -6;
+        }
+        else
+            return -7;
         at += payload_dwords + 1u;
         ++packets;
     }

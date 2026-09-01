@@ -1,6 +1,7 @@
 #include "mesart/mesart_renderer.h"
 
 #include "gpu/gpu_core.h"
+#include "asm/asm.h"
 #include "memory/pmem.h"
 #include "mesart/mesart_packets.h"
 #include "mesart/mesart_roots.h"
@@ -77,11 +78,20 @@ static int mesart_renderer_create_buffer(mesart_renderer_service *service,
         gpu_buffer_release(&buffer->storage);
         return -4;
     }
+    if (gpu_core_map_mesart_buffer(&buffer->storage,
+                                   MESART_RENDERER_GPU_BUFFER_ARENA_BASE +
+                                   (uint64_t)slot *
+                                       MESART_RENDERER_BUFFER_SLOT_BYTES) != 0)
+    {
+        gpu_buffer_release(&buffer->storage);
+        return -5;
+    }
     buffer->generation = (uint16_t)(buffer->generation + 1u);
     if (!buffer->generation)
         buffer->generation = 1u;
     buffer->handle = mesart_buffer_handle(slot, buffer->generation);
     buffer->user_va = user_va;
+    buffer->gpu_va = buffer->storage.iova;
     buffer->active = 1u;
     service->buffer_bytes += bytes;
     *out_handle = buffer->handle;
@@ -119,11 +129,47 @@ static int mesart_renderer_create_command_buffer(
         gpu_buffer_release(&command->source);
         return -4;
     }
+    if (gpu_core_map_mesart_buffer(&command->source,
+                                   MESART_RENDERER_COMMAND_BUFFER_GPU_VA) != 0)
+    {
+        gpu_ring_release(&command->snapshot);
+        gpu_buffer_release(&command->source);
+        return -5;
+    }
     command->generation = 1u;
     command->handle = mesart_command_handle(command->generation);
     command->user_va = MESART_RENDERER_COMMAND_BUFFER_VA;
+    command->gpu_va = command->source.iova;
     command->active = 1u;
     service->buffer_bytes += MESART_RENDERER_COMMAND_BUFFER_BYTES;
+    return 0;
+}
+
+/* Mesa's initial runtime gets one bounded heap that is mapped during service
+ * admission.  That preserves the EL0 VM invariant: no user request can add
+ * a mapping while this address space is active. */
+static int mesart_renderer_create_runtime_heap(mesart_renderer_service *service)
+{
+    if (!service || MESART_RENDERER_RUNTIME_HEAP_BYTES == 0u ||
+        (MESART_RENDERER_RUNTIME_HEAP_BYTES &
+         (AARCH64_USER_VM_PAGE_SIZE - 1u)) != 0u ||
+        (MESART_RENDERER_RUNTIME_HEAP_VA &
+         (AARCH64_USER_VM_PAGE_SIZE - 1u)) != 0u)
+        return -1;
+    if (gpu_buffer_alloc(&service->runtime_heap,
+                         MESART_RENDERER_RUNTIME_HEAP_BYTES,
+                         GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0)
+        return -2;
+    if (aarch64_user_vm_map(&service->vm, MESART_RENDERER_RUNTIME_HEAP_VA,
+                            service->runtime_heap.phys,
+                            MESART_RENDERER_RUNTIME_HEAP_BYTES,
+                            AARCH64_USER_VM_READ |
+                            AARCH64_USER_VM_WRITE) != 0)
+    {
+        gpu_buffer_release(&service->runtime_heap);
+        return -3;
+    }
+    service->buffer_bytes += MESART_RENDERER_RUNTIME_HEAP_BYTES;
     return 0;
 }
 
@@ -132,6 +178,7 @@ static int mesart_renderer_capture_command_buffer(
 {
     mesart_renderer_command_buffer *command;
     mesart_packet_validation validation;
+    mesart_packet_policy policy;
 
     if (!service)
         return -1;
@@ -141,8 +188,14 @@ static int mesart_renderer_capture_command_buffer(
         command->snapshot.sealed || !dwords ||
         dwords > command->snapshot.capacity_dwords)
         return -2;
+    policy = (mesart_packet_policy){
+        service->buffers[1].gpu_va,
+        service->buffers[1].storage.size_bytes,
+        1u,
+        1u,
+    };
     if (mesart_validate_a7xx_cp_stream((const uint32_t *)command->source.cpu,
-                                       dwords, &validation) != 0)
+                                       dwords, &policy, &validation) != 0)
         return -3;
     if (gpu_ring_emit_many(&command->snapshot,
                            (const uint32_t *)command->source.cpu,
@@ -173,9 +226,14 @@ static int mesart_renderer_queue_command_buffer(
     if (command->queued_fence)
         return -24;
     submission = (gpu_scheduler_submission){
-        &command->snapshot,
-        (uint64_t)command->snapshot.write_dwords * sizeof(uint32_t),
-        command->packet_count,
+        .ring = &command->snapshot,
+        .bytes_in_flight =
+            (uint64_t)command->snapshot.write_dwords * sizeof(uint32_t),
+        .user_tag = command->packet_count,
+        .writable_gpu_va = service->buffers[1].gpu_va,
+        .writable_gpu_bytes = service->buffers[1].storage.size_bytes,
+        .policy_flags = GPU_SCHEDULER_POLICY_A7XX_RESOURCE_WRITE |
+                        GPU_SCHEDULER_POLICY_A7XX_SYNC,
     };
     if (gpu_scheduler_submit(gpu_core_scheduler(), service->scheduler_client,
                              &submission, &command->queued_fence) != 0)
@@ -209,6 +267,7 @@ void mesart_renderer_release(mesart_renderer_service *service)
         gpu_buffer_release(&service->buffers[i].storage);
     gpu_ring_release(&service->command_buffer.snapshot);
     gpu_buffer_release(&service->command_buffer.source);
+    gpu_buffer_release(&service->runtime_heap);
     mesart_bundle_release(&service->bundle);
     *service = (mesart_renderer_service){0};
 }
@@ -231,7 +290,12 @@ int mesart_renderer_syscall(aa64_el0_frame *frame, void *context)
                       MESART_FEATURE_BOOTSTRAP_BUFFER |
                       MESART_FEATURE_COMMAND_SNAPSHOT |
                       MESART_FEATURE_COMMAND_VALIDATION |
-                      MESART_FEATURE_SCHEDULER_QUEUE;
+                      MESART_FEATURE_SCHEDULER_QUEUE |
+                      MESART_FEATURE_RUNTIME_HEAP |
+                      MESART_FEATURE_GPU_BUFFER_VA |
+                      MESART_FEATURE_GPU_RESOURCE_ARENA |
+                      MESART_FEATURE_FREEDRENO_CHIP_ID |
+                      MESART_FEATURE_COMMAND_SYNC;
         frame->x[3] = service->bootstrap_buffer_handle;
         frame->x[4] = service->buffers[0].user_va;
         frame->x[5] = service->buffers[0].storage.size_bytes;
@@ -250,6 +314,7 @@ int mesart_renderer_syscall(aa64_el0_frame *frame, void *context)
         frame->x[0] = 0u;
         frame->x[1] = buffer->user_va;
         frame->x[2] = buffer->storage.size_bytes;
+        frame->x[3] = buffer->gpu_va;
         return 1;
     }
     case MESART_OPERATION_QUERY_COMMAND_BUFFER:
@@ -263,6 +328,7 @@ int mesart_renderer_syscall(aa64_el0_frame *frame, void *context)
         frame->x[1] = service->command_buffer.handle;
         frame->x[2] = service->command_buffer.user_va;
         frame->x[3] = service->command_buffer.snapshot.capacity_dwords;
+        frame->x[4] = service->command_buffer.gpu_va;
         return 1;
     case MESART_OPERATION_CAPTURE_COMMAND_BUFFER:
         service->last_syscall_result = mesart_renderer_capture_command_buffer(
@@ -280,6 +346,43 @@ int mesart_renderer_syscall(aa64_el0_frame *frame, void *context)
         service->last_syscall_result = rc;
         return 1;
     }
+    case MESART_OPERATION_QUERY_RUNTIME:
+        if (!service->runtime_heap.cpu ||
+            service->runtime_heap.size_bytes !=
+                MESART_RENDERER_RUNTIME_HEAP_BYTES)
+        {
+            frame->x[0] = (uint64_t)-2;
+            service->last_syscall_result = -2;
+            return 1;
+        }
+        frame->x[0] = 0u;
+        frame->x[1] = MESART_RENDERER_RUNTIME_HEAP_VA;
+        frame->x[2] = service->runtime_heap.size_bytes;
+        frame->x[3] = MESART_RUNTIME_ABI_VERSION;
+        return 1;
+    case MESART_OPERATION_QUERY_GPU_ARENA:
+    {
+        mesart_renderer_buffer *arena = mesart_renderer_find_buffer(
+            service, service->resource_arena_handle);
+
+        if (!arena || !arena->gpu_va ||
+            arena->storage.size_bytes != MESART_RENDERER_BUFFER_SLOT_BYTES)
+        {
+            frame->x[0] = (uint64_t)-2;
+            service->last_syscall_result = -2;
+            return 1;
+        }
+        frame->x[0] = 0u;
+        frame->x[1] = arena->handle;
+        frame->x[2] = arena->user_va;
+        frame->x[3] = arena->storage.size_bytes;
+        frame->x[4] = arena->gpu_va;
+        return 1;
+    }
+    case MESART_OPERATION_QUERY_CHIP_ID:
+        frame->x[0] = 0u;
+        frame->x[1] = MESART_FREEDRENO_CHIP_ID_ADRENO_X1_85;
+        return 1;
     default:
         frame->x[0] = (uint64_t)-38; /* ENOSYS within Mesart's own ABI. */
         service->last_syscall_result = -38;
@@ -290,15 +393,31 @@ int mesart_renderer_syscall(aa64_el0_frame *frame, void *context)
 int mesart_renderer_test_complete_queued(mesart_renderer_service *service)
 {
     mesart_renderer_command_buffer *command;
+    mesart_renderer_buffer *arena;
+    uint64_t completed_fence = 0u;
 
     if (!service)
         return -1;
     command = &service->command_buffer;
     if (!command->queued_fence)
         return -2;
-    if (gpu_scheduler_complete(gpu_core_scheduler(), command->queued_fence) != 0)
+    /* The first runtime backend has a deliberately tiny hardware contract:
+     * it revalidates and executes only the sealed NOP/order/resource-write
+     * snapshot that EL0 just queued.  A successful scheduler completion
+     * therefore means the live CP read pointer consumed that batch, not a
+     * synthetic test signal. */
+    service->last_backend_result = gpu_core_execute_next_scheduled(
+        &completed_fence);
+    if (service->last_backend_result != 0 ||
+        completed_fence != command->queued_fence)
         return -3;
-    command->completed_fence = command->queued_fence;
+    arena = mesart_renderer_find_buffer(service, service->resource_arena_handle);
+    if (!arena || !arena->storage.cpu || arena->storage.size_bytes < 4u)
+        return -4;
+    asm_dma_invalidate_range(arena->storage.cpu, sizeof(uint32_t));
+    if (*(uint32_t *)arena->storage.cpu != MESART_RESOURCE_WRITE_TEST_MAGIC)
+        return -5;
+    command->completed_fence = completed_fence;
     command->queued_fence = 0u;
     return 0;
 }
@@ -379,9 +498,22 @@ int mesart_renderer_admit(dihos_process_table *processes,
         rc = -55;
         goto failed;
     }
-    if (mesart_renderer_create_command_buffer(&service) != 0)
+    if (mesart_renderer_create_buffer(&service,
+                                      MESART_RENDERER_BUFFER_SLOT_BYTES,
+                                      &service.resource_arena_handle,
+                                      &service.buffers[1].user_va) != 0)
     {
         rc = -56;
+        goto failed;
+    }
+    if (mesart_renderer_create_command_buffer(&service) != 0)
+    {
+        rc = -57;
+        goto failed;
+    }
+    if (mesart_renderer_create_runtime_heap(&service) != 0)
+    {
+        rc = -58;
         goto failed;
     }
     process_desc.kind = DIHOS_PROCESS_KIND_RENDERER_SERVICE;

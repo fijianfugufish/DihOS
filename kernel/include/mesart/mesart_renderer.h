@@ -18,8 +18,12 @@
 #define MESART_RENDERER_BOOTSTRAP_BUFFER_BYTES 4096ull
 #define MESART_RENDERER_BUFFER_ARENA_BASE      0x0000002000000000ull
 #define MESART_RENDERER_BUFFER_SLOT_BYTES      0x0000000001000000ull
+#define MESART_RENDERER_GPU_BUFFER_ARENA_BASE  0x0000000040000000ull
 #define MESART_RENDERER_COMMAND_BUFFER_BYTES   0x00010000u
 #define MESART_RENDERER_COMMAND_BUFFER_VA      0x0000002020000000ull
+#define MESART_RENDERER_COMMAND_BUFFER_GPU_VA  0x0000000050000000ull
+#define MESART_RENDERER_RUNTIME_HEAP_BYTES      0x00800000u
+#define MESART_RENDERER_RUNTIME_HEAP_VA         0x0000002030000000ull
 #define MESART_RENDERER_MAX_BYTES_IN_FLIGHT    (16ull * 1024ull * 1024ull)
 #define MESART_RENDERER_MAX_JOBS_IN_FLIGHT     8u
 
@@ -28,6 +32,7 @@ typedef struct mesart_renderer_buffer
     /* All backing memory remains owned by the kernel service supervisor. */
     gpu_buffer storage;
     uint64_t user_va;
+    uint64_t gpu_va;
     uint32_t handle;
     uint16_t generation;
     uint8_t active;
@@ -40,6 +45,7 @@ typedef struct mesart_renderer_command_buffer
     gpu_buffer source;
     gpu_command_ring snapshot;
     uint64_t user_va;
+    uint64_t gpu_va;
     uint32_t handle;
     uint32_t packet_count;
     uint64_t queued_fence;
@@ -62,9 +68,17 @@ typedef struct mesart_renderer_service
     mesart_renderer_buffer buffers[MESART_RENDERER_MAX_BUFFERS];
     uint64_t buffer_bytes;
     uint32_t bootstrap_buffer_handle;
+    uint32_t resource_arena_handle;
+    /* This fixed, private allocation is Mesart's first freestanding runtime
+     * heap.  It is deliberately distinct from GPU buffers and SACX memory. */
+    gpu_buffer runtime_heap;
     mesart_renderer_command_buffer command_buffer;
     uint32_t last_syscall_operation;
     int32_t last_syscall_result;
+    /* Kernel-only backend result for the hardware self-test.  It is never
+     * supplied by EL0 and exists solely to make a failed GX/CP handoff
+     * diagnosable from the shell log. */
+    int32_t last_backend_result;
     dihos_process_handle process;
     /* Scheduler identity is bound to the DihOS process, never supplied by
      * EL0.  It is reserved at admission even before submission exists. */
