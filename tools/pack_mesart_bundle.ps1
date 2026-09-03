@@ -9,7 +9,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$RendererPath,
 
-  [string]$PublicKeyHeader = (Join-Path (Split-Path -Parent $PSScriptRoot) 'kernel\include\mesart\mesart_development_root.h'),
+  [string]$PublicKeyHeader = "",
   [uint32]$RuntimeAbi = 1,
   [string]$GmuFirmwarePath = "",
   [string]$SqeFirmwarePath = "",
@@ -20,6 +20,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# $PSScriptRoot is not reliably populated while PowerShell evaluates a
+# parameter default for `powershell -File`. Resolve this default inside the
+# script body so direct invocation and the documented command line agree.
+if (!$PublicKeyHeader) {
+  $PublicKeyHeader = Join-Path (Split-Path -Parent $PSScriptRoot) 'kernel\include\mesart\mesart_development_root.h'
+}
 
 $ManifestMagic = [uint32]0x5452534d # "MSRT", little-endian
 $ManifestVersion = [uint16]1
@@ -58,6 +65,30 @@ function Convert-HexToBytes {
     $bytes[$i] = [Convert]::ToByte($text.Substring($i * 2, 2), 16)
   }
   return $bytes
+}
+
+function Read-P256PrivateScalar {
+  param([string]$Path)
+  # The generator's private-key contract is deliberately narrower than the
+  # generic public/artifact formatting parser: exactly 32 bytes encoded as
+  # 64 ASCII hex characters.  Decoding raw bytes avoids PowerShell text
+  # provider behavior and keeps the scalar out of diagnostic strings.
+  $raw = [IO.File]::ReadAllBytes($Path)
+  if ($raw.Length -ne 64) { throw 'Private key is not a 32-byte ASCII scalar.' }
+  $out = [byte[]]::new(32)
+  for ($i = 0; $i -lt 32; ++$i) {
+    $pair = $raw[($i * 2)..($i * 2 + 1)]
+    if (!(($pair[0] -ge 48 -and $pair[0] -le 57) -or
+          ($pair[0] -ge 65 -and $pair[0] -le 70) -or
+          ($pair[0] -ge 97 -and $pair[0] -le 102)) -or
+        !(($pair[1] -ge 48 -and $pair[1] -le 57) -or
+          ($pair[1] -ge 65 -and $pair[1] -le 70) -or
+          ($pair[1] -ge 97 -and $pair[1] -le 102))) {
+      throw 'Private key is not a 32-byte ASCII scalar.'
+    }
+    $out[$i] = [Convert]::ToByte([Text.Encoding]::ASCII.GetString($pair), 16)
+  }
+  return ,$out
 }
 
 function Get-PublicPointFromHeader {
@@ -119,7 +150,7 @@ function Convert-DerEcdsaToRawP256 {
 }
 
 $root = (Resolve-Path -LiteralPath $BundleRoot).Path
-$private = Convert-HexToBytes -Hex (Get-Content -LiteralPath $PrivateKeyPath -Raw) -Name 'Private key'
+$private = Read-P256PrivateScalar -Path $PrivateKeyPath
 if ($private.Length -ne 32) { throw 'The development/release P-256 private scalar must be 32 bytes.' }
 $public = Get-PublicPointFromHeader $PublicKeyHeader
 

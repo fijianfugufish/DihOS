@@ -19,6 +19,13 @@ typedef struct adreno_x1_85_3d_draw
     const mesart_renderer_graphics_pipeline *pipeline;
     const gpu_render_target *target;
     uint64_t target_gpu_va;
+    /* Default GLSL uniforms are lowered by Mesa to application UBO 0.  These
+     * addresses always come from the fixed kernel-owned uniform pool, never
+     * from Mesart EL0 or a signed artifact. */
+    uint64_t vertex_default_ubo_gpu_va;
+    uint64_t fragment_default_ubo_gpu_va;
+    uint32_t vertex_default_ubo_bytes;
+    uint32_t fragment_default_ubo_bytes;
 } adreno_x1_85_3d_draw;
 
 /* Checks the exact first 3D profile before a command ring is touched.  The

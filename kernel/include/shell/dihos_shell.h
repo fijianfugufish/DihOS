@@ -156,6 +156,10 @@ extern "C"
     void dihos_shell_init(void);
     int dihos_shell_execute_line(const char *line);
     const char *dihos_shell_prompt(void);
+    /* Kernel-frame hooks for the temporary trusted Mesa visual test. They
+     * deliberately expose no renderer, shader, GPU-address, or EL0 API. */
+    uint8_t dihos_shell_mesart_visual_frame_busy(void);
+    void dihos_shell_mesart_visual_submit_after_cpu(void);
     int dihos_shell_history_prev(const char *current_text, char *out, uint32_t out_cap);
     int dihos_shell_history_next(const char *current_text, char *out, uint32_t out_cap);
 

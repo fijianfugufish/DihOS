@@ -94,8 +94,23 @@ int gpu_core_render_target_iova(const gpu_render_target *target,
 int gpu_core_mesart_3d_preflight(
     const mesart_renderer_graphics_pipeline *pipeline, uint32_t *out_dwords);
 
-/* Executes the fixed first hardware test: the already verified Mesart VS/FS
- * pair draws one auto-indexed triangle to the boot scanout. This remains a
- * kernel-only diagnostic path, not a renderer or raw submission interface. */
+/* Starts the fixed trusted 3D draw and returns as soon as CP has accepted the
+ * sealed ring.  It is kernel-only: callers must retain the authenticated
+ * pipeline and target until gpu_core_mesart_3d_poll reports its fence.
+ * Returns the fence through out_fence; it never grants EL0 raw submission. */
+int gpu_core_mesart_3d_kick(
+    const mesart_renderer_graphics_pipeline *pipeline, uint64_t *out_fence);
+
+/* Checks the one trusted 3D fence without spinning. Returns 0 when a fence
+ * completed, 1 while no work is pending or the live fence is still running,
+ * and a negative error after failing the runtime closed. */
+int gpu_core_mesart_3d_poll(uint64_t *out_fence);
+
+/* True only while CP/RB own the trusted runtime ring. The compositor uses
+ * this to avoid a CPU present racing an in-flight GPU render. */
+uint8_t gpu_core_mesart_3d_busy(void);
+
+/* Synchronous diagnostic wrapper around kick/poll. It remains only for the
+ * explicit shell self-test; normal compositor work must use kick/poll. */
 int gpu_core_mesart_3d_submit(
     const mesart_renderer_graphics_pipeline *pipeline, uint64_t *out_fence);

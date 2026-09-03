@@ -117,6 +117,22 @@ static char G_console_scratch[DIHOS_SHELL_CAPTURE_CAP];
 static uint8_t G_shell_trace = 0u;
 static uint8_t G_shell_fallback_depth = 0u;
 static dihos_process_table G_mesart_processes;
+/* The experimental renderer service maps fixed GPU virtual addresses. Until
+ * the persistent compositor service owns those mappings, a diagnostic run is
+ * deliberately single-use per boot: remapping a fresh allocation at the same
+ * IOVA without a proven live-SMMU TLB protocol is unsafe. */
+static uint8_t G_mesart_selftest_consumed = 0u;
+
+typedef struct dihos_mesart_visual_state
+{
+    mesart_renderer_service service;
+    mesart_renderer_graphics_pipeline pipeline;
+    uint8_t active;
+    uint8_t submitted;
+    uint8_t stop_requested;
+} dihos_mesart_visual_state;
+
+static dihos_mesart_visual_state G_mesart_visual;
 
 static void dihos_shell_default_print(const char *text, void *user);
 static void dihos_shell_default_print_inline(const char *text, void *user);
@@ -211,6 +227,7 @@ static int dihos_cmd_test_assert_eq(dihos_shell_stage *stage);
 static int dihos_cmd_test_fail(dihos_shell_stage *stage);
 static int dihos_cmd_process_selftest(dihos_shell_stage *stage);
 static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage);
+static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage);
 static int dihos_cmd_gpu_render_status(dihos_shell_stage *stage);
 static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
@@ -305,6 +322,7 @@ static const dihos_shell_command G_commands[] = {
     {"fail", "fail [message...]", "Return failure for tests.", 0u, dihos_cmd_test_fail},
     {"process:selftest", "process:selftest", "Run the isolated EL0 entry/exit smoke test.", 0u, dihos_cmd_process_selftest},
     {"mesart:selftest", "mesart:selftest", "Verify, admit, and run the signed EL0 renderer stub.", 0u, dihos_cmd_mesart_selftest},
+    {"mesart:triangle", "mesart:triangle start|stop|status", "Show the signed GPU triangle without blocking the desktop.", 0u, dihos_cmd_mesart_triangle},
     {"gpu:render-status", "gpu:render-status", "Show the driver-neutral GPU render dispatcher state.", 0u, dihos_cmd_gpu_render_status},
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
@@ -4640,9 +4658,205 @@ static int dihos_cmd_gpu_render_status(dihos_shell_stage *stage)
     return 0;
 }
 
+static void dihos_mesart_visual_release(void)
+{
+    dihos_process_handle process;
+
+    if (!G_mesart_visual.active)
+        return;
+    process = G_mesart_visual.service.process;
+    mesart_renderer_release(&G_mesart_visual.service);
+    (void)dihos_process_reap(&G_mesart_processes, process);
+    G_mesart_visual = (dihos_mesart_visual_state){0};
+}
+
+uint8_t dihos_shell_mesart_visual_frame_busy(void)
+{
+    if (!G_mesart_visual.active)
+        return 0u;
+    if (!gpu_core_mesart_3d_busy() && G_mesart_visual.stop_requested)
+    {
+        dihos_mesart_visual_release();
+        return 0u;
+    }
+    /* The first visual proof deliberately holds the completed scanout frame
+     * instead of asking KGFX to repaint over it. The kernel, input, scheduler
+     * and fence poll continue running; only CPU presentation is paused until
+     * `mesart:triangle stop`. */
+    return 1u;
+}
+
+void dihos_shell_mesart_visual_submit_after_cpu(void)
+{
+    int rc;
+    uint64_t fence = 0u;
+
+    if (!G_mesart_visual.active || G_mesart_visual.stop_requested ||
+        G_mesart_visual.submitted || gpu_core_mesart_3d_busy())
+        return;
+    rc = gpu_core_mesart_3d_kick(&G_mesart_visual.pipeline, &fence);
+    if (rc == 0)
+    {
+        G_mesart_visual.submitted = 1u;
+        return;
+    }
+    terminal_error("Mesart visual triangle stopped; GPU kick rc=");
+    terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+    dihos_mesart_visual_release();
+}
+
+static void dihos_mesart_visual_abort_start(mesart_renderer_service *service)
+{
+    dihos_process_handle process;
+
+    if (!service)
+        return;
+    process = service->process;
+    (void)dihos_process_fault(&G_mesart_processes, process);
+    mesart_renderer_release(service);
+    (void)dihos_process_reap(&G_mesart_processes, process);
+}
+
+static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
+{
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    const char *mode = (stage && stage->positional_count) ?
+        stage->positional[0] : "status";
+    mesart_renderer_service service = {0};
+    mesart_renderer_graphics_pipeline pipeline = {0};
+    uint64_t status = 0u;
+    int enter_rc;
+    int rc;
+
+    if (strcmp(mode, "status") == 0)
+    {
+        terminal_print("Mesart visual triangle=");
+        terminal_print(G_mesart_visual.active ?
+                       (G_mesart_visual.stop_requested ? "stopping" : "running") :
+                       "stopped");
+        terminal_print(" gpu-busy=");
+        terminal_print(gpu_core_mesart_3d_busy() ? "yes" : "no");
+        terminal_print(" frame-submitted=");
+        terminal_print(G_mesart_visual.submitted ? "yes" : "no");
+        terminal_flush_log();
+        return 0;
+    }
+    if (strcmp(mode, "stop") == 0)
+    {
+        if (!G_mesart_visual.active)
+            terminal_print("Mesart visual triangle is already stopped");
+        else if (gpu_core_mesart_3d_busy())
+        {
+            G_mesart_visual.stop_requested = 1u;
+            terminal_print("Mesart visual triangle will stop after its current GPU fence");
+        }
+        else
+        {
+            dihos_mesart_visual_release();
+            terminal_success("Mesart visual triangle stopped");
+        }
+        terminal_flush_log();
+        return 0;
+    }
+    if (strcmp(mode, "start") != 0)
+    {
+        terminal_error("usage: mesart:triangle start|stop|status");
+        terminal_flush_log();
+        return -1;
+    }
+    if (G_mesart_visual.active)
+    {
+        terminal_print("Mesart visual triangle is already running");
+        terminal_flush_log();
+        return 0;
+    }
+    if (G_mesart_selftest_consumed)
+    {
+        terminal_error("Mesart triangle must be the first renderer use after boot; reboot, then run mesart:triangle start");
+        terminal_flush_log();
+        return -1;
+    }
+
+    /* Retain this one verified service for the visual lifetime. That avoids
+     * both a live IOVA replacement and the old command's repeated diagnostic
+     * allocation/release cycle. */
+    G_mesart_selftest_consumed = 1u;
+    dihos_process_init(&G_mesart_processes);
+    rc = mesart_renderer_admit(&G_mesart_processes, "0:/OS/MesaRuntime",
+                               &service);
+    if (rc != 0)
+        goto failed;
+    if (dihos_process_set_running(&G_mesart_processes, service.process) != 0)
+    {
+        rc = -2;
+        goto failed;
+    }
+    enter_rc = aa64_user_enter_with_handler(&service.vm, service.image.entry_va,
+                                            service.stack_top_va, &status,
+                                            mesart_renderer_syscall, &service);
+    if (enter_rc != 0 || (status & DIHOS_EL0_EXIT_FAULT) ||
+        status != 0x4d535254u)
+    {
+        rc = -3;
+        goto failed;
+    }
+    rc = mesart_renderer_test_complete_queued(&service);
+    if (rc != 0)
+    {
+        /* Keep this distinct from graphics setup.  The first queued resource
+         * write is a CP/SMMU admission witness, and collapsing it into the
+         * old visual rc=4 hid the one value needed to diagnose a fresh-boot
+         * rejection. */
+        terminal_error("Mesart visual queue witness failed rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        terminal_print(" backend-rc=");
+        terminal_print_inline_hex64(
+            (uint64_t)(uint32_t)(-service.last_backend_result));
+        terminal_print(" syscall-op=");
+        terminal_print_inline_hex64(service.last_syscall_operation);
+        terminal_print(" syscall-rc=");
+        terminal_print_inline_hex64(
+            (uint64_t)(uint32_t)(-service.last_syscall_result));
+        terminal_print(" queued=");
+        terminal_print_inline_hex64(service.command_buffer.queued_fence);
+        terminal_print("");
+        rc = -4;
+        goto failed;
+    }
+    if (mesart_renderer_prepare_graphics_pipeline(
+            &service, &(mesart_renderer_graphics_request){0}, &pipeline) != 0 ||
+        gpu_core_mesart_3d_preflight(&pipeline, &(uint32_t){0}) != 0)
+    {
+        rc = -5;
+        goto failed;
+    }
+    if (dihos_process_exit(&G_mesart_processes, service.process) != 0)
+    {
+        rc = -6;
+        goto failed;
+    }
+    G_mesart_visual.service = service;
+    G_mesart_visual.pipeline = pipeline;
+    G_mesart_visual.active = 1u;
+    terminal_success("Mesart visual triangle started; CPU presentation is paused so the completed GPU frame remains visible");
+    terminal_flush_log();
+    return 0;
+
+failed:
+    terminal_error("Mesart visual triangle setup failed rc=");
+    terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+    dihos_mesart_visual_abort_start(&service);
+    terminal_flush_log();
+    return -1;
+#else
+    (void)stage;
+    terminal_error("Mesart visual triangle is only available on AArch64");
+    return -1;
+#endif
+}
+
 static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
 {
-    (void)stage;
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     mesart_renderer_service service = {0};
     mesart_renderer_graphics_pipeline graphics_pipeline = {0};
@@ -4660,6 +4874,20 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     uint32_t shader_count = 0u;
     int enter_rc;
     int rc;
+
+    if (dihos_stage_named(stage, "show"))
+    {
+        terminal_warn("mesart:selftest show mode was removed; it used a blocking diagnostic loop");
+        terminal_flush_log();
+        return -1;
+    }
+    if (G_mesart_selftest_consumed)
+    {
+        terminal_warn("Mesart self-test is single-use per boot; reboot before running it again");
+        terminal_flush_log();
+        return 0;
+    }
+    G_mesart_selftest_consumed = 1u;
 
     dihos_process_init(&G_mesart_processes);
     rc = mesart_renderer_admit(&G_mesart_processes, "0:/OS/MesaRuntime",

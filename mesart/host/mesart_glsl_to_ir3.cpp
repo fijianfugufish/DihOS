@@ -13,6 +13,7 @@
 #include <fstream>
 
 #include "compiler/glsl/standalone.h"
+#include "compiler/glsl_types.h"
 #include "compiler/nir/nir.h"
 #include "freedreno/common/freedreno_dev_info.h"
 #include "freedreno/ir3/ir3_compiler.h"
@@ -49,6 +50,12 @@ static uint32_t mesart_stage_for_glsl_path(const char *path)
     if (ends_with(path, ".frag"))
         return MESART_IR3_SHADER_FRAGMENT;
     return 0u;
+}
+
+static unsigned mesart_uniform_vec4_slots(const glsl_type *type,
+                                          bool bindless)
+{
+    return glsl_count_vec4_slots(type, false, bindless);
 }
 
 /* Mesa may represent an API colour-zero result as FRAG_RESULT_COLOR or as
@@ -288,7 +295,11 @@ int main(int argc, char **argv)
 
     gl_context context = {};
     standalone_options options = {};
-    options.glsl_version = 310;
+    /* Mesa's standalone helper supplies a complete GLES 3.0 capability
+     * table, including default-uniform limits.  Its 3.1 selector currently
+     * leaves that table unset, rejecting even a single vec2 uniform.  The
+     * first graphics profiles use only GLES 3.0 language features. */
+    options.glsl_version = 300;
     options.do_link = 1;
     gl_shader_program *program =
         standalone_compile_shader(&options, 2u, &argv[1], &context);
@@ -358,6 +369,14 @@ int main(int argc, char **argv)
          * variables.  The state tracker lowers those before Freedreno sees
          * them; our host bridge must perform that same boundary pass. */
         nir_lower_system_values(nir);
+        /* Default GLSL uniforms are not IR3 variables.  Mesa's normal state
+         * tracker rewrites them into a bounded UBO before driver lowering;
+         * without this, a `load_deref` uniform reaches Freedreno and trips
+         * NIR validation.  The generated MIR3/MPIP records its resulting
+         * application-UBO count for DihOS to validate later. */
+        nir_lower_io(nir, nir_var_uniform, mesart_uniform_vec4_slots,
+                     (nir_lower_io_options)0);
+        nir_lower_uniforms_to_ubo(nir, false, false);
         if (!nir->info.io_lowered) {
             ir3_nir_lower_io_vars_to_temporaries(nir);
             ir3_nir_lower_io(nir);

@@ -31,6 +31,7 @@
 #include "apps/sacx_runtime.h"
 #include "apps/task_manager_api.h"
 #include "apps/text_editor_api.h"
+#include "shell/dihos_shell.h"
 #include "hardware_probes/acpi_probe_hidi2c_ready.h"
 #include "hardware_probes/acpi_probe_xhci.h"
 #include "hardware_probes/acpi_probe_pci_lookup.h"
@@ -492,6 +493,10 @@ void kmain(boot_info *bi)
                 asm_wait();
 #endif
         ++g_dihos_tick;
+        /* GPU completion is observed from the frame loop, not by stalling a
+         * shell command.  This is intentionally a bounded, non-spinning
+         * poll; a future compositor owns the kick side. */
+        (void)gpu_core_mesart_3d_poll(0);
         task_accounting_frame_begin();
 
         task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
@@ -514,7 +519,11 @@ void kmain(boot_info *bi)
         }
 
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
-        kgfx_render_all(black);
+        /* The visual test holds its one completed GPU frame on scanout. CPU
+         * presentation resumes immediately when the test is stopped. */
+        if (!dihos_shell_mesart_visual_frame_busy())
+            kgfx_render_all(black);
+        dihos_shell_mesart_visual_submit_after_cpu();
         task_accounting_add(TASK_ACCOUNT_SACX, 1u);
         sacx_runtime_update();
         frame++;
