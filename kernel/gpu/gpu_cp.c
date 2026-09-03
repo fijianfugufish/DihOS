@@ -146,7 +146,15 @@ int gpu_cp_wait_ring(const gpu_mmio_window *regs,
         return -1;
     for (uint32_t i = 0u; i < polls; ++i)
     {
-        if (gpu_cp_snapshot_read(regs, layout, &snapshot) != 0)
+        /* Completion only depends on CP_RB_RPTR.  A full CP snapshot also
+         * reads optional/diagnostic Gen7 registers, and this X1-85 firmware
+         * can data-abort those reads after a submitted job despite the live
+         * CP front-end being healthy.  Do not turn an observation-only
+         * register into a runtime completion dependency.  Callers take a
+         * complete snapshot before binding; their own completion memory
+         * fence remains the second post-submit integrity check. */
+        if (gpu_mmio_try_read32(regs, layout->rb_rptr,
+                                &snapshot.rb_rptr) != 0)
             return -2;
         if (snapshot.rb_rptr == expected_rptr)
         {

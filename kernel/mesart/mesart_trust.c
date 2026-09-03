@@ -72,7 +72,7 @@ static int validate_entries(const mesart_manifest_file *files,
     {
         uint32_t path_length;
         if (files[i].role < MESART_ROLE_RENDERER_SERVICE ||
-            files[i].role > MESART_ROLE_KERNEL_COMPOSITOR_SHADER ||
+            files[i].role > MESART_ROLE_KERNEL_COMPOSITOR_PIPELINE ||
             !files[i].bytes ||
             path_length_and_validate(files[i].path, &path_length) != 0)
             return -1;

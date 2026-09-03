@@ -4,7 +4,9 @@
 #include "bootinfo.h"
 #include "gpu/gpu_firmware.h"
 #include "gpu/gpu_iommu.h"
+#include "gpu/gpu_render.h"
 #include "gpu/gpu_scheduler.h"
+#include "mesart/mesart_renderer.h"
 
 typedef enum gpu_device_state
 {
@@ -67,3 +69,33 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence);
  * aperture during service admission.  It rejects active scheduler work and
  * flushes only render CB0; this is not a general user-visible DMA mapper. */
 int gpu_core_map_mesart_buffer(gpu_buffer *buffer, uint64_t gpu_va);
+
+/* Returns one of the two fixed shader slots reserved while the DMA domain is
+ * constructed, before CB0 is attached.  The slots are kernel-only: callers
+ * may copy an authenticated MIR3 artifact there, but no EL0 mapping or
+ * general IOVA allocation is involved.  This avoids mutating live SMMU page
+ * tables when a renderer service is admitted after GPU bring-up. */
+int gpu_core_mesart_shader_slot(uint32_t slot, gpu_buffer **out_storage,
+                                uint64_t *out_offset,
+                                uint64_t *out_gpu_va,
+                                uint64_t *out_bytes);
+
+/* Resolves a trusted render target into its private GPU mapping. It accepts
+ * only the boot-imported scanout allocation or a live gpu_render surface;
+ * arbitrary CPU pointers never become DMA authority. This is backend-only:
+ * KGFX and EL0 never receive the returned address. */
+int gpu_core_render_target_iova(const gpu_render_target *target,
+                                uint64_t *out_gpu_va);
+
+/* Builds (but deliberately does not publish) the fixed first A7xx draw for
+ * an already authenticated Mesart shader pair. This is a kernel-only
+ * preflight used to prove the exact state encoder before a live 3D submit is
+ * enabled. `out_dwords` is diagnostic only; no GPU address is returned. */
+int gpu_core_mesart_3d_preflight(
+    const mesart_renderer_graphics_pipeline *pipeline, uint32_t *out_dwords);
+
+/* Executes the fixed first hardware test: the already verified Mesart VS/FS
+ * pair draws one auto-indexed triangle to the boot scanout. This remains a
+ * kernel-only diagnostic path, not a renderer or raw submission interface. */
+int gpu_core_mesart_3d_submit(
+    const mesart_renderer_graphics_pipeline *pipeline, uint64_t *out_fence);

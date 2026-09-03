@@ -5,7 +5,14 @@
 #include "memory/pmem.h"
 #include "mesart/mesart_packets.h"
 #include "mesart/mesart_roots.h"
+#include "mesart/mesart_shader.h"
 #include "mesart_protocol.h"
+#include "terminal/terminal_api.h"
+
+#include "kwrappers/kfile.h"
+
+#define MESART_RENDERER_BUNDLE_PATH_BYTES 320u
+#define MESART_RENDERER_IR3_CODE_OFFSET   128u
 
 static void copy_sha256(uint8_t destination[MESART_SHA256_BYTES],
                         const uint8_t source[MESART_SHA256_BYTES])
@@ -43,16 +50,28 @@ static mesart_renderer_buffer *mesart_renderer_find_buffer(
     return buffer->active && buffer->handle == handle ? buffer : 0;
 }
 
+static const mesart_renderer_shader_asset *mesart_renderer_find_shader(
+    const mesart_renderer_service *service, uint32_t stage)
+{
+    if (!service)
+        return 0;
+    for (uint32_t i = 0u; i < service->shader_count; ++i)
+        if (service->shaders[i].stage == stage)
+            return &service->shaders[i];
+    return 0;
+}
+
 /* This helper is admission-only: the VM is inert while its page tables are
  * changed.  A later allocate syscall must first grow the VM API with safe
  * active-root TLB maintenance; do not bypass that boundary here. */
 static int mesart_renderer_create_buffer(mesart_renderer_service *service,
                                          uint64_t bytes,
+                                         uint32_t map_to_user,
                                          uint32_t *out_handle,
                                          uint64_t *out_user_va)
 {
     mesart_renderer_buffer *buffer;
-    uint64_t user_va;
+    uint64_t user_va = 0u;
     uint32_t slot;
 
     if (!service || !out_handle || !out_user_va || !bytes ||
@@ -69,33 +88,230 @@ static int mesart_renderer_create_buffer(mesart_renderer_service *service,
     if (user_va < MESART_RENDERER_BUFFER_ARENA_BASE ||
         gpu_buffer_alloc(&service->buffers[slot].storage, bytes,
                          GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0)
+    {
+        terminal_error("Mesart buffer physical allocation failed");
         return -3;
+    }
     buffer = &service->buffers[slot];
-    if (aarch64_user_vm_map(&service->vm, user_va, buffer->storage.phys,
+    if (map_to_user &&
+        aarch64_user_vm_map(&service->vm, user_va, buffer->storage.phys,
                             bytes, AARCH64_USER_VM_READ |
                                    AARCH64_USER_VM_WRITE) != 0)
     {
         gpu_buffer_release(&buffer->storage);
+        terminal_error("Mesart buffer EL0 mapping failed");
         return -4;
     }
-    if (gpu_core_map_mesart_buffer(&buffer->storage,
-                                   MESART_RENDERER_GPU_BUFFER_ARENA_BASE +
-                                   (uint64_t)slot *
-                                       MESART_RENDERER_BUFFER_SLOT_BYTES) != 0)
     {
-        gpu_buffer_release(&buffer->storage);
-        return -5;
+        int map_rc = gpu_core_map_mesart_buffer(
+            &buffer->storage, MESART_RENDERER_GPU_BUFFER_ARENA_BASE +
+                              (uint64_t)slot *
+                                  MESART_RENDERER_BUFFER_SLOT_BYTES);
+
+        if (map_rc != 0)
+        {
+            gpu_buffer_release(&buffer->storage);
+            terminal_error("Mesart buffer GPU map failed rc=");
+            terminal_print_inline_hex64((uint64_t)(uint32_t)(-map_rc));
+            terminal_print("");
+            return -5;
+        }
     }
     buffer->generation = (uint16_t)(buffer->generation + 1u);
     if (!buffer->generation)
         buffer->generation = 1u;
     buffer->handle = mesart_buffer_handle(slot, buffer->generation);
-    buffer->user_va = user_va;
+    buffer->user_va = map_to_user ? user_va : 0u;
     buffer->gpu_va = buffer->storage.iova;
     buffer->active = 1u;
     service->buffer_bytes += bytes;
     *out_handle = buffer->handle;
-    *out_user_va = user_va;
+    *out_user_va = buffer->user_va;
+    return 0;
+}
+
+static int mesart_renderer_make_bundle_file_path(
+    char out[MESART_RENDERER_BUNDLE_PATH_BYTES], const char *bundle_root,
+    const mesart_manifest_file *file)
+{
+    uint32_t at = 0u;
+    uint32_t path_at = 0u;
+
+    if (!out || !bundle_root || !file || !file->path[0])
+        return -1;
+    while (bundle_root[at])
+    {
+        if (at + 1u >= MESART_RENDERER_BUNDLE_PATH_BYTES)
+            return -2;
+        out[at] = bundle_root[at];
+        ++at;
+    }
+    if (!at)
+        return -3;
+    if (out[at - 1u] != '/')
+        out[at++] = '/';
+    while (path_at < MESART_MANIFEST_PATH_BYTES && file->path[path_at])
+    {
+        if (at + 1u >= MESART_RENDERER_BUNDLE_PATH_BYTES)
+            return -4;
+        out[at++] = file->path[path_at++];
+    }
+    if (path_at == MESART_MANIFEST_PATH_BYTES)
+        return -5;
+    out[at] = '\0';
+    return 0;
+}
+
+/* Admission-only: the signed manifest has already verified the exact bytes
+ * of this file.  This second parse rejects a syntactically valid but wrong
+ * target/stage artifact before its code receives a GPU VA. */
+static int mesart_renderer_load_ir3_shader(
+    mesart_renderer_service *service, const char *bundle_root,
+    const mesart_manifest_file *file)
+{
+    char path[MESART_RENDERER_BUNDLE_PATH_BYTES];
+    KFile stream;
+    gpu_buffer *storage;
+    mesart_ir3_blob_view blob;
+    uint64_t slot_offset;
+    uint64_t slot_gpu_va;
+    uint64_t slot_bytes;
+    uint32_t read = 0u;
+
+    if (!service || !bundle_root || !file ||
+        file->role != MESART_ROLE_KERNEL_COMPOSITOR_SHADER ||
+        service->shader_count >= MESART_RENDERER_MAX_SHADER_ASSETS ||
+        file->bytes < MESART_IR3_BLOB_HEADER_BYTES ||
+        file->bytes > MESART_IR3_BLOB_HEADER_BYTES +
+                          MESART_IR3_BLOB_MAX_CODE_BYTES ||
+        file->bytes > UINT32_MAX)
+        return -1;
+    /* These fixed slots were mapped before CB0 was attached.  Shader
+     * admission happens later, so allocating a fresh page here would require
+     * a live SMMU TLB update and can leave Gen7 instruction fetches stale. */
+    if (gpu_core_mesart_shader_slot(service->shader_count, &storage,
+                                    &slot_offset, &slot_gpu_va,
+                                    &slot_bytes) != 0 ||
+        !storage || !storage->cpu || !slot_gpu_va ||
+        file->bytes > slot_bytes ||
+        MESART_RENDERER_IR3_CODE_OFFSET > slot_bytes - file->bytes)
+        return -2;
+    if (mesart_renderer_make_bundle_file_path(path, bundle_root, file) != 0 ||
+        kfile_open(&stream, path, KFILE_READ) != 0)
+        return -3;
+    if (kfile_size(&stream) != file->bytes ||
+        kfile_read(&stream, (uint8_t *)storage->cpu + slot_offset,
+                   (uint32_t)file->bytes,
+                   &read) != 0 || read != file->bytes)
+    {
+        kfile_close(&stream);
+        return -4;
+    }
+    kfile_close(&stream);
+    if (mesart_ir3_blob_validate((uint8_t *)storage->cpu + slot_offset,
+                                 file->bytes,
+                                 MESART_FREEDRENO_CHIP_ID_ADRENO_X1_85,
+                                 &blob) != 0 ||
+        slot_gpu_va > UINT64_MAX - MESART_RENDERER_IR3_CODE_OFFSET ||
+        blob.header->binary_bytes > slot_bytes -
+                                        MESART_RENDERER_IR3_CODE_OFFSET ||
+        blob.header->constant_data_offset >
+            UINT64_MAX - (slot_gpu_va + MESART_RENDERER_IR3_CODE_OFFSET))
+        return -5;
+    /* Destination follows source in the same private allocation, so copy
+     * backwards.  The bytes have already been manifest-hashed and parsed;
+     * this merely changes their GPU placement, never their contents. */
+    for (uint32_t at = blob.header->binary_bytes; at != 0u; --at)
+        ((uint8_t *)storage->cpu)[slot_offset +
+            MESART_RENDERER_IR3_CODE_OFFSET + at - 1u] =
+            blob.binary[at - 1u];
+    for (uint32_t i = 0u; i < service->shader_count; ++i)
+        if (service->shaders[i].stage == blob.header->stage)
+            return -6; /* One kernel-selected shader per graphics stage. */
+    gpu_buffer_prepare_for_device(storage);
+    service->shaders[service->shader_count++] =
+        (mesart_renderer_shader_asset){
+            .buffer_handle = 0u,
+            .stage = blob.header->stage,
+            .code_dwords = blob.code_dwords,
+            .instruction_groups = blob.header->instruction_groups,
+            .const_vec4s = blob.header->const_vec4s,
+            .flags = blob.header->flags,
+            .sampler_count = blob.header->sampler_count,
+            .app_ubo_count = blob.header->app_ubo_count,
+            .input_count = blob.header->input_count,
+            .output_count = blob.header->output_count,
+            .output_dwords = blob.header->output_dwords,
+            .code_gpu_va = slot_gpu_va + MESART_RENDERER_IR3_CODE_OFFSET,
+            .constant_data_gpu_va = blob.header->constant_data_bytes ?
+                slot_gpu_va + MESART_RENDERER_IR3_CODE_OFFSET +
+                    blob.header->constant_data_offset : 0u,
+            .constant_data_bytes = blob.header->constant_data_bytes,
+            .constant_data_ubo_index = blob.header->constant_data_ubo_index,
+        };
+    return 0;
+}
+
+static mesart_pipeline_shader_info mesart_renderer_pipeline_shader_info(
+    const mesart_renderer_shader_asset *asset)
+{
+    return (mesart_pipeline_shader_info){asset->code_dwords,
+                                         asset->instruction_groups,
+                                         asset->const_vec4s,
+                                         asset->flags,
+                                         asset->output_dwords,
+                                         asset->sampler_count,
+                                         asset->app_ubo_count};
+}
+
+/* MPIP is CPU-only kernel metadata. It is admitted after MIR3, compared to
+ * those exact compiler outputs, and never receives a GPU allocation or an EL0
+ * mapping. */
+static int mesart_renderer_load_graphics_pipeline(
+    mesart_renderer_service *service, const char *bundle_root,
+    const mesart_manifest_file *file)
+{
+    char path[MESART_RENDERER_BUNDLE_PATH_BYTES];
+    KFile stream;
+    const mesart_renderer_shader_asset *vertex_asset;
+    const mesart_renderer_shader_asset *fragment_asset;
+    mesart_pipeline_shader_info vertex;
+    mesart_pipeline_shader_info fragment;
+    mesart_pipeline_header validated;
+    uint32_t read = 0u;
+
+    if (!service || !bundle_root || !file ||
+        file->role != MESART_ROLE_KERNEL_COMPOSITOR_PIPELINE ||
+        service->graphics_pipeline_reflection_loaded ||
+        file->bytes != MESART_PIPELINE_HEADER_BYTES ||
+        mesart_renderer_make_bundle_file_path(path, bundle_root, file) != 0 ||
+        kfile_open(&stream, path, KFILE_READ) != 0)
+        return -1;
+    vertex_asset = mesart_renderer_find_shader(service, MESART_IR3_SHADER_VERTEX);
+    fragment_asset = mesart_renderer_find_shader(service, MESART_IR3_SHADER_FRAGMENT);
+    if (!vertex_asset || !fragment_asset ||
+        kfile_size(&stream) != file->bytes ||
+        kfile_read(&stream, &service->graphics_pipeline_reflection,
+                   sizeof(service->graphics_pipeline_reflection), &read) != 0 ||
+        read != sizeof(service->graphics_pipeline_reflection))
+    {
+        kfile_close(&stream);
+        return -2;
+    }
+    kfile_close(&stream);
+    vertex = mesart_renderer_pipeline_shader_info(vertex_asset);
+    fragment = mesart_renderer_pipeline_shader_info(fragment_asset);
+    if (mesart_pipeline_validate(&service->graphics_pipeline_reflection,
+                                 file->bytes,
+                                 MESART_FREEDRENO_CHIP_ID_ADRENO_X1_85,
+                                 &vertex, &fragment,
+                                 &validated) != 0)
+    {
+        service->graphics_pipeline_reflection = (mesart_pipeline_header){0};
+        return -3;
+    }
+    service->graphics_pipeline_reflection = validated;
+    service->graphics_pipeline_reflection_loaded = 1u;
     return 0;
 }
 
@@ -422,6 +638,60 @@ int mesart_renderer_test_complete_queued(mesart_renderer_service *service)
     return 0;
 }
 
+int mesart_renderer_prepare_graphics_pipeline(
+    const mesart_renderer_service *service,
+    const mesart_renderer_graphics_request *request,
+    mesart_renderer_graphics_pipeline *out_pipeline)
+{
+    const mesart_renderer_shader_asset *vertex;
+    const mesart_renderer_shader_asset *fragment;
+
+    if (out_pipeline)
+        *out_pipeline = (mesart_renderer_graphics_pipeline){0};
+    if (!service || !request || !out_pipeline)
+        return -1;
+    /* A MIR3 pair is not enough to safely reconstruct draw state.  The
+     * matching authenticated MPIP record is the contract that supplies the
+     * compiler's register-footprint and VPC-linkage facts. */
+    if (!service->graphics_pipeline_reflection_loaded)
+        return -2;
+    vertex = mesart_renderer_find_shader(service, MESART_IR3_SHADER_VERTEX);
+    fragment = mesart_renderer_find_shader(service, MESART_IR3_SHADER_FRAGMENT);
+    if (!vertex || !fragment || !vertex->code_gpu_va || !fragment->code_gpu_va ||
+        !vertex->code_dwords || !fragment->code_dwords ||
+        !(vertex->flags & MESART_IR3_FLAG_WRITES_POSITION) ||
+        !(fragment->flags & MESART_IR3_FLAG_WRITES_COLOR0))
+        return -3;
+    /* The first 3D broker deliberately excludes discard/kill until it owns
+     * depth/stencil and coverage state.  It is a policy decision, not a
+     * limitation of the signed artifact parser. */
+    if (fragment->flags & MESART_IR3_FLAG_HAS_KILL)
+        return -4;
+    if (request->vertex_uniform_vec4s > vertex->const_vec4s ||
+        request->fragment_uniform_vec4s > fragment->const_vec4s ||
+        request->vertex_texture_count > vertex->sampler_count ||
+        request->fragment_texture_count > fragment->sampler_count)
+        return -5;
+    *out_pipeline = (mesart_renderer_graphics_pipeline){
+        .vertex_code_gpu_va = vertex->code_gpu_va,
+        .fragment_code_gpu_va = fragment->code_gpu_va,
+        .vertex_constant_data_gpu_va = vertex->constant_data_gpu_va,
+        .fragment_constant_data_gpu_va = fragment->constant_data_gpu_va,
+        .vertex_constant_data_bytes = vertex->constant_data_bytes,
+        .fragment_constant_data_bytes = fragment->constant_data_bytes,
+        .vertex_constant_data_ubo_index = vertex->constant_data_ubo_index,
+        .fragment_constant_data_ubo_index = fragment->constant_data_ubo_index,
+        .vertex_uniform_vec4s = request->vertex_uniform_vec4s,
+        .fragment_uniform_vec4s = request->fragment_uniform_vec4s,
+        .vertex_texture_count = request->vertex_texture_count,
+        .fragment_texture_count = request->fragment_texture_count,
+        .reflection = service->graphics_pipeline_reflection,
+        .pipeline_reflection_ready = service->graphics_pipeline_reflection_loaded,
+        .ready = 1u,
+    };
+    return 0;
+}
+
 int mesart_renderer_admit(dihos_process_table *processes,
                           const char *bundle_root,
                           mesart_renderer_service *out_service)
@@ -492,6 +762,7 @@ int mesart_renderer_admit(dihos_process_table *processes,
     service.stack_top_va = MESART_RENDERER_STACK_TOP - 16u;
     if (mesart_renderer_create_buffer(&service,
                                       MESART_RENDERER_BOOTSTRAP_BUFFER_BYTES,
+                                      1u,
                                       &service.bootstrap_buffer_handle,
                                       &service.buffers[0].user_va) != 0)
     {
@@ -500,12 +771,39 @@ int mesart_renderer_admit(dihos_process_table *processes,
     }
     if (mesart_renderer_create_buffer(&service,
                                       MESART_RENDERER_BUFFER_SLOT_BYTES,
+                                      1u,
                                       &service.resource_arena_handle,
                                       &service.buffers[1].user_va) != 0)
     {
         rc = -56;
         goto failed;
     }
+    for (uint32_t i = 0u; i < service.bundle.manifest.header->file_count;
+         ++i)
+        if (service.bundle.manifest.files[i].role ==
+            MESART_ROLE_KERNEL_COMPOSITOR_SHADER)
+        {
+            rc = mesart_renderer_load_ir3_shader(
+                &service, bundle_root, &service.bundle.manifest.files[i]);
+            if (rc != 0)
+            {
+                rc = -57 + rc;
+                goto failed;
+            }
+        }
+    for (uint32_t i = 0u; i < service.bundle.manifest.header->file_count;
+         ++i)
+        if (service.bundle.manifest.files[i].role ==
+            MESART_ROLE_KERNEL_COMPOSITOR_PIPELINE)
+        {
+            rc = mesart_renderer_load_graphics_pipeline(
+                &service, bundle_root, &service.bundle.manifest.files[i]);
+            if (rc != 0)
+            {
+                rc = -65 + rc;
+                goto failed;
+            }
+        }
     if (mesart_renderer_create_command_buffer(&service) != 0)
     {
         rc = -57;

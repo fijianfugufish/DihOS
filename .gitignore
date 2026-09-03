@@ -11,6 +11,7 @@ hardware-dossiers/
 !build_sacx_app.ps1
 !test_image_editor.ps1
 !test_dihscover.ps1
+!new_mesart_ir3_blob.ps1
 
 efi_main.S
 main.c

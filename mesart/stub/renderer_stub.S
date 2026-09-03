@@ -55,6 +55,18 @@ _start:
     bl mesart_fd_mesa_pm4_selftest
     ldp x13, x14, [sp], #16
     cbnz x0, .Lfail_pm4
+    /* Shader binaries use their own immutable BO class.  This only checks
+     * compiler-output storage; pipeline execution remains kernel-brokered. */
+    stp x13, x14, [sp, #-16]!
+    bl mesart_fd_shader_object_selftest
+    ldp x13, x14, [sp], #16
+    cbnz x0, .Lfail_shader_object
+    /* Compile and execute a narrow Mesa IR3 backend vocabulary checkpoint
+     * before the full NIR/compiler graph is admitted into Mesart. */
+    stp x13, x14, [sp, #-16]!
+    bl mesart_fd_ir3_vocabulary_selftest
+    ldp x13, x14, [sp], #16
+    cbnz x0, .Lfail_ir3
     mov x0, #2
     mov x1, x13
     mov x8, #1
@@ -124,6 +136,12 @@ _start:
     b .Lexit_checkpoint_failure
 .Lfail_pm4:
     movz x0, #0xf004
+    b .Lexit_checkpoint_failure
+.Lfail_shader_object:
+    movz x0, #0xf005
+    b .Lexit_checkpoint_failure
+.Lfail_ir3:
+    movz x0, #0xf006
 .Lexit_checkpoint_failure:
     mov x8, xzr
     svc #0

@@ -14,7 +14,9 @@ param(
   [string]$GmuFirmwarePath = "",
   [string]$SqeFirmwarePath = "",
   [string]$ZapFirmwarePath = "",
-  [string[]]$KernelShaderPath = @()
+  [string[]]$KernelShaderPath = @(),
+
+  [string[]]$KernelPipelinePath = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,9 +36,22 @@ function Get-Sha256 {
 
 function Convert-HexToBytes {
   param([string]$Hex, [string]$Name)
-  $text = ($Hex -replace '\s', '')
+  # The key generator writes bare ASCII hex, but editors sometimes prepend a
+  # UTF-8 BOM or leave zero-width whitespace.  Those bytes are formatting,
+  # not secret material; remove only whitespace/BOM markers before checking
+  # the exact 32-byte scalar below.  Do not echo the key or the normalized
+  # value from this signing path.
+  $text = ($Hex -replace '[\s\uFEFF\u200B]', '')
+  if ($text.StartsWith('0x', [StringComparison]::OrdinalIgnoreCase)) {
+    $text = $text.Substring(2)
+  }
   if ($text.Length % 2 -ne 0 -or $text -notmatch '^[0-9a-fA-F]+$') {
-    throw "$Name is not hexadecimal."
+    # A locally archived key may have a human-readable label around the
+    # scalar. Accept it only when it contains exactly one isolated P-256
+    # scalar; ambiguity is rejected rather than guessing which secret to use.
+    $candidates = [regex]::Matches($Hex, '(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])')
+    if ($candidates.Count -ne 1) { throw "$Name is not hexadecimal." }
+    $text = $candidates[0].Value
   }
   $bytes = [byte[]]::new($text.Length / 2)
   for ($i = 0; $i -lt $bytes.Length; ++$i) {
@@ -128,6 +143,7 @@ Add-ManifestEntry 2 $GmuFirmwarePath
 Add-ManifestEntry 3 $SqeFirmwarePath
 Add-ManifestEntry 4 $ZapFirmwarePath
 foreach ($shader in $KernelShaderPath) { Add-ManifestEntry 5 $shader }
+foreach ($pipeline in $KernelPipelinePath) { Add-ManifestEntry 6 $pipeline }
 if ($entries.Count -eq 0 -or $entries.Count -gt 32) { throw 'A bundle needs 1 through 32 files.' }
 if (@($entries | Where-Object { $_.Role -eq 1 }).Count -ne 1) { throw 'Exactly one renderer ELF is required.' }
 if (@($entries.Path | Select-Object -Unique).Count -ne $entries.Count) { throw 'Bundle paths must be unique.' }

@@ -16,6 +16,13 @@
 
 #define MESART_FD_BO_COMMAND  (1u << 0)
 #define MESART_FD_BO_RESOURCE (1u << 1)
+#define MESART_FD_BO_SHADER   (1u << 2)
+
+typedef enum mesart_fd_shader_stage
+{
+    MESART_FD_SHADER_VERTEX = 1u,
+    MESART_FD_SHADER_FRAGMENT = 2u,
+} mesart_fd_shader_stage;
 
 typedef struct mesart_fd_device
 {
@@ -40,6 +47,16 @@ typedef struct mesart_fd_submit
     mesart_runtime_command_buffer command;
 } mesart_fd_submit;
 
+/* Immutable GPU-visible payload produced by the future upstream IR3 compiler.
+ * Uploading code is deliberately separate from submitting CP: no shader is
+ * executable merely because it exists in the renderer arena. */
+typedef struct mesart_fd_shader
+{
+    mesart_fd_bo binary;
+    uint32_t dwords;
+    uint32_t stage;
+} mesart_fd_shader;
+
 /* Opens the kernel-admitted renderer heap and GPU arena. */
 int mesart_fd_device_init(mesart_fd_device *device);
 
@@ -58,6 +75,14 @@ int mesart_fd_submit_begin(mesart_fd_device *device,
 int mesart_fd_submit_flush(const mesart_fd_submit *submit, uint64_t dwords,
                            uint64_t *out_fence);
 
+/* Copies a compiler-produced IR3 binary into a 64-byte-aligned, immutable
+ * shader BO.  Pipeline state emission is intentionally a later brokered
+ * capability; this routine never emits a CP packet. */
+int mesart_fd_shader_upload(mesart_fd_device *device,
+                            mesart_fd_shader_stage stage,
+                            const uint32_t *binary, uint32_t dwords,
+                            mesart_fd_shader *out_shader);
+
 /* Smoke-test the actual winsys object path in the signed EL0 bundle. */
 int mesart_fd_winsys_selftest(void);
 
@@ -65,3 +90,4 @@ int mesart_fd_winsys_selftest(void);
  * and primary-submit object.  The kernel still validates and owns the final
  * command stream, fence, and hardware queue. */
 int mesart_fd_submit_resource_write_selftest(void);
+int mesart_fd_shader_object_selftest(void);

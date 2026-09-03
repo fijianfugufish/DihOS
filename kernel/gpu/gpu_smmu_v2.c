@@ -395,14 +395,18 @@ int gpu_smmuv2_invalidate_context(const gpu_mmio_window *window,
         cb_offset > window->size_bytes ||
         window->size_bytes - cb_offset < SMMU_CB_TLBSTATUS + 4u)
         return -1;
-    /* CB0 was attached with SMMU_ATTACH_ASID.  Use the context-local
-     * invalidation rather than disturbing the GMU's independently attached
-     * context bank. */
+    /* This Snapdragon X1E GPU-local SMMU accepts the architected global
+     * invalidate used during attach, but its otherwise documented CBn
+     * TLBIASID/TLBSYNC registers fault once GMU firmware owns the live power
+     * domain.  All current callers are admission-only and prove that no GPU
+     * job is running, so a global TLB invalidation is both safe here and
+     * necessary to make the new CB0 page-table entries visible.  Do not turn
+     * this into a general runtime mapping operation. */
     asm_mmio_barrier();
-    if (gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TLBIASID,
-                             SMMU_ATTACH_ASID) != 0 ||
-        gpu_mmio_try_write32(window, cb_offset + SMMU_CB_TLBSYNC, 0u) != 0 ||
-        poll_clear(window, cb_offset + SMMU_CB_TLBSTATUS,
+    (void)cb_offset;
+    if (gpu_mmio_try_write32(window, SMMU_GR0_TLBIALLNSNH, 0xffffffffu) != 0 ||
+        gpu_mmio_try_write32(window, SMMU_GR0_TLBSYNC, 0u) != 0 ||
+        poll_clear(window, SMMU_GR0_TLBSTATUS,
                    SMMU_TLBSTATUS_ACTIVE) != 0)
         return -2;
     return 0;

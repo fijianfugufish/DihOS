@@ -3,7 +3,23 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$ProjectRoot,
 
-  [string]$PrivateKeyPath = (Join-Path $env:USERPROFILE 'Documents\DihOS Keys\mesart-development-p256-private.hex')
+  [string]$PrivateKeyPath = (Join-Path $env:USERPROFILE 'Documents\DihOS Keys\mesart-development-p256-private.hex'),
+
+  # Offline Mesa-produced MIR3 artifacts copied under OS\MesaRuntime.  They
+  # are signed as kernel-compositor shader assets; the runtime build stays
+  # useful with none while the A7xx draw broker is still being implemented.
+  [string[]]$KernelShaderPath = @(),
+
+  # Host build outputs.  Each MIR3 file is copied into the signed runtime at
+  # shaders/<file-name>; sources are never loaded by DihOS directly.
+  [string[]]$KernelShaderSourcePath = @(),
+
+  # One Mesa-derived MPIP reflection file binds an admitted VS/FS pair.  It
+  # contains no PM4 or GPU addresses; the kernel translates it into state.
+  [string[]]$KernelPipelinePath = @(),
+
+  # Host MPIP outputs copied into pipelines/<file-name> before signing.
+  [string[]]$KernelPipelineSourcePath = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +42,7 @@ $winsysSource = Join-Path $root 'mesart\mesa_port\mesart_freedreno_winsys.c'
 $mesaShimSource = Join-Path $root 'mesart\mesa_port\mesart_mesa_shim.c'
 $mesaDeviceSource = Join-Path $root 'mesart\mesa_port\mesart_freedreno_mesa_device.c'
 $mesaPm4Source = Join-Path $root 'mesart\mesa_port\mesart_freedreno_pm4.c'
+$mesaIr3Source = Join-Path $root 'mesart\mesa_port\mesart_freedreno_ir3.c'
 $mesaRoot = Join-Path $root 'third_party\mesa'
 $mesaDevInfoSource = Join-Path $mesaRoot 'src\freedreno\common\freedreno_dev_info.c'
 $mesaRegisterGenerator = Join-Path $mesaRoot 'src\freedreno\registers\gen_header.py'
@@ -41,9 +58,59 @@ $mesaShimObject = Join-Path $objectDir 'mesart_mesa_shim.o'
 $mesaDevInfoObject = Join-Path $objectDir 'freedreno_dev_info.o'
 $mesaDeviceObject = Join-Path $objectDir 'mesart_freedreno_mesa_device.o'
 $mesaPm4Object = Join-Path $objectDir 'mesart_freedreno_pm4.o'
+$mesaIr3Object = Join-Path $objectDir 'mesart_freedreno_ir3.o'
 $renderer = Join-Path $bundleDir 'renderer.elf'
 $signer = Join-Path $root 'tools\pack_mesart_bundle.ps1'
 New-Item -ItemType Directory -Force -Path $objectDir, $bundleDir | Out-Null
+
+$shaderBundlePaths = [System.Collections.Generic.List[string]]::new()
+$pipelineBundlePaths = [System.Collections.Generic.List[string]]::new()
+foreach ($path in $KernelShaderPath) {
+  if ($path) { [void]$shaderBundlePaths.Add($path) }
+}
+foreach ($path in $KernelPipelinePath) {
+  if ($path) { [void]$pipelineBundlePaths.Add($path) }
+}
+if ($KernelShaderSourcePath.Count -gt 0) {
+  $shaderDir = Join-Path $bundleDir 'shaders'
+  New-Item -ItemType Directory -Force -Path $shaderDir | Out-Null
+  foreach ($source in $KernelShaderSourcePath) {
+    if (!$source -or !(Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "Kernel shader source is missing: $source"
+    }
+    $resolvedSource = (Resolve-Path -LiteralPath $source).Path
+    if ([IO.Path]::GetExtension($resolvedSource) -ine '.mir3') {
+      throw "Kernel shader source must be an MIR3 artifact: $resolvedSource"
+    }
+    $leaf = Split-Path -Leaf $resolvedSource
+    $relative = "shaders/$leaf"
+    if ($shaderBundlePaths -contains $relative) {
+      throw "Duplicate kernel shader bundle path: $relative"
+    }
+    Copy-Item -LiteralPath $resolvedSource -Destination (Join-Path $shaderDir $leaf) -Force
+    [void]$shaderBundlePaths.Add($relative)
+  }
+}
+if ($KernelPipelineSourcePath.Count -gt 0) {
+  $pipelineDir = Join-Path $bundleDir 'pipelines'
+  New-Item -ItemType Directory -Force -Path $pipelineDir | Out-Null
+  foreach ($source in $KernelPipelineSourcePath) {
+    if (!$source -or !(Test-Path -LiteralPath $source -PathType Leaf)) {
+      throw "Kernel pipeline source is missing: $source"
+    }
+    $resolvedSource = (Resolve-Path -LiteralPath $source).Path
+    if ([IO.Path]::GetExtension($resolvedSource) -ine '.mpip') {
+      throw "Kernel pipeline source must be an MPIP artifact: $resolvedSource"
+    }
+    $leaf = Split-Path -Leaf $resolvedSource
+    $relative = "pipelines/$leaf"
+    if ($pipelineBundlePaths -contains $relative) {
+      throw "Duplicate kernel pipeline bundle path: $relative"
+    }
+    Copy-Item -LiteralPath $resolvedSource -Destination (Join-Path $pipelineDir $leaf) -Force
+    [void]$pipelineBundlePaths.Add($relative)
+  }
+}
 
 if (!(Test-Path -LiteralPath $mesaDevInfoSource) -or
     !(Test-Path -LiteralPath $mesaRegisterGenerator) -or
@@ -109,10 +176,16 @@ if ($LASTEXITCODE) { throw 'Could not compile Mesa Freedreno device information.
 if ($LASTEXITCODE) { throw 'Could not compile the Mesart Mesa device adapter.' }
 & $clang $mesaCFlags -c $mesaPm4Source -o $mesaPm4Object
 if ($LASTEXITCODE) { throw 'Could not compile the Mesart Mesa PM4 adapter.' }
+& $clang $mesaCFlags -c $mesaIr3Source -o $mesaIr3Object
+if ($LASTEXITCODE) { throw 'Could not compile the Mesart Mesa IR3 vocabulary adapter.' }
 & $ld -pie -nostdlib -e _start -T $linker -o $renderer `
-  $object $runtimeObject $winsysObject $mesaShimObject $mesaDevInfoObject $mesaDeviceObject $mesaPm4Object
+  $object $runtimeObject $winsysObject $mesaShimObject $mesaDevInfoObject $mesaDeviceObject $mesaPm4Object $mesaIr3Object
 if ($LASTEXITCODE) { throw 'Could not link the Mesart EL0 stub.' }
 
-& $signer -BundleRoot $bundleDir -PrivateKeyPath $PrivateKeyPath -RendererPath 'renderer.elf' -RuntimeAbi 1
+$shaderBundleArray = $shaderBundlePaths.ToArray()
+$pipelineBundleArray = $pipelineBundlePaths.ToArray()
+& $signer -BundleRoot $bundleDir -PrivateKeyPath $PrivateKeyPath -RendererPath 'renderer.elf' -RuntimeAbi 1 -KernelShaderPath $shaderBundleArray -KernelPipelinePath $pipelineBundleArray
 if ($LASTEXITCODE) { throw 'Could not sign the Mesart runtime bundle.' }
+Write-Host "Kernel MIR3 artifacts signed: $($shaderBundleArray.Count) [$($shaderBundleArray -join ', ')]" -ForegroundColor Cyan
+Write-Host "Kernel MPIP artifacts signed: $($pipelineBundleArray.Count) [$($pipelineBundleArray -join ', ')]" -ForegroundColor Cyan
 Write-Host "Mesart stub bundle ready: $bundleDir" -ForegroundColor Green

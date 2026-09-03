@@ -1,5 +1,6 @@
 #include "gpu/gpu_core.h"
 #include "gpu/adreno_x1_85.h"
+#include "gpu/adreno_x1_85_3d.h"
 #include "gpu/gpu_firmware.h"
 #include "gpu/gpu_gmu_boot.h"
 #include "gpu/gpu_gmu_image.h"
@@ -10,9 +11,12 @@
 #include "gpu/gpu_qcom_scm.h"
 #include "gpu/gpu_smmu_v2.h"
 #include "gpu/gpu_ring.h"
+#include "gpu/gpu_render.h"
+#include "gpu/gpu_render_backend.h"
 #include "gpu/rpmh_cmd_db.h"
 #include "asm/asm.h"
 #include "hardware_probes/acpi_probe_net_candidates.h"
+#include "mesart_shader_blob.h"
 #include "terminal/terminal_api.h"
 
 static gpu_device_info g_primary;
@@ -26,6 +30,7 @@ static gpu_command_ring g_runtime_ring;
 static gpu_buffer g_cp_shadow;
 static gpu_buffer g_cp_pwrup;
 static gpu_buffer g_cp_completion;
+static gpu_buffer g_mesart_shader_pool;
 static gpu_scanout_target g_scanout_target;
 static gpu_mmio_window g_gpu_regs_window;
 static gpu_mmio_window g_gpu_pdc_window;
@@ -44,6 +49,12 @@ static gpu_gmu_hfi_gen7_perf_table g_hfi_perf_table;
 static gpu_gmu_hfi_gen7_bw_table g_hfi_bw_table;
 static uint32_t g_gmu_reset_signature;
 static uint8_t g_runtime_backend_ready;
+/* A Gen7 GPU_SET lease is established only after the boot submission has
+ * proved that CP, the SMMU, and GX are healthy.  Keeping that one lease while
+ * the experimental runtime is usable avoids a firmware power transition
+ * between CP setup and the first trusted draw. */
+static uint8_t g_runtime_gx_lease_held;
+static uint64_t g_runtime_3d_sequence;
 
 #define GPU_SMMUV2_FSR_FAULT_MASK 0xC00001FEu
 
@@ -58,6 +69,21 @@ static uint8_t g_runtime_backend_ready;
 #define GPU_CORE_SCANOUT_IOVA      0x0000000030000000ull
 #define GPU_CORE_MESART_GPU_VA_BASE 0x0000000040000000ull
 #define GPU_CORE_MESART_GPU_VA_END  0x0000000060000000ull
+#define GPU_CORE_MESART_SHADER_POOL_IOVA 0x0000000042000000ull
+/* One slot holds a complete authenticated MIR3 source at offset zero and a
+ * separately aligned executable copy at offset 128.  The extra page makes
+ * the maximum accepted four-megabyte binary fit in both placements. */
+#define GPU_CORE_MESART_SHADER_SLOT_BYTES \
+    (MESART_IR3_BLOB_MAX_CODE_BYTES + GPU_IOMMU_PAGE_SIZE)
+#define GPU_CORE_MESART_SHADER_SLOT_COUNT 2u
+#define GPU_CORE_MESART_SHADER_POOL_BYTES \
+    ((uint64_t)GPU_CORE_MESART_SHADER_SLOT_COUNT * \
+     GPU_CORE_MESART_SHADER_SLOT_BYTES)
+#define GPU_CORE_RENDER_SURFACE_VA_BASE 0x0000000060000000ull
+#define GPU_CORE_RENDER_SURFACE_SLOT_BYTES GPU_RENDER_MAX_SURFACE_BYTES
+#define GPU_CORE_RENDER_SURFACE_VA_END \
+    (GPU_CORE_RENDER_SURFACE_VA_BASE + \
+     (uint64_t)GPU_RENDER_MAX_SURFACES * GPU_CORE_RENDER_SURFACE_SLOT_BYTES)
 
 /* Gen7's hardware shadow layout is rptr, fence, then BV rptr.  The fence
  * slot is CPU bookkeeping, not a second hardware rptr destination. */
@@ -423,6 +449,7 @@ static int map_staged_firmware(void)
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
     gpu_buffer_release(&g_cp_completion);
+    gpu_buffer_release(&g_mesart_shader_pool);
     if (gpu_iommu_domain_init(&g_iommu_domain, GPU_IOMMU_MAX_VA_BITS) != 0)
         return -1;
     for (uint32_t i = 0u; i < g_firmware.blob_count; ++i)
@@ -452,19 +479,31 @@ static int map_staged_firmware(void)
         gpu_buffer_alloc(&g_cp_completion, 0x1000u,
                          GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
         gpu_iommu_map_buffer(&g_iommu_domain, &g_cp_completion,
-                             GPU_CORE_CP_COMPLETION_IOVA) != 0)
+                             GPU_CORE_CP_COMPLETION_IOVA) != 0 ||
+        gpu_buffer_alloc(&g_mesart_shader_pool,
+                         GPU_CORE_MESART_SHADER_POOL_BYTES,
+                         GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0 ||
+        /* SQ instruction fetch uses an unprivileged DMA attribute on this
+         * Gen7 path.  This is an IOMMU transaction permission only: unlike
+         * Mesart resources, the pool is never inserted into the EL0 VM. */
+        gpu_iommu_map_buffer_with_attributes(&g_iommu_domain,
+                                             &g_mesart_shader_pool,
+                                             GPU_CORE_MESART_SHADER_POOL_IOVA,
+                                             0u) != 0)
     {
         gpu_ring_release(&g_submission_ring);
         gpu_ring_release(&g_runtime_ring);
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
+        gpu_buffer_release(&g_mesart_shader_pool);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -3;
     }
     gpu_buffer_prepare_for_device(&g_cp_shadow);
     gpu_buffer_prepare_for_device(&g_cp_pwrup);
     gpu_buffer_prepare_for_device(&g_cp_completion);
+    gpu_buffer_prepare_for_device(&g_mesart_shader_pool);
     if (g_scanout_target.buffer.cpu &&
         gpu_iommu_map_buffer(&g_iommu_domain, &g_scanout_target.buffer,
                              GPU_CORE_SCANOUT_IOVA) != 0)
@@ -474,6 +513,7 @@ static int map_staged_firmware(void)
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
+        gpu_buffer_release(&g_mesart_shader_pool);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -4;
     }
@@ -484,6 +524,7 @@ static int map_staged_firmware(void)
         gpu_buffer_release(&g_cp_shadow);
         gpu_buffer_release(&g_cp_pwrup);
         gpu_buffer_release(&g_cp_completion);
+        gpu_buffer_release(&g_mesart_shader_pool);
         gpu_iommu_domain_release(&g_iommu_domain);
         return -5;
     }
@@ -498,6 +539,7 @@ int gpu_core_init(const boot_info *boot)
 
     g_primary = (gpu_device_info){0};
     gpu_scheduler_init(&g_scheduler);
+    gpu_render_init();
     g_iommu_topology = (gpu_iommu_topology){0};
     g_iommu_attach_plan = (gpu_iommu_attach_plan){0};
     g_gpu_smmu_caps = (gpu_smmuv2_caps){0};
@@ -508,6 +550,8 @@ int gpu_core_init(const boot_info *boot)
     g_gmu_image = (gpu_gmu_image){0};
     g_gmu_reset_signature = 0u;
     g_runtime_backend_ready = 0u;
+    g_runtime_gx_lease_held = 0u;
+    g_runtime_3d_sequence = 0u;
     gpu_gmu_memory_release(&g_gmu_memory);
     rpmh_cmd_db_mapping_release(&g_rpmh_cmd_db);
     gpu_buffer_release(&g_scanout_target.buffer);
@@ -518,6 +562,7 @@ int gpu_core_init(const boot_info *boot)
     gpu_buffer_release(&g_cp_shadow);
     gpu_buffer_release(&g_cp_pwrup);
     gpu_buffer_release(&g_cp_completion);
+    gpu_buffer_release(&g_mesart_shader_pool);
     gpu_firmware_release(&g_firmware);
     gpu_mmio_unmap_window(&g_gpu_regs_window);
     gpu_mmio_unmap_window(&g_gpu_pdc_window);
@@ -1125,10 +1170,13 @@ int gpu_core_init(const boot_info *boot)
                                                                 !cp.protect_status)
                                                             {
                                                                 /* The automatic boot probe has consumed a complete
-                                                                 * CP init ring without an SMMU or CP fault.  Only
-                                                                 * now may Mesart's later scheduler path reacquire
-                                                                 * GX and use its separate, kernel-owned runtime ring. */
+                                                                 * CP init ring without an SMMU or CP fault.  Transfer
+                                                                 * its still-held GX lease to the runtime.  X1E firmware
+                                                                 * can fault when this exact lease is immediately
+                                                                 * released and reacquired, even though the live CP is
+                                                                 * healthy. */
                                                                 g_runtime_backend_ready = 1u;
+                                                                g_runtime_gx_lease_held = 1u;
                                                                 terminal_print("[K:GPU] CP startup ring consumed rptr=");
                                                                 terminal_print_inline_hex64(cp.rb_rptr);
                                                                 terminal_print(" wptr=");
@@ -1240,7 +1288,8 @@ int gpu_core_init(const boot_info *boot)
                                                 }
                                                     else
                                                         terminal_warn("[K:GPU] GX RBBM read failed while lease held");
-                                                    if (gpu_gmu_gen7_release_gpu(
+                                                    if (!g_runtime_gx_lease_held &&
+                                                        gpu_gmu_gen7_release_gpu(
                                                             &g_gpu_gmu_window) != 0)
                                                         terminal_warn("[K:GPU] GX power lease release failed");
                                                 }
@@ -1336,16 +1385,413 @@ int gpu_core_map_mesart_buffer(gpu_buffer *buffer, uint64_t gpu_va)
     if (gpu_iommu_map_buffer(&g_iommu_domain, buffer, gpu_va) != 0)
         return -3;
     gpu_iommu_domain_prepare_for_device(&g_iommu_domain);
+    /* Each Mesart slot has a fixed, previously unused IOVA and this helper
+     * rejects all live GPU work.  Thus no translation for this range can be
+     * resident in CB0 when we publish its freshly cleaned page-table leaves.
+     * The GPU-local X1E SMMU's global TLBI register can itself external-abort
+     * after GMU ownership changes, so do not issue an unnecessary invalidate
+     * here.  Replacing/reusing a mapped IOVA remains forbidden; such a path
+     * must grow an explicit, hardware-confirmed TLB protocol first. */
+    return 0;
+}
+
+int gpu_core_mesart_shader_slot(uint32_t slot, gpu_buffer **out_storage,
+                                uint64_t *out_offset,
+                                uint64_t *out_gpu_va,
+                                uint64_t *out_bytes)
+{
+    uint64_t offset;
+
+    if (!out_storage || !out_offset || !out_gpu_va || !out_bytes ||
+        slot >= GPU_CORE_MESART_SHADER_SLOT_COUNT ||
+        !g_mesart_shader_pool.cpu || !g_mesart_shader_pool.phys ||
+        g_mesart_shader_pool.iova != GPU_CORE_MESART_SHADER_POOL_IOVA ||
+        g_mesart_shader_pool.size_bytes != GPU_CORE_MESART_SHADER_POOL_BYTES ||
+        g_scheduler.job_count ||
+        g_gpu_smmu_bound_stream_count != ADRENO_X1_85_DRIVER_SID_COUNT ||
+        !(g_primary.caps.flags & GPU_CAP_DMA_ISOLATED))
+        return -1;
+    offset = (uint64_t)slot * GPU_CORE_MESART_SHADER_SLOT_BYTES;
+    if (offset > g_mesart_shader_pool.size_bytes ||
+        GPU_CORE_MESART_SHADER_SLOT_BYTES >
+            g_mesart_shader_pool.size_bytes - offset)
+        return -2;
+    *out_storage = &g_mesart_shader_pool;
+    *out_offset = offset;
+    *out_gpu_va = GPU_CORE_MESART_SHADER_POOL_IOVA + offset;
+    *out_bytes = GPU_CORE_MESART_SHADER_SLOT_BYTES;
+    return 0;
+}
+
+int gpu_core_render_target_iova(const gpu_render_target *target,
+                                uint64_t *out_gpu_va)
+{
+    gpu_buffer *surface_buffer = 0;
+    uint64_t gpu_va;
+    int surface_rc;
+
+    if (!target || !out_gpu_va || !target->cpu_pixels || !target->cpu_bytes ||
+        !target->width || !target->height)
+        return -1;
+    *out_gpu_va = 0u;
+
+    /* The boot framebuffer was mapped during discovery. It is the only
+     * external CPU allocation admitted as an early render target. */
+    if (!target->surface.generation)
+    {
+        if (target->cpu_pixels != g_scanout_target.buffer.cpu ||
+            target->cpu_bytes > g_scanout_target.buffer.size_bytes ||
+            target->width != g_scanout_target.width ||
+            target->height != g_scanout_target.height ||
+            target->stride_bytes != g_scanout_target.pitch ||
+            !g_scanout_target.buffer.iova)
+            return -2;
+        *out_gpu_va = g_scanout_target.buffer.iova;
+        return 0;
+    }
+
+    surface_rc = gpu_render_backend_surface_backing(target, &surface_buffer);
+    if (surface_rc != 0 || !surface_buffer || !surface_buffer->cpu ||
+        !surface_buffer->phys || !surface_buffer->size_bytes ||
+        surface_buffer->size_bytes > GPU_CORE_RENDER_SURFACE_SLOT_BYTES)
+        return -3;
+    gpu_va = GPU_CORE_RENDER_SURFACE_VA_BASE +
+             (uint64_t)target->surface.slot * GPU_CORE_RENDER_SURFACE_SLOT_BYTES;
+    if (gpu_va < GPU_CORE_RENDER_SURFACE_VA_BASE ||
+        gpu_va >= GPU_CORE_RENDER_SURFACE_VA_END)
+        return -4;
+    if (surface_buffer->iova)
+    {
+        if (surface_buffer->iova != gpu_va)
+            return -5;
+        *out_gpu_va = gpu_va;
+        return 0;
+    }
+    if (g_scheduler.job_count ||
+        g_gpu_smmu_bound_stream_count != ADRENO_X1_85_DRIVER_SID_COUNT ||
+        !(g_primary.caps.flags & GPU_CAP_DMA_ISOLATED) ||
+        !g_iommu_domain.root_phys ||
+        gpu_iommu_map_buffer(&g_iommu_domain, surface_buffer,
+                             gpu_va) != 0)
+        return -6;
+    gpu_iommu_domain_prepare_for_device(&g_iommu_domain);
     if (gpu_smmuv2_invalidate_context(&g_gpu_smmu_window, &g_gpu_smmu_caps,
                                       g_gpu_smmu_context_bank) != 0)
     {
-        /* No job can run while this admission-only function is active.  Mark
-         * the buffer unusable instead of letting a failed TLB sync become a
-         * future GPU address capability; reboot reconstructs the domain. */
-        buffer->iova = 0u;
-        return -4;
+        /* No job is allowed during the admission-only map. Leave the buffer
+         * unusable rather than handing a possibly stale mapping to a later
+         * draw; reboot reconstructs this intentionally simple first domain. */
+        surface_buffer->iova = 0u;
+        return -7;
     }
+    *out_gpu_va = gpu_va;
     return 0;
+}
+
+int gpu_core_mesart_3d_preflight(
+    const mesart_renderer_graphics_pipeline *pipeline, uint32_t *out_dwords)
+{
+    gpu_render_target target;
+    adreno_x1_85_3d_draw draw;
+    int rc;
+
+    if (out_dwords)
+        *out_dwords = 0u;
+    if (!pipeline || !out_dwords || !g_runtime_ring.buffer.cpu ||
+        !g_scanout_target.buffer.cpu || !g_scanout_target.buffer.iova ||
+        !g_scanout_target.width || !g_scanout_target.height ||
+        !g_scanout_target.pitch ||
+        g_scanout_target.pixel_format != GPU_CORE_GOP_BGRX_8888)
+        return -1;
+    target = (gpu_render_target){
+        .surface = GPU_RENDER_EXTERNAL_SURFACE,
+        .cpu_pixels = g_scanout_target.buffer.cpu,
+        .cpu_bytes = g_scanout_target.buffer.size_bytes,
+        .width = g_scanout_target.width,
+        .height = g_scanout_target.height,
+        .stride_bytes = g_scanout_target.pitch,
+        .format = GPU_RENDER_FORMAT_BGRX8888,
+    };
+    draw = (adreno_x1_85_3d_draw){
+        .pipeline = pipeline,
+        .target = &target,
+        .target_gpu_va = g_scanout_target.buffer.iova,
+    };
+    /* This uses the private runtime-ring allocation as a bounded scratch
+     * encoder buffer only. It never seals, binds, writes a CP pointer or
+     * acquires GX, so preflight has no hardware side effect. */
+    if (gpu_ring_reset(&g_runtime_ring) != 0)
+        return -2;
+    rc = adreno_x1_85_3d_emit_sysmem_prologue(&g_runtime_ring);
+    if (rc != 0)
+    {
+        (void)gpu_ring_reset(&g_runtime_ring);
+        return -100 + rc;
+    }
+    rc = adreno_x1_85_3d_emit_x1e_baseline(&g_runtime_ring);
+    if (rc != 0)
+    {
+        (void)gpu_ring_reset(&g_runtime_ring);
+        return -110 + rc;
+    }
+    rc = adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draw);
+    if (rc != 0)
+    {
+        (void)gpu_ring_reset(&g_runtime_ring);
+        return -120 + rc;
+    }
+    rc = adreno_x1_85_emit_auto_triangle_draw(&g_runtime_ring);
+    if (rc != 0)
+    {
+        (void)gpu_ring_reset(&g_runtime_ring);
+        return -130 + rc;
+    }
+    *out_dwords = g_runtime_ring.write_dwords;
+    (void)gpu_ring_reset(&g_runtime_ring);
+    return 0;
+}
+
+int gpu_core_mesart_3d_submit(
+    const mesart_renderer_graphics_pipeline *pipeline, uint64_t *out_fence)
+{
+    gpu_render_target target;
+    adreno_x1_85_3d_draw draw;
+    const gpu_firmware_blob *sqe;
+    gpu_cp_bind_config cp_config;
+    gpu_cp_snapshot cp = {0};
+    uint32_t gx_ack = 0u;
+    uint32_t completion_magic;
+    uint32_t completion_markers[9];
+    uint8_t submitted = 0u;
+    int rc;
+
+    if (out_fence)
+        *out_fence = 0u;
+    if (!pipeline || !out_fence || !g_runtime_backend_ready ||
+        g_scheduler.job_count || !g_runtime_ring.buffer.iova ||
+        !g_cp_pwrup.iova || !g_cp_shadow.iova || !g_cp_completion.cpu ||
+        !g_cp_completion.iova || !g_scanout_target.buffer.cpu ||
+        !g_scanout_target.buffer.iova || !g_scanout_target.width ||
+        !g_scanout_target.height || !g_scanout_target.pitch ||
+        g_scanout_target.pixel_format != GPU_CORE_GOP_BGRX_8888)
+        return -1;
+    target = (gpu_render_target){
+        .surface = GPU_RENDER_EXTERNAL_SURFACE,
+        .cpu_pixels = g_scanout_target.buffer.cpu,
+        .cpu_bytes = g_scanout_target.buffer.size_bytes,
+        .width = g_scanout_target.width,
+        .height = g_scanout_target.height,
+        .stride_bytes = g_scanout_target.pitch,
+        .format = GPU_RENDER_FORMAT_BGRX8888,
+    };
+    draw = (adreno_x1_85_3d_draw){
+        .pipeline = pipeline,
+        .target = &target,
+        .target_gpu_va = g_scanout_target.buffer.iova,
+    };
+    if (adreno_x1_85_3d_validate_draw(&draw) != 0)
+        return -2;
+    sqe = gpu_firmware_find(&g_firmware, GPU_FIRMWARE_SQE);
+    if (!sqe || !gpu_firmware_payload_iova(sqe))
+        return -3;
+    if (gpu_ring_reset(&g_runtime_ring) != 0)
+        return -4;
+    ++g_runtime_3d_sequence;
+    if (!g_runtime_3d_sequence)
+        ++g_runtime_3d_sequence;
+    completion_magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC ^
+                       (uint32_t)g_runtime_3d_sequence;
+    if (!completion_magic)
+        completion_magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC;
+    for (uint32_t i = 0u; i < sizeof(completion_markers) /
+                              sizeof(completion_markers[0]); ++i)
+    {
+        ((uint32_t *)g_cp_completion.cpu)[i] = 0u;
+        /* Each value is per-submit and distinct, so a stale cache line or a
+         * partially consumed 3D ring cannot masquerade as a completion. */
+        completion_markers[i] = completion_magic ^ (0x00010101u * (i + 1u));
+    }
+    completion_markers[8] = completion_magic;
+    gpu_buffer_prepare_for_device(&g_cp_completion);
+    /* The CPU shell/desktop may have just used this framebuffer. Clean it
+     * before RB renders, then invalidate it only after the RB completion
+     * fence below. */
+    asm_dma_clean_range(g_scanout_target.buffer.cpu,
+                        g_scanout_target.buffer.size_bytes);
+    if (!g_runtime_gx_lease_held)
+    {
+        rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
+        if (rc != 0)
+            return -5;
+        g_runtime_gx_lease_held = 1u;
+    }
+    if (gpu_cp_snapshot_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                             &cp) != 0 || cp.hw_fault || cp.protect_status)
+    {
+        rc = -6;
+        goto out;
+    }
+    if (adreno_x1_85_emit_minimal_cp_init(&g_runtime_ring,
+                                          g_cp_pwrup.iova) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova,
+                                           completion_markers[0]) != 0 ||
+        adreno_x1_85_3d_emit_sysmem_prologue(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 4u,
+                                           completion_markers[1]) != 0 ||
+        adreno_x1_85_3d_emit_x1e_baseline(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 8u,
+                                           completion_markers[2]) != 0 ||
+        adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draw) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 12u,
+                                           completion_markers[3]) != 0 ||
+        /* Deliberately bracket the first draw with two RB completion events.
+         * The pre-draw event determines whether direct-sysmem RB completion
+         * works at all; the post-draw event then isolates an actual draw/state
+         * stall without relying on CP's independent ring read pointer. */
+        adreno_x1_85_emit_rb_done_fence(&g_runtime_ring,
+                                         g_cp_completion.iova + 16u,
+                                         completion_markers[4]) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 20u,
+                                           completion_markers[5]) != 0 ||
+        adreno_x1_85_emit_auto_triangle_draw(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 24u,
+                                           completion_markers[6]) != 0 ||
+        adreno_x1_85_emit_rb_done_fence(&g_runtime_ring,
+                                         g_cp_completion.iova + 28u,
+                                         completion_markers[7]) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+                                           g_cp_completion.iova + 32u,
+                                           completion_markers[8]) != 0 ||
+        gpu_ring_seal(&g_runtime_ring) != 0)
+    {
+        rc = -7;
+        goto out;
+    }
+    cp_config = (gpu_cp_bind_config){
+        gpu_firmware_payload_iova(sqe),
+        g_runtime_ring.buffer.iova,
+        g_cp_shadow.iova + GPU_CORE_CP_BR_RPTR_OFFSET,
+        g_cp_shadow.iova + GPU_CORE_CP_BV_RPTR_OFFSET,
+        (uint32_t)g_runtime_ring.buffer.size_bytes,
+        ADRENO_X1_85_CP_RB_CNTL_BOOT,
+        0u,
+        ADRENO_X1_85_CP_BR_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+    };
+    if (gpu_cp_bind(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                    &cp_config) != 0)
+    {
+        rc = -8;
+        goto out;
+    }
+    rc = gpu_cp_submit_fenced(&g_gpu_regs_window, &g_gpu_gmu_window,
+                              ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
+                              adreno_x1_85_cp_layout(), &g_runtime_ring);
+    if (rc != 0)
+    {
+        rc = -9;
+        goto out;
+    }
+    submitted = 1u;
+    if (gpu_cp_wait_ring(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                         g_runtime_ring.write_dwords, 100000u, &cp) != 0 ||
+        cp.hw_fault || cp.protect_status)
+    {
+        rc = -10;
+        goto out;
+    }
+    /* RB_DONE_TS is asynchronous to CP's ring read pointer.  Keep GX held
+     * while observing its private timestamp, rather than putting a
+     * CP_WAIT_REG_MEM in this early direct-sysmem stream (which deadlocks on
+     * this X1-85 configuration). */
+    for (uint32_t poll = 0u; poll < 100000u; ++poll)
+    {
+        asm_dma_invalidate_range(g_cp_completion.cpu,
+                                 sizeof(completion_markers));
+        if (((uint32_t *)g_cp_completion.cpu)[7] == completion_markers[7])
+            break;
+        asm_relax();
+    }
+    asm_dma_invalidate_range(g_cp_completion.cpu, sizeof(completion_markers));
+    for (uint32_t i = 0u; i < sizeof(completion_markers) /
+                              sizeof(completion_markers[0]); ++i)
+    {
+        if (((uint32_t *)g_cp_completion.cpu)[i] != completion_markers[i])
+        {
+            /* -101..-109 identify CP init, sysmem restore, X1E baseline,
+             * draw state, pre-draw RB, CP after it, draw packet, post-draw
+             * RB, and final CP work. */
+            rc = -101 - (int)i;
+            goto out;
+        }
+    }
+    asm_dma_invalidate_range(g_scanout_target.buffer.cpu,
+                             g_scanout_target.buffer.size_bytes);
+    *out_fence = g_runtime_3d_sequence;
+    rc = 0;
+
+out:
+    if (rc != 0 && submitted)
+    {
+        gpu_cp_snapshot failure_cp = {0};
+        gpu_smmuv2_context_fault render_fault = {0};
+        gpu_smmuv2_global_fault global_fault = {0};
+
+        /* CP's read pointer already proves the packet parser reached the end
+         * of this batch.  Capture the independent fault domains before GX is
+         * released, so a missing post-draw RB_DONE can be distinguished from
+         * an instruction-fetch/address fault on the next hardware iteration. */
+        terminal_error("[K:GPU] Mesart 3D stall rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        if (gpu_cp_snapshot_read(&g_gpu_regs_window,
+                                 adreno_x1_85_cp_layout(), &failure_cp) == 0)
+        {
+            terminal_print(" CP-fault=");
+            terminal_print_inline_hex64(failure_cp.hw_fault);
+            terminal_print(" protect=");
+            terminal_print_inline_hex64(failure_cp.protect_status);
+            terminal_print(" rptr=");
+            terminal_print_inline_hex64(failure_cp.rb_rptr);
+            terminal_print(" wptr=");
+            terminal_print_inline_hex64(failure_cp.rb_wptr);
+        }
+        if (gpu_smmuv2_read_context_fault(&g_gpu_smmu_window,
+                                          &g_gpu_smmu_caps,
+                                          g_gpu_smmu_context_bank,
+                                          &render_fault) == 0)
+        {
+            terminal_print(" CB0-FSR=");
+            terminal_print_inline_hex64(render_fault.fsr);
+            terminal_print(" FAR=");
+            terminal_print_inline_hex64(render_fault.fault_address);
+            terminal_print(" FSYNR0=");
+            terminal_print_inline_hex64(render_fault.fsynr0);
+        }
+        if (gpu_smmuv2_read_global_fault(&g_gpu_smmu_window,
+                                         &global_fault) == 0)
+        {
+            terminal_print(" SMMU-GFSR=");
+            terminal_print_inline_hex64(global_fault.gfsr);
+        }
+        terminal_print("");
+    }
+    if (rc != 0 && (submitted || g_runtime_gx_lease_held))
+    {
+        /* Fail closed after a real CP/runtime error.  A successful trusted
+         * runtime keeps the known-good GX lease, but an error must not leave
+         * an uncertain front-end powered for a later caller. */
+        (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
+        g_runtime_gx_lease_held = 0u;
+        g_runtime_backend_ready = 0u;
+    }
+    return rc;
 }
 
 /* Keep the first runtime hardware path independently fail-closed.  Mesart
@@ -1433,7 +1879,6 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
     uint32_t gx_ack = 0u;
     uint32_t completion_magic;
     uint32_t completion = 0u;
-    uint8_t gx_held = 0u;
     uint8_t submitted = 0u;
     int rc;
 
@@ -1461,19 +1906,17 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
     *(uint32_t *)g_cp_completion.cpu = 0u;
     gpu_buffer_prepare_for_device(&g_cp_completion);
 
-    /* The boot-time probe reached a complete, fault-free CP submission before
-     * g_runtime_backend_ready was set.  Its pwrup record is kernel-owned and
-     * remains mapped for this boot, so each runtime lease rebuilds CP from
-     * that known-good record instead of repeating the much broader host-MMIO
-     * programming sequence.  Some X1E firmware revisions fault sporadically
-     * on those readback-sensitive host registers after a GX power transition;
-     * avoiding the redundant CPU accesses is both safer and more reliable.
-     * CP_ME_INIT below still reapplies the pwrup state before the sealed
-     * Mesart batch is appended. */
-    rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
-    if (rc != 0)
-        return -6;
-    gx_held = 1u;
+    /* The boot-time probe supplies a known-good CP state and GX lease.  Keep
+     * that lease across trusted runtime jobs: immediately cycling it faults
+     * some X1E firmware revisions.  CP_ME_INIT still reapplies the private
+     * pwrup record before a sealed Mesart batch is appended. */
+    if (!g_runtime_gx_lease_held)
+    {
+        rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
+        if (rc != 0)
+            return -6;
+        g_runtime_gx_lease_held = 1u;
+    }
     if (gpu_cp_snapshot_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
                              &cp) != 0 || cp.hw_fault || cp.protect_status)
     {
@@ -1530,6 +1973,19 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
         rc = -11;
         goto out;
     }
+    /* CP's read pointer proves it consumed the final packet, but its RAM
+     * write reaches CPU-observable memory asynchronously.  A single read
+     * here made the otherwise healthy queued self-test intermittently report
+     * -12 on a fresh boot.  Use the same bounded invalidate/poll discipline
+     * as the RB fence in the 3D path. */
+    for (uint32_t poll = 0u; poll < 100000u; ++poll)
+    {
+        asm_dma_invalidate_range(g_cp_completion.cpu, sizeof(completion));
+        completion = *(uint32_t *)g_cp_completion.cpu;
+        if (completion == completion_magic)
+            break;
+        asm_relax();
+    }
     asm_dma_invalidate_range(g_cp_completion.cpu, sizeof(completion));
     completion = *(uint32_t *)g_cp_completion.cpu;
     if (completion != completion_magic)
@@ -1546,13 +2002,14 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
     rc = 0;
 
 out:
-    if (gx_held && gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window) != 0 &&
-        rc == 0)
-        rc = -14;
     /* Once CP binding or write-pointer publication has failed, the state of
      * the live GX command front-end is uncertain.  Do not retry or reuse the
      * runtime ring in this boot; a reboot restores the known-good baseline. */
-    if (rc != 0 && (submitted || gx_held))
+    if (rc != 0 && (submitted || g_runtime_gx_lease_held))
+    {
+        (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
+        g_runtime_gx_lease_held = 0u;
         g_runtime_backend_ready = 0u;
+    }
     return rc;
 }

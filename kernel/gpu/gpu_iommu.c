@@ -46,6 +46,8 @@ static gpu_buffer *new_table(gpu_iommu_domain *domain)
 {
     gpu_buffer *table;
 
+    /* This fixed bound is provisioned for all boot-time firmware and Mesart
+     * mappings; allocation remains impossible once it is reached. */
     if (!domain || domain->table_count >= GPU_IOMMU_MAX_TABLES)
         return 0;
     table = &domain->tables[domain->table_count];

@@ -180,6 +180,14 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                                       uint64_t destination_iova,
                                       uint32_t value);
 
+/* Emits an A7xx RB_DONE_TS event into the private completion allocation.
+ * Unlike CP_WAIT_FOR_IDLE, this records completion of actual RB work.  The
+ * kernel performs the bounded CPU-side observation after CP drains the ring;
+ * CP_WAIT_REG_MEM is not usable in this early direct-sysmem configuration. */
+int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
+                                    uint64_t destination_iova,
+                                    uint32_t value);
+
 /* Emits a compact visible triangle made of CP memory writes into an already
  * mapped XRGB/BGRX scanout.  This verifies CP-to-scanout writes; it is not a
  * substitute for the later SP/RB 3D draw path. */
@@ -189,6 +197,58 @@ int adreno_x1_85_emit_cp_scanout_triangle(gpu_command_ring *ring,
                                           uint32_t width,
                                           uint32_t height,
                                           uint32_t pitch);
+
+typedef enum adreno_x1_85_constant_stage
+{
+    ADRENO_X1_85_CONSTANT_VERTEX = 1u,
+    ADRENO_X1_85_CONSTANT_FRAGMENT = 2u,
+} adreno_x1_85_constant_stage;
+
+/* Internal A7xx context-register pair. This exists only between the kernel
+ * state builder and this Adreno backend; it is never an EL0 or KGFX ABI. */
+typedef struct adreno_x1_85_context_reg
+{
+    uint32_t dword_offset;
+    uint32_t value;
+} adreno_x1_85_context_reg;
+
+/* CP_CONTEXT_REG_BUNCH is the Mesa-generated packet form for a noncontiguous
+ * set of context register writes. The caller must use the later state-builder
+ * allow-list; this routine only frames already selected kernel state. */
+int adreno_x1_85_emit_context_regs(gpu_command_ring *ring,
+                                   const adreno_x1_85_context_reg *registers,
+                                   uint32_t register_count);
+
+/* A7xx's separate non-context bunch packet is used only by the compiled-in
+ * X1-85 baseline. It is intentionally not available to Mesart, SACX, KGFX,
+ * or any generic GPU caller. */
+int adreno_x1_85_emit_non_context_regs(
+    gpu_command_ring *ring, const adreno_x1_85_context_reg *registers,
+    uint32_t register_count);
+
+/* Emits a CP_LOAD_STATE6 inline constant upload for a kernel-owned A7xx
+ * graphics stage. `values` contains complete vec4 values; there is no path
+ * from EL0 packet memory to this emitter. The later draw broker uses this for
+ * the translation/colour test after it has bounded the count against MPIP. */
+int adreno_x1_85_emit_cp_constants(gpu_command_ring *ring,
+                                   adreno_x1_85_constant_stage stage,
+                                   uint32_t destination_vec4,
+                                   const uint32_t *values,
+                                   uint32_t vec4_count);
+
+/* Emits one kernel-built A7xx UBO descriptor for static data embedded in a
+ * verified MIR3 artifact. `source_gpu_va` is a kernel allocation address,
+ * never a pointer or address received from EL0. */
+int adreno_x1_85_emit_cp_constant_ubo(gpu_command_ring *ring,
+                                      adreno_x1_85_constant_stage stage,
+                                      uint32_t ubo_index,
+                                      uint64_t source_gpu_va,
+                                      uint32_t size_vec4s);
+
+/* Final command of DihOS' initial graphics profile: one non-indexed triangle
+ * generated from gl_VertexID. Pipeline and render-target state must already
+ * be installed by the kernel's A7xx state builder. */
+int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring);
 
 /* Programs the documented X1E CX-side, RSCC and PDC prerequisites for a Gen7
  * GMU cold boot.  It does not release reset, enable GX, or submit GPU work. */

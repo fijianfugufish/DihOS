@@ -1131,6 +1131,28 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                               sizeof(words) / sizeof(words[0]));
 }
 
+int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
+                                    uint64_t destination_iova,
+                                    uint32_t value)
+{
+    /* RB_DONE_TS writes this known value only after RB completes. CP's own
+     * WAIT_REG_MEM stalls this early direct-sysmem path on X1-85, so the
+     * kernel observes the timestamp with a bounded CPU-side poll after the
+     * command ring itself has drained. */
+    uint32_t words[5];
+
+    if (!ring || !destination_iova || (destination_iova & 3u))
+        return -1;
+
+    words[0] = adreno_pkt7(0x46u, 4u); /* CP_EVENT_WRITE7 */
+    words[1] = 0x08000016u;            /* RB_DONE_TS, user-32b, RAM write */
+    words[2] = (uint32_t)destination_iova;
+    words[3] = (uint32_t)(destination_iova >> 32);
+    words[4] = value;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
 int adreno_x1_85_emit_cp_scanout_triangle(gpu_command_ring *ring,
                                           uint64_t target_iova,
                                           uint32_t target_bytes,
@@ -1169,4 +1191,156 @@ int adreno_x1_85_emit_cp_scanout_triangle(gpu_command_ring *ring,
             return -2;
     }
     return gpu_ring_emit(ring, adreno_pkt7(0x12u, 0u)); /* CP_WAIT_MEM_WRITES */
+}
+
+int adreno_x1_85_emit_cp_constants(gpu_command_ring *ring,
+                                   adreno_x1_85_constant_stage stage,
+                                   uint32_t destination_vec4,
+                                   const uint32_t *values,
+                                   uint32_t vec4_count)
+{
+    uint32_t header;
+    uint32_t opcode;
+    uint32_t state_block;
+    uint32_t payload_dwords;
+
+    /* CP_LOAD_STATE6 encodes a 14-bit vec4 destination and a 10-bit unit
+     * count. These values come from Mesa's adreno_pm4.xml description:
+     * constants=1, direct=0, VS shader block=8, FS shader block=12. */
+    if (!ring || !values || !vec4_count || destination_vec4 > 0x3fffu ||
+        vec4_count > 0x3ffu || vec4_count > 0x3fffu - destination_vec4)
+        return -1;
+    if (stage == ADRENO_X1_85_CONSTANT_VERTEX)
+    {
+        opcode = 0x32u; /* CP_LOAD_STATE6_GEOM */
+        state_block = 0x8u; /* SB6_VS_SHADER */
+    }
+    else if (stage == ADRENO_X1_85_CONSTANT_FRAGMENT)
+    {
+        opcode = 0x34u; /* CP_LOAD_STATE6_FRAG */
+        state_block = 0xcu; /* SB6_FS_SHADER */
+    }
+    else
+        return -2;
+
+    /* Type-7 payload: state word, unused EXT_SRC_ADDR low/high for direct
+     * data, then four dwords per vec4.  The caller has already copied any
+     * float values into a kernel buffer; no CPU pointer is DMA-visible here. */
+    payload_dwords = 3u + vec4_count * 4u;
+    header = destination_vec4 | (1u << 14) | (state_block << 18) |
+             (vec4_count << 22);
+    if (gpu_ring_emit(ring, adreno_pkt7(opcode, payload_dwords)) != 0 ||
+        gpu_ring_emit(ring, header) != 0 ||
+        gpu_ring_emit(ring, 0u) != 0 || gpu_ring_emit(ring, 0u) != 0 ||
+        gpu_ring_emit_many(ring, values, vec4_count * 4u) != 0)
+        return -3;
+    return 0;
+}
+
+int adreno_x1_85_emit_cp_constant_ubo(gpu_command_ring *ring,
+                                      adreno_x1_85_constant_stage stage,
+                                      uint32_t ubo_index,
+                                      uint64_t source_gpu_va,
+                                      uint32_t size_vec4s)
+{
+    uint32_t opcode;
+    uint32_t state_block;
+    uint32_t header;
+    uint64_t descriptor;
+
+    /* This mirrors Mesa Turnip's tu6_emit_xs(): CP_LOAD_STATE6 creates a
+     * direct ST6_UBO descriptor with a five-dword payload.  DihOS keeps the
+     * descriptor construction here, after manifest/MIR3 validation, instead
+     * of accepting any descriptor or packet bytes from the renderer. */
+    if (!ring || !source_gpu_va || (source_gpu_va & 15u) ||
+        (source_gpu_va >> 32) != 0u ||
+        ubo_index > 0x3fffu || !size_vec4s || size_vec4s > 0xffffu)
+        return -1;
+    if (stage == ADRENO_X1_85_CONSTANT_VERTEX)
+    {
+        opcode = 0x32u;      /* CP_LOAD_STATE6_GEOM */
+        state_block = 0x8u;  /* SB6_VS_SHADER */
+    }
+    else if (stage == ADRENO_X1_85_CONSTANT_FRAGMENT)
+    {
+        opcode = 0x34u;      /* CP_LOAD_STATE6_FRAG */
+        state_block = 0xcu;  /* SB6_FS_SHADER */
+    }
+    else
+        return -2;
+
+    header = ubo_index | (2u << 14) | (state_block << 18) | (1u << 22);
+    /* Mesa's A6XX_UBO_DESC encodes the vec4 range in the high dword.  The
+     * first DihOS Mesart arena is below 4 GiB, so no descriptor size bits can
+     * overlap an address-high field; future high-address allocators must add
+     * the generated field masks here rather than widening this contract. */
+    descriptor = source_gpu_va | ((uint64_t)size_vec4s << 32);
+    if (gpu_ring_emit(ring, adreno_pkt7(opcode, 5u)) != 0 ||
+        gpu_ring_emit(ring, header) != 0 || gpu_ring_emit(ring, 0u) != 0 ||
+        gpu_ring_emit(ring, 0u) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)descriptor) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)(descriptor >> 32)) != 0)
+        return -3;
+    return 0;
+}
+
+int adreno_x1_85_emit_context_regs(gpu_command_ring *ring,
+                                   const adreno_x1_85_context_reg *registers,
+                                   uint32_t register_count)
+{
+    if (!ring || !registers || !register_count ||
+        register_count > 0x3fffu / 2u)
+        return -1;
+    /* CP_CONTEXT_REG_BUNCH (0x5c) payload is exactly (register,value) pairs.
+     * It lets the state builder keep Mesa's non-contiguous A7xx register
+     * layout explicit, rather than relying on a loose raw packet stream. */
+    if (gpu_ring_emit(ring, adreno_pkt7(0x5cu, register_count * 2u)) != 0)
+        return -2;
+    for (uint32_t i = 0u; i < register_count; ++i)
+        if (gpu_ring_emit(ring, registers[i].dword_offset) != 0 ||
+            gpu_ring_emit(ring, registers[i].value) != 0)
+            return -3;
+    return 0;
+}
+
+int adreno_x1_85_emit_non_context_regs(
+    gpu_command_ring *ring, const adreno_x1_85_context_reg *registers,
+    uint32_t register_count)
+{
+    if (!ring || !registers || !register_count ||
+        register_count > (0x3fffu - 2u) / 2u)
+        return -1;
+    /* CP_NON_CONTEXT_REG_BUNCH (0x5d) is the A7xx form used by Mesa's
+     * fd_ncrb builder. Its leading 1,0 pair is part of the packet contract;
+     * it is not a register/value supplied by a caller. */
+    if (gpu_ring_emit(ring, adreno_pkt7(0x5du, 2u + register_count * 2u)) != 0 ||
+        gpu_ring_emit(ring, 1u) != 0 || gpu_ring_emit(ring, 0u) != 0)
+        return -2;
+    for (uint32_t i = 0u; i < register_count; ++i)
+        if (gpu_ring_emit(ring, registers[i].dword_offset) != 0 ||
+            gpu_ring_emit(ring, registers[i].value) != 0)
+            return -3;
+    return 0;
+}
+
+int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring)
+{
+    uint32_t words[4];
+
+    if (!ring)
+        return -1;
+    /* Mesa emits CP_DRAW_INDX_OFFSET with the auto-index source for an
+     * input-free gl_VertexID triangle. DI_PT_TRILIST is 4 and AUTO_INDEX is
+     * 2 (bits 6..7).  Direct-sysmem setup enables CP's visibility override,
+     * so this initiator must select USE_VISIBILITY (bit 8), just like Mesa's
+     * fd6_draw/Turnip direct draw path.  Selecting IGNORE_VISIBILITY here
+     * leaves the A7xx render backend without the direct-pass visibility
+     * contract even though CP consumes the packet. */
+    words[0] = adreno_pkt7(0x38u, 3u); /* CP_DRAW_INDX_OFFSET */
+    words[1] = 4u | (2u << 6) | (1u << 8);
+                                           /* TRI list, auto index, use VSC */
+    words[2] = 1u;
+    words[3] = 3u;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
 }

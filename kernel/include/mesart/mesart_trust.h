@@ -23,6 +23,9 @@ typedef enum mesart_manifest_role
     MESART_ROLE_ADRENO_SQE_FIRMWARE = 3,
     MESART_ROLE_ADRENO_ZAP_FIRMWARE = 4,
     MESART_ROLE_KERNEL_COMPOSITOR_SHADER = 5,
+    /* Mesa-derived pipeline reflection.  It is intentionally separate from
+     * shader instruction blobs and contains no PM4/register stream. */
+    MESART_ROLE_KERNEL_COMPOSITOR_PIPELINE = 6,
 } mesart_manifest_role;
 
 /* All multibyte fields are little-endian.  The signature is appended after
@@ -74,4 +77,3 @@ int mesart_manifest_verify(const void *manifest, uint64_t manifest_bytes,
  * controlled (for example, "0:/OS/MesaRuntime"). */
 int mesart_manifest_verify_files(const mesart_manifest_view *view,
                                  const char *bundle_root);
-

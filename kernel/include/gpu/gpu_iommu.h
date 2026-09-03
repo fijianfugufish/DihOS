@@ -10,7 +10,13 @@
  * specific attach backend owns that final transition.
  */
 #define GPU_IOMMU_PAGE_SIZE       4096ull
-#define GPU_IOMMU_MAX_TABLES      64u
+/* The X1-85's fixed 16 MiB Mesart resource aperture occupies eight 2 MiB
+ * L3 tables by itself.  Firmware, rings, scanout, render surfaces and the
+ * two private, aligned shader pages need additional leaves in the same
+ * domain.  Keep this a finite kernel-owned budget, but leave enough entries
+ * for the complete boot-time layout rather than failing shader admission
+ * when the 65th table is allocated. */
+#define GPU_IOMMU_MAX_TABLES      128u
 #define GPU_IOMMU_MIN_VA_BITS     39u
 #define GPU_IOMMU_MAX_VA_BITS     48u
 #define GPU_IOMMU_MAX_ENDPOINTS   4u

@@ -75,7 +75,8 @@ int mesart_fd_bo_alloc(mesart_fd_device *device, uint64_t bytes,
         return -1;
     *out_bo = (mesart_fd_bo){0};
     if (!device || !device->ready || !bytes ||
-        (flags & ~(MESART_FD_BO_COMMAND | MESART_FD_BO_RESOURCE)))
+        (flags & ~(MESART_FD_BO_COMMAND | MESART_FD_BO_RESOURCE |
+                   MESART_FD_BO_SHADER)))
         return -2;
     if (!alignment)
         alignment = 4096u;
@@ -105,6 +106,35 @@ int mesart_fd_submit_flush(const mesart_fd_submit *submit, uint64_t dwords,
     if (!submit)
         return -1;
     return mesart_runtime_command_submit(&submit->command, dwords, out_fence);
+}
+
+int mesart_fd_shader_upload(mesart_fd_device *device,
+                            mesart_fd_shader_stage stage,
+                            const uint32_t *binary, uint32_t dwords,
+                            mesart_fd_shader *out_shader)
+{
+    mesart_fd_bo storage = {0};
+    uint64_t bytes;
+    uint32_t *copy;
+
+    if (!out_shader)
+        return -1;
+    *out_shader = (mesart_fd_shader){0};
+    if (!device || !device->ready || !binary || !dwords ||
+        (stage != MESART_FD_SHADER_VERTEX &&
+         stage != MESART_FD_SHADER_FRAGMENT) ||
+        dwords > UINT32_MAX / sizeof(uint32_t))
+        return -2;
+    bytes = (uint64_t)dwords * sizeof(uint32_t);
+    if (mesart_fd_bo_alloc(device, bytes, 64u, MESART_FD_BO_SHADER,
+                           &storage) != 0 || !storage.cpu ||
+        (storage.gpu_va & 63u))
+        return -3;
+    copy = (uint32_t *)storage.cpu;
+    for (uint32_t i = 0u; i < dwords; ++i)
+        copy[i] = binary[i];
+    *out_shader = (mesart_fd_shader){storage, dwords, (uint32_t)stage};
+    return 0;
 }
 
 int mesart_fd_winsys_selftest(void)
@@ -157,4 +187,30 @@ int mesart_fd_submit_resource_write_selftest(void)
     if (mesart_fd_submit_flush(&submit, 5u, &fence) != 0 || !fence)
         return -3;
     return 0;
+}
+
+int mesart_fd_shader_object_selftest(void)
+{
+    /* This is storage plumbing, not a claim that these dwords are a complete
+     * runnable shader.  The later IR3 compiler integration owns instruction
+     * generation and the pipeline broker owns every execution register. */
+    static const uint32_t compiler_output_shape[] = {
+        0x00000000u, 0x00000000u,
+    };
+    mesart_fd_device device = {0};
+    mesart_fd_shader shader = {0};
+    const uint32_t *copy;
+
+    if (mesart_fd_device_init(&device) != 0 ||
+        mesart_fd_shader_upload(&device, MESART_FD_SHADER_VERTEX,
+                                compiler_output_shape,
+                                sizeof(compiler_output_shape) /
+                                    sizeof(compiler_output_shape[0]),
+                                &shader) != 0 ||
+        !shader.binary.cpu || !shader.binary.gpu_va || shader.dwords != 2u ||
+        shader.stage != MESART_FD_SHADER_VERTEX)
+        return -1;
+    copy = (const uint32_t *)shader.binary.cpu;
+    return copy[0] == compiler_output_shape[0] &&
+           copy[1] == compiler_output_shape[1] ? 0 : -2;
 }

@@ -2,7 +2,10 @@
 
 #include "bootinfo.h"
 #include "asm/aa64_user.h"
+#include "gpu/gpu_render.h"
+#include "gpu/gpu_core.h"
 #include "mesart/mesart_renderer.h"
+#include "mesart/mesart_shader.h"
 #include "process/dihos_process.h"
 #include "filesystem/dihos_path.h"
 #include "gpio/gpio.h"
@@ -208,6 +211,7 @@ static int dihos_cmd_test_assert_eq(dihos_shell_stage *stage);
 static int dihos_cmd_test_fail(dihos_shell_stage *stage);
 static int dihos_cmd_process_selftest(dihos_shell_stage *stage);
 static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage);
+static int dihos_cmd_gpu_render_status(dihos_shell_stage *stage);
 static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
 static int dihos_shell_fallback_available(const char *name, char *friendly, char *raw);
@@ -301,6 +305,7 @@ static const dihos_shell_command G_commands[] = {
     {"fail", "fail [message...]", "Return failure for tests.", 0u, dihos_cmd_test_fail},
     {"process:selftest", "process:selftest", "Run the isolated EL0 entry/exit smoke test.", 0u, dihos_cmd_process_selftest},
     {"mesart:selftest", "mesart:selftest", "Verify, admit, and run the signed EL0 renderer stub.", 0u, dihos_cmd_mesart_selftest},
+    {"gpu:render-status", "gpu:render-status", "Show the driver-neutral GPU render dispatcher state.", 0u, dihos_cmd_gpu_render_status},
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
@@ -4609,11 +4614,38 @@ static int dihos_cmd_process_selftest(dihos_shell_stage *stage)
 #endif
 }
 
+static int dihos_cmd_gpu_render_status(dihos_shell_stage *stage)
+{
+    gpu_render_status status = {0};
+    const gpu_render_backend_info *backend;
+
+    (void)stage;
+    gpu_render_query_status(&status);
+    backend = gpu_render_backend();
+    terminal_print("GPU render ABI=");
+    terminal_print_inline_hex64(status.abi_version);
+    terminal_print(" mode=");
+    if (!status.accelerator_ready)
+    {
+        terminal_print("cpu-fallback");
+        terminal_print(" (no hardware backend registered)");
+        terminal_flush_log();
+        return 0;
+    }
+    terminal_print("accelerated backend=");
+    terminal_print(backend ? backend->name : "unknown");
+    terminal_print(" caps=");
+    terminal_print_inline_hex64(status.capabilities);
+    terminal_flush_log();
+    return 0;
+}
+
 static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
 {
     (void)stage;
 #if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
     mesart_renderer_service service = {0};
+    mesart_renderer_graphics_pipeline graphics_pipeline = {0};
     dihos_process_info info;
     gpu_scheduler_client scheduler_client;
     uint64_t status = 0u;
@@ -4621,6 +4653,11 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     uint64_t bootstrap_gpu_va = 0u;
     uint64_t command_gpu_va = 0u;
     uint64_t resource_arena_gpu_va = 0u;
+    uint64_t vertex_shader_gpu_va = 0u;
+    uint64_t fragment_shader_gpu_va = 0u;
+    uint32_t graphics_preflight_dwords = 0u;
+    uint64_t graphics_fence = 0u;
+    uint32_t shader_count = 0u;
     int enter_rc;
     int rc;
 
@@ -4676,6 +4713,44 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
         terminal_flush_log();
         return -1;
     }
+    if (service.shader_count != 0u &&
+        mesart_renderer_prepare_graphics_pipeline(
+            &service, &(mesart_renderer_graphics_request){0},
+            &graphics_pipeline) != 0)
+    {
+        terminal_error("Mesart signed shader pair failed graphics preflight");
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    if (graphics_pipeline.ready &&
+        (rc = gpu_core_mesart_3d_preflight(&graphics_pipeline,
+                                            &graphics_preflight_dwords)) != 0)
+    {
+        terminal_error("Mesart A7xx 3D state preflight rejected signed pipeline");
+        terminal_print(" 3d-preflight-rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
+    if (graphics_pipeline.ready &&
+        (rc = gpu_core_mesart_3d_submit(&graphics_pipeline,
+                                        &graphics_fence)) != 0)
+    {
+        terminal_error("Mesart signed A7xx triangle submission failed");
+        terminal_print(" 3d-backend-rc=");
+        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+        (void)dihos_process_fault(&G_mesart_processes, service.process);
+        mesart_renderer_release(&service);
+        (void)dihos_process_reap(&G_mesart_processes, service.process);
+        terminal_flush_log();
+        return -1;
+    }
     completed_fence = service.command_buffer.completed_fence;
     if (dihos_process_exit(&G_mesart_processes, service.process) != 0 ||
         dihos_process_query(&G_mesart_processes, service.process, &info) != 0)
@@ -4691,6 +4766,14 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     bootstrap_gpu_va = service.buffers[0].gpu_va;
     resource_arena_gpu_va = service.buffers[1].gpu_va;
     command_gpu_va = service.command_buffer.gpu_va;
+    shader_count = service.shader_count;
+    for (uint32_t i = 0u; i < shader_count; ++i)
+    {
+        if (service.shaders[i].stage == MESART_IR3_SHADER_VERTEX)
+            vertex_shader_gpu_va = service.shaders[i].code_gpu_va;
+        else if (service.shaders[i].stage == MESART_IR3_SHADER_FRAGMENT)
+            fragment_shader_gpu_va = service.shaders[i].code_gpu_va;
+    }
     mesart_renderer_release(&service);
     (void)dihos_process_reap(&G_mesart_processes, info.handle);
     terminal_success("Mesart Mesa runtime/winsys + ordered hardware resource-write/fence test passed status=");
@@ -4707,6 +4790,26 @@ static int dihos_cmd_mesart_selftest(dihos_shell_stage *stage)
     terminal_print_inline_hex64(command_gpu_va);
     terminal_print(" resource-arena-gpu-va=");
     terminal_print_inline_hex64(resource_arena_gpu_va);
+    terminal_print(" signed-ir3-stages=");
+    terminal_print_inline_hex64(shader_count);
+    terminal_print(" vertex-ir3-gpu-va=");
+    terminal_print_inline_hex64(vertex_shader_gpu_va);
+    terminal_print(" fragment-ir3-gpu-va=");
+    terminal_print_inline_hex64(fragment_shader_gpu_va);
+    if (graphics_pipeline.ready)
+    {
+        terminal_print(" graphics-preflight=ready");
+        terminal_print(" vertex-uniform-vec4s=");
+        terminal_print_inline_hex64(graphics_pipeline.vertex_uniform_vec4s);
+        terminal_print(" fragment-uniform-vec4s=");
+        terminal_print_inline_hex64(graphics_pipeline.fragment_uniform_vec4s);
+        terminal_print(" pipeline-reflection=");
+        terminal_print(graphics_pipeline.pipeline_reflection_ready ? "ready" : "pending");
+        terminal_print(" a7xx-3d-state-dwords=");
+        terminal_print_inline_hex64(graphics_preflight_dwords);
+        terminal_print(" a7xx-3d-triangle-fence=");
+        terminal_print_inline_hex64(graphics_fence);
+    }
     terminal_flush_log();
     return 0;
 #else
