@@ -189,6 +189,35 @@ static uint8_t stage_flags(const ir3_shader_variant *variant)
     return flags;
 }
 
+static bool reflect_default_ubo_push(const ir3_shader_variant *variant,
+                                     uint32_t application_ubos,
+                                     uint16_t *dst_vec4,
+                                     uint16_t *src_vec4,
+                                     uint16_t *vec4_count)
+{
+    const ir3_ubo_analysis_state *state =
+        &ir3_const_state(variant)->ubo_state;
+    *dst_vec4 = *src_vec4 = *vec4_count = 0u;
+    if (!application_ubos)
+        return state->num_enabled == 0u;
+    /* The deliberately narrow first profile has one 16-byte default block.
+     * IR3 currently promotes that one range into its per-stage constant
+     * file.  Reject any broader compiler contract instead of guessing. */
+    if (application_ubos != 1u || state->num_enabled != 1u)
+        return false;
+    const ir3_ubo_range &range = state->range[0];
+    if (range.ubo.block != 0u || range.ubo.bindless || range.ubo.global ||
+        (range.offset & 15u) || (range.start & 15u) ||
+        (range.end & 15u) || range.end <= range.start ||
+        range.offset / 16u > 0xffffu || range.start / 16u > 0xffffu ||
+        (range.end - range.start) / 16u > 0xffffu)
+        return false;
+    *dst_vec4 = (uint16_t)(range.offset / 16u);
+    *src_vec4 = (uint16_t)(range.start / 16u);
+    *vec4_count = (uint16_t)((range.end - range.start) / 16u);
+    return true;
+}
+
 static mesart_pipeline_stage_state pipeline_stage(
     const ir3_shader_variant *variant, bool vertex_stage)
 {
@@ -283,6 +312,23 @@ static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
         return false;
     header.vertex_app_ubo_count = (uint16_t)vertex_application_ubos;
     header.fragment_app_ubo_count = (uint16_t)fragment_application_ubos;
+    uint16_t vertex_push_dst = 0u, vertex_push_src = 0u,
+             vertex_push_count = 0u;
+    uint16_t fragment_push_dst = 0u, fragment_push_src = 0u,
+             fragment_push_count = 0u;
+    if (!reflect_default_ubo_push(vertex, vertex_application_ubos,
+                                  &vertex_push_dst, &vertex_push_src,
+                                  &vertex_push_count) ||
+        !reflect_default_ubo_push(fragment, fragment_application_ubos,
+                                  &fragment_push_dst, &fragment_push_src,
+                                  &fragment_push_count))
+        return false;
+    header.vertex_ubo_push_dst_vec4 = vertex_push_dst;
+    header.vertex_ubo_push_src_vec4 = vertex_push_src;
+    header.vertex_ubo_push_vec4_count = vertex_push_count;
+    header.fragment_ubo_push_dst_vec4 = fragment_push_dst;
+    header.fragment_ubo_push_src_vec4 = fragment_push_src;
+    header.fragment_ubo_push_vec4_count = fragment_push_count;
     header.vertex = pipeline_stage(vertex, true);
     header.fragment = pipeline_stage(fragment, false);
     header.fragment.primary_output_regid = (uint16_t)color0_regid;

@@ -4838,7 +4838,7 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
     G_mesart_visual.service = service;
     G_mesart_visual.pipeline = pipeline;
     G_mesart_visual.active = 1u;
-    terminal_success("Mesart visual triangle started; CPU presentation is paused so the completed GPU frame remains visible");
+    terminal_success("Mesart translated tint triangle started; CPU presentation is paused so the completed GPU frame remains visible");
     terminal_flush_log();
     return 0;
 

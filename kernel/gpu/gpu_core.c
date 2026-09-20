@@ -110,8 +110,8 @@ static gpu_core_mesart_3d_inflight g_mesart_3d_inflight;
 #define GPU_CORE_MESART_UNIFORM_POOL_IOVA 0x0000000042900000ull
 #define GPU_CORE_MESART_UNIFORM_POOL_BYTES GPU_IOMMU_PAGE_SIZE
 #define GPU_CORE_MESART_VERTEX_UBO_OFFSET   0u
-#define GPU_CORE_MESART_FRAGMENT_UBO_OFFSET 16u
-#define GPU_CORE_MESART_DEFAULT_UBO_BYTES   16u
+#define GPU_CORE_MESART_FRAGMENT_UBO_OFFSET 64u
+#define GPU_CORE_MESART_DEFAULT_UBO_BYTES   64u
 /* The initial vertex proof is deliberately kernel-owned data rather than a
  * Mesart EL0 resource.  It shares the private uniform pool only because both
  * use the same already-mapped unprivileged GPU read transaction class. */
@@ -1542,17 +1542,20 @@ static int gpu_core_mesart_configure_vertex_buffer(
     if (!write_values)
         return 0;
 
-    /* (-1,-1), (3,-1), (-1,3): an oversized fullscreen test triangle.
-     * Exact IEEE values test VFD independently of gl_VertexID and without
-     * accepting host-supplied geometry. */
+    /* A centred, ordinary triangle. The tint profile adds a kernel-owned
+     * translation through default UBO 0, independently proving vertex fetch
+     * and live uniform consumption without accepting host GPU addresses. */
     words = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
                          GPU_CORE_MESART_VERTEX_BUFFER_OFFSET);
-    words[0] = 0xbf800000u;
-    words[1] = 0xbf800000u;
-    words[2] = 0x40400000u;
-    words[3] = 0xbf800000u;
-    words[4] = 0xbf800000u;
-    words[5] = 0x40400000u;
+    /* GOP memory is top-down, so invert Y in the test geometry while
+     * retaining counter-clockwise clip-space winding.  A negative hardware
+     * viewport scale made this X1-85 TSE path reject the primitive. */
+    words[0] = 0x00000000u; /*  0.00 */
+    words[1] = 0xbf266666u; /* -0.65: visible apex */
+    words[2] = 0x3f266666u; /*  0.65 */
+    words[3] = 0x3f266666u; /*  0.65 */
+    words[4] = 0xbf266666u; /* -0.65 */
+    words[5] = 0x3f266666u; /*  0.65 */
     asm_dma_clean_range(words, GPU_CORE_MESART_VERTEX_BUFFER_BYTES);
     return 0;
 }
@@ -1590,6 +1593,9 @@ static int gpu_core_mesart_configure_default_uniforms(
             GPU_CORE_MESART_UNIFORM_POOL_IOVA +
             GPU_CORE_MESART_VERTEX_UBO_OFFSET;
         draw->vertex_default_ubo_bytes = GPU_CORE_MESART_DEFAULT_UBO_BYTES;
+        draw->vertex_default_ubo_values =
+            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu +
+                               GPU_CORE_MESART_VERTEX_UBO_OFFSET);
     }
     if (reflection->fragment_app_ubo_count)
     {
@@ -1597,25 +1603,37 @@ static int gpu_core_mesart_configure_default_uniforms(
             GPU_CORE_MESART_UNIFORM_POOL_IOVA +
             GPU_CORE_MESART_FRAGMENT_UBO_OFFSET;
         draw->fragment_default_ubo_bytes = GPU_CORE_MESART_DEFAULT_UBO_BYTES;
+        draw->fragment_default_ubo_values =
+            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu +
+                               GPU_CORE_MESART_FRAGMENT_UBO_OFFSET);
     }
     if (!write_values)
         return 0;
 
     words = (uint32_t *)g_mesart_uniform_pool.cpu;
+    for (uint32_t i = 0u; i < GPU_CORE_MESART_DEFAULT_UBO_BYTES / 4u; ++i)
+        words[i] = 0u;
+    uint32_t *fragment_words =
+        (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                     GPU_CORE_MESART_FRAGMENT_UBO_OFFSET);
+    for (uint32_t i = 0u; i < GPU_CORE_MESART_DEFAULT_UBO_BYTES / 4u; ++i)
+        fragment_words[i] = 0u;
     /* vec2 u_translation = (0.25, -0.125), leaving a visibly shifted
-     * triangle; vec4 u_colour = a bright green-gold.  Values are exact IEEE
+     * triangle; vec4 u_colour = unmistakable orange against the teal seed.
+     * Values are exact IEEE
      * literals so the host compiler is never asked to encode test data. */
     words[0] = 0x3e800000u;
     words[1] = 0xbe000000u;
     words[2] = 0u;
     words[3] = 0u;
-    words[4] = 0x3dcccccdu;
-    words[5] = 0x3f59999au;
-    words[6] = 0x3e800000u;
-    words[7] = 0x3f800000u;
+    fragment_words[0] = 0x3f800000u;
+    fragment_words[1] = 0x3e19999au;
+    fragment_words[2] = 0x3ca3d70au;
+    fragment_words[3] = 0x3f800000u;
     asm_dma_clean_range(g_mesart_uniform_pool.cpu,
                         GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
                             GPU_CORE_MESART_DEFAULT_UBO_BYTES);
+    terminal_print("[K:GPU] tint UBO+constant promotion translation=(0.25,-0.125) colour=(1.0,0.15,0.02,1.0)");
     return 0;
 }
 
@@ -1835,7 +1853,7 @@ int gpu_core_mesart_3d_kick(
      * USB kernel. Revision 18 records independent VPC/TSE/RB counters around
      * the draw, replacing the old stream-out query which cannot measure a
      * pass with stream-out intentionally disabled. */
-    terminal_print("[K:GPU] Mesart A7xx draw-state revision=48 (Lenovo OEM zap)");
+    terminal_print("[K:GPU] Mesart A7xx draw-state revision=51 (Mesa UBO promotion + upright CCW geometry)");
     /* Authenticate before allowing CP's secure-mode transition. An unreadable
      * trust register is not evidence that a secure firmware load is needed. */
     {

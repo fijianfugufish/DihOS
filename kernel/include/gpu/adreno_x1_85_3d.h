@@ -31,6 +31,8 @@ typedef struct adreno_x1_85_3d_draw
     uint64_t fragment_default_ubo_gpu_va;
     uint32_t vertex_default_ubo_bytes;
     uint32_t fragment_default_ubo_bytes;
+    const uint32_t *vertex_default_ubo_values;
+    const uint32_t *fragment_default_ubo_values;
 } adreno_x1_85_3d_draw;
 
 /* Checks the exact first 3D profile before a command ring is touched.  The

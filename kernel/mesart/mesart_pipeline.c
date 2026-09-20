@@ -21,6 +21,18 @@ static uint8_t last_component(uint8_t compmask)
     return component;
 }
 
+static int ubo_push_valid(uint16_t app_ubos, uint32_t const_vec4s,
+                          uint16_t dst, uint16_t src, uint16_t count)
+{
+    if (!app_ubos)
+        return !dst && !src && !count;
+    /* First profile: one kernel-owned 64-byte default block.  IR3 promotes
+     * this alignment-sized range even when GLSL consumes only one vec4. */
+    return app_ubos == 1u && count && count <= 4u &&
+           (uint32_t)src + count <= 4u &&
+           (uint32_t)dst + count <= const_vec4s;
+}
+
 int mesart_pipeline_validate(const void *bytes, uint64_t byte_count,
                              uint64_t expected_chip_id,
                              const mesart_pipeline_shader_info *vertex,
@@ -51,6 +63,16 @@ int mesart_pipeline_validate(const void *bytes, uint64_t byte_count,
         header->fragment_sampler_count != fragment->sampler_count ||
         header->vertex_app_ubo_count != vertex->app_ubo_count ||
         header->fragment_app_ubo_count != fragment->app_ubo_count ||
+        !ubo_push_valid(header->vertex_app_ubo_count,
+                        header->vertex_const_vec4s,
+                        header->vertex_ubo_push_dst_vec4,
+                        header->vertex_ubo_push_src_vec4,
+                        header->vertex_ubo_push_vec4_count) ||
+        !ubo_push_valid(header->fragment_app_ubo_count,
+                        header->fragment_const_vec4s,
+                        header->fragment_ubo_push_dst_vec4,
+                        header->fragment_ubo_push_src_vec4,
+                        header->fragment_ubo_push_vec4_count) ||
         header->vertex.output_dwords != vertex->output_dwords ||
         header->fragment.output_dwords != fragment->output_dwords ||
         !pipeline_stage_valid(&header->vertex) ||
@@ -84,9 +106,6 @@ int mesart_pipeline_validate(const void *bytes, uint64_t byte_count,
             ((header->fragment.flags & MESART_PIPELINE_STAGE_FLAG_NEEDS_PIXLOD) ?
                  MESART_IR3_FLAG_NEEDS_PIXLOD : 0u))
         return -1;
-    for (uint32_t i = 0u; i < sizeof(header->reserved); ++i)
-        if (header->reserved[i])
-            return -2;
     for (uint32_t i = 0u; i < header->varying_count; ++i)
     {
         const mesart_pipeline_varying *varying = &header->varyings[i];

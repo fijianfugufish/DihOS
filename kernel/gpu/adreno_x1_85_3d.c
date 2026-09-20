@@ -637,10 +637,12 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
             (draw->fragment_default_ubo_gpu_va == 0u) ||
         (draw->vertex_default_ubo_gpu_va &&
          ((draw->vertex_default_ubo_gpu_va & 15u) ||
-          draw->vertex_default_ubo_bytes != 16u)) ||
+          draw->vertex_default_ubo_bytes != 64u ||
+          !draw->vertex_default_ubo_values)) ||
         (draw->fragment_default_ubo_gpu_va &&
          ((draw->fragment_default_ubo_gpu_va & 15u) ||
-          draw->fragment_default_ubo_bytes != 16u)))
+          draw->fragment_default_ubo_bytes != 64u ||
+          !draw->fragment_default_ubo_values)))
         return -2;
     /* VFD consumes literal eight-bit IR3 register encodings.  The pipeline
      * validator has already checked the required vertex-id sentinel case;
@@ -1066,19 +1068,39 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
             draw->fragment_default_ubo_gpu_va,
             draw->fragment_default_ubo_bytes / 16u) != 0)
         return -6;
+    /* IR3's UBO-range analysis promoted these tiny default-block reads into
+     * the hardware constant file.  Mesa emits both the descriptor above and
+     * this bounded constant upload; omitting the latter makes valid shaders
+     * deterministically read zero without raising a GPU fault. */
+    if (reflection->vertex_ubo_push_vec4_count &&
+        adreno_x1_85_emit_cp_constants(
+            ring, ADRENO_X1_85_CONSTANT_VERTEX,
+            reflection->vertex_ubo_push_dst_vec4,
+            draw->vertex_default_ubo_values +
+                4u * reflection->vertex_ubo_push_src_vec4,
+            reflection->vertex_ubo_push_vec4_count) != 0)
+        return -7;
+    if (reflection->fragment_ubo_push_vec4_count &&
+        adreno_x1_85_emit_cp_constants(
+            ring, ADRENO_X1_85_CONSTANT_FRAGMENT,
+            reflection->fragment_ubo_push_dst_vec4,
+            draw->fragment_default_ubo_values +
+                4u * reflection->fragment_ubo_push_src_vec4,
+            reflection->fragment_ubo_push_vec4_count) != 0)
+        return -8;
     if (pipeline->vertex_constant_data_bytes &&
         adreno_x1_85_emit_cp_constant_ubo(
             ring, ADRENO_X1_85_CONSTANT_VERTEX,
             pipeline->vertex_constant_data_ubo_index,
             pipeline->vertex_constant_data_gpu_va,
             pipeline->vertex_constant_data_bytes / 16u) != 0)
-        return -7;
+        return -9;
     if (pipeline->fragment_constant_data_bytes &&
         adreno_x1_85_emit_cp_constant_ubo(
             ring, ADRENO_X1_85_CONSTANT_FRAGMENT,
             pipeline->fragment_constant_data_ubo_index,
             pipeline->fragment_constant_data_gpu_va,
             pipeline->fragment_constant_data_bytes / 16u) != 0)
-        return -8;
+        return -10;
     return 0;
 }

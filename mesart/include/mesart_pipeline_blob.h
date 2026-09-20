@@ -10,7 +10,7 @@
  * kernel-owned.
  */
 #define MESART_PIPELINE_MAGIC          0x5049504du /* "MPIP" little-endian */
-#define MESART_PIPELINE_VERSION        4u
+#define MESART_PIPELINE_VERSION        5u
 #define MESART_PIPELINE_HEADER_BYTES   256u
 #define MESART_PIPELINE_MAX_VARYINGS   32u
 /* Mesa/Freedreno encodes r63.x as (63 << 2), its INVALID_REG sentinel.  MPIP
@@ -99,5 +99,13 @@ typedef struct __attribute__((packed)) mesart_pipeline_header
     uint8_t vertex_attribute0_compmask;
     uint32_t varying_mask[4];
     mesart_pipeline_varying varyings[MESART_PIPELINE_MAX_VARYINGS];
-    uint8_t reserved[12];
+    /* IR3 may promote a bounded range of default UBO 0 into the hardware
+     * constant file.  The signed host reflection tells the kernel exactly
+     * which vec4 to copy; it never supplies an address or packet data. */
+    uint16_t vertex_ubo_push_dst_vec4;
+    uint16_t vertex_ubo_push_src_vec4;
+    uint16_t vertex_ubo_push_vec4_count;
+    uint16_t fragment_ubo_push_dst_vec4;
+    uint16_t fragment_ubo_push_src_vec4;
+    uint16_t fragment_ubo_push_vec4_count;
 } mesart_pipeline_header;

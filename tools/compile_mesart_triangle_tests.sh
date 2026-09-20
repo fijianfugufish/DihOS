@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the first Mesa/Freedreno triangle artifact in the WSL host snapshot.
 # This is host-only: DihOS never executes this file or the host compiler it
-# invokes.  Tint/texture profiles remain opt-in while their kernel resource
-# upload paths are under construction.
+# invokes. Tint is now the default visual profile; texture remains opt-in
+# while descriptor/sampler construction is under development.
 set -euo pipefail
 
 project_root="${1:-$PWD}"
@@ -28,9 +28,9 @@ cp "$project_root/mesart/include/mesart_shader_blob.h" "$mesa_source/mesart_host
 cp "$project_root/mesart/include/mesart_pipeline_blob.h" "$mesa_source/mesart_host/"
 ninja -C "$mesa_build" mesart_host/mesart_glsl_to_ir3
 
-test_names=(triangle)
+test_names=(tint_triangle)
 if [[ "${MESART_INCLUDE_FUTURE_TESTS:-0}" == "1" ]]; then
-    test_names+=(tint_triangle textured_triangle)
+    test_names+=(triangle textured_triangle)
 fi
 
 for test_name in "${test_names[@]}"; do
@@ -42,8 +42,8 @@ for test_name in "${test_names[@]}"; do
         "$project_root/build/mesart-shaders/$test_name.mpip"
 done
 
-echo "Built the purple triangle MIR3/MPIP artifacts under:"
+echo "Built the translated tint-triangle MIR3/MPIP artifacts under:"
 if [[ "${MESART_INCLUDE_FUTURE_TESTS:-0}" != "1" ]]; then
-    echo "Tint/texture profiles are intentionally deferred until uniform and texture binding are enabled."
+    echo "Texture profile is intentionally deferred until texture binding is enabled."
 fi
 echo "  $project_root/build/mesart-shaders"
