@@ -63,6 +63,10 @@ typedef struct gpu_cp_bind_config
 /* Reads the CP state while the caller holds the platform's GPU power lease.
  * The operation is intentionally read-only: it is the gate before firmware
  * binding, secure-world authentication, and later command submission. */
+/* Runtime health only; configuration fields in the result remain zero. */
+int gpu_cp_status_read(const gpu_mmio_window *regs,
+                       const gpu_cp_register_layout *layout,
+                       gpu_cp_snapshot *out);
 int gpu_cp_snapshot_read(const gpu_mmio_window *regs,
                          const gpu_cp_register_layout *layout,
                          gpu_cp_snapshot *out);

@@ -69,6 +69,24 @@ static uint32_t fragment_color0_regid(const ir3_shader_variant *variant)
     return color_register;
 }
 
+/* Mesa's IR3 alias pass may fold a constant fragment result directly into
+ * the shader's constant-data area.  In that case SP_PS_OUTPUT_CONST_MASK,
+ * not merely SP_PS_OUTPUT[0], is required for RB to receive the colour. */
+static uint32_t fragment_color0_alias_mask(const ir3_shader_variant *variant)
+{
+    if (!variant)
+        return 0u;
+    for (uint32_t i = 0u; i < variant->outputs_count; ++i)
+    {
+        const ir3_shader_output *output = &variant->outputs[i];
+
+        if (output->slot == FRAG_RESULT_COLOR ||
+            output->slot == FRAG_RESULT_DATA0)
+            return output->aliased_components;
+    }
+    return 0u;
+}
+
 static bool write_blob(const char *path, uint32_t stage,
                        const ir3_shader_variant *variant,
                        uint32_t application_ubos)
@@ -197,10 +215,10 @@ static mesart_pipeline_stage_state pipeline_stage(
     };
 }
 
-/* The first hardware profile is intentionally small: auto-indexed vertices,
- * no user vertex buffers, no clip planes, no private shader memory, and an
- * ordinary VS/FS pair.  The output is reflection only; it cannot carry a
- * packet opcode, a register address, a BO address, or a render target. */
+/* The first hardware profile is intentionally small: exactly one vec2
+ * attribute at location zero, no clip planes, no private shader memory, and
+ * an ordinary VS/FS pair.  The output is reflection only; it cannot carry a
+ * packet opcode, a GPU address, a buffer stride, or a render target. */
 static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
                            uint32_t vertex_application_ubos,
                            const ir3_shader_variant *fragment,
@@ -211,21 +229,38 @@ static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
     const uint32_t position_regid = ir3_find_output_regid(vertex, VARYING_SLOT_POS);
     const uint32_t point_size_regid = ir3_find_output_regid(vertex, VARYING_SLOT_PSIZ);
     const uint32_t color0_regid = fragment_color0_regid(fragment);
+    const uint32_t color0_alias_mask = fragment_color0_alias_mask(fragment);
 
     linkage.primid_loc = 0xffu;
     linkage.viewid_loc = 0xffu;
     linkage.clip0_loc = 0xffu;
     linkage.clip1_loc = 0xffu;
     if (!vertex || !fragment || !vertex->writes_pos || color0_regid == INVALID_REG ||
-        vertex->attr_in != 0u || vertex->pvtmem_size != 0u ||
+        (color0_alias_mask & ~0x0fu) ||
+        vertex->attr_in != 1u || vertex->inputs_count < 1u ||
+        /* Mesa's IR3 uses VERT_ATTRIB_GENERIC0 (slot 15) for GLSL
+         * layout(location = 0), not the user-facing location number. */
+        vertex->inputs[0].sysval || vertex->inputs[0].slot != 15u ||
+        vertex->inputs[0].compmask != 0x3u || vertex->pvtmem_size != 0u ||
         fragment->pvtmem_size != 0u || vertex->shared_size != 0u ||
         fragment->shared_size != 0u || vertex->clip_mask || vertex->cull_mask ||
         fragment->reads_primid || position_regid == INVALID_REG ||
         point_size_regid == INVALID_REG || vertex->info.max_reg >= 64 ||
         vertex->info.max_half_reg >= 64 || fragment->info.max_reg >= 64 ||
         fragment->info.max_half_reg >= 64 ||
-        vertex->branchstack > 255u || fragment->branchstack > 255u)
+        vertex->branchstack > 255u || fragment->branchstack > 255u) {
+        std::fprintf(stderr,
+                     "[mesart-glslc] rejected first VBO profile: attr_in=%u "
+                     "inputs=%u slot=%u mask=0x%x sysval=%u pos=%u psize=%u "
+                     "color=%u\\n",
+                     vertex ? vertex->attr_in : 0u,
+                     vertex ? vertex->inputs_count : 0u,
+                     vertex && vertex->inputs_count ? vertex->inputs[0].slot : 0u,
+                     vertex && vertex->inputs_count ? vertex->inputs[0].compmask : 0u,
+                     vertex && vertex->inputs_count ? vertex->inputs[0].sysval : 0u,
+                     position_regid, point_size_regid, color0_regid);
         return false;
+    }
 
     ir3_link_shaders(&linkage, vertex, fragment, true);
     if (linkage.cnt > MESART_PIPELINE_MAX_VARYINGS || linkage.max_loc >= 128u)
@@ -251,6 +286,11 @@ static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
     header.vertex = pipeline_stage(vertex, true);
     header.fragment = pipeline_stage(fragment, false);
     header.fragment.primary_output_regid = (uint16_t)color0_regid;
+    header.fragment.output_const_mask = color0_alias_mask;
+    header.vertex_attribute_count = 1u;
+    header.vertex_attribute0_slot = vertex->inputs[0].slot;
+    header.vertex_attribute0_regid = vertex->inputs[0].regid;
+    header.vertex_attribute0_compmask = vertex->inputs[0].compmask;
 
     /* Match fd6_program.cc's final VS VPC setup: normal FS-consumed
      * varyings first, then position and point size. */

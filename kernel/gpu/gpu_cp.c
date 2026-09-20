@@ -21,6 +21,26 @@ static int read64(const gpu_mmio_window *regs, uint32_t offset, uint64_t *out)
     return 0;
 }
 
+/* Runtime status deliberately excludes configuration/privilege registers.
+ * The X1E log identifies CP_APRIV_CNTL as the last requested access before
+ * a fault; observing that optional register must not gate a draw. */
+int gpu_cp_status_read(const gpu_mmio_window *regs,
+                       const gpu_cp_register_layout *layout,
+                       gpu_cp_snapshot *out)
+{
+    gpu_cp_snapshot snapshot = {0};
+    if (!regs || !layout || !out)
+        return -1;
+    if (gpu_mmio_try_read32(regs, layout->rb_rptr, &snapshot.rb_rptr) != 0 ||
+        gpu_mmio_try_read32(regs, layout->rb_wptr, &snapshot.rb_wptr) != 0 ||
+        gpu_mmio_try_read32(regs, layout->hw_fault, &snapshot.hw_fault) != 0 ||
+        gpu_mmio_try_read32(regs, layout->protect_status,
+                            &snapshot.protect_status) != 0)
+        return -2;
+    *out = snapshot;
+    return 0;
+}
+
 int gpu_cp_snapshot_read(const gpu_mmio_window *regs,
                          const gpu_cp_register_layout *layout,
                          gpu_cp_snapshot *out)

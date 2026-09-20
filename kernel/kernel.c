@@ -334,6 +334,9 @@ void kmain(boot_info *bi)
 
     terminal_initialize(font);
     terminal_print("terminal online");
+    /* Reserve a shared-RAM attribute before SMP/user address spaces start.
+     * Failure leaves the GPU's PAS mapper fail-closed, not using Device RAM. */
+    (void)mmio_prepare_normal_nc();
     (void)gpu_core_init(bi);
     if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
         terminal_success("crash map: source locations ready");

@@ -8,7 +8,7 @@ static int pipeline_stage_valid(const mesart_pipeline_stage_state *stage)
     if (!stage || stage->full_reg_footprint > 64u ||
         stage->half_reg_footprint > 64u || stage->branchstack > 64u ||
         (stage->flags & ~MESART_PIPELINE_STAGE_FLAG_KNOWN) ||
-        stage->total_varying_components > 128u || stage->reserved)
+        stage->total_varying_components > 128u)
         return 0;
     return 1;
 }
@@ -55,7 +55,17 @@ int mesart_pipeline_validate(const void *bytes, uint64_t byte_count,
         header->fragment.output_dwords != fragment->output_dwords ||
         !pipeline_stage_valid(&header->vertex) ||
         !pipeline_stage_valid(&header->fragment) ||
-        header->vertex.vertex_id_regid == MESART_PIPELINE_INVALID_REGID ||
+        /* The first profile has one RT.  The host may only describe its
+         * four aliasable components, and VS has no colour-constant output. */
+        header->vertex.output_const_mask ||
+        (header->fragment.output_const_mask & ~0x0fu) ||
+        /* The VBO proof deliberately does not consume gl_VertexID.  Its one
+         * generic position input is reflected as Mesa's VERT_ATTRIB_GENERIC0
+         * (slot 15), and the kernel supplies the backing buffer. */
+        header->vertex_attribute_count != 1u ||
+        header->vertex_attribute0_slot != 15u ||
+        header->vertex_attribute0_regid >= MESART_PIPELINE_INVALID_REGID ||
+        header->vertex_attribute0_compmask != 0x3u ||
         header->vertex.primary_output_regid == MESART_PIPELINE_INVALID_REGID ||
         header->vertex.secondary_output_regid == MESART_PIPELINE_INVALID_REGID ||
         header->fragment.vertex_id_regid != MESART_PIPELINE_INVALID_REGID ||

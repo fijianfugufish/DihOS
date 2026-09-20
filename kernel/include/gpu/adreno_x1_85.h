@@ -84,6 +84,7 @@
 #define ADRENO_X1_85_RBBM_SECVID_TSB_BASE    (0xf800u * 4u)
 #define ADRENO_X1_85_RBBM_SECVID_TSB_SIZE    (0xf802u * 4u)
 #define ADRENO_X1_85_RBBM_SECVID_TSB_CNTL    (0xf803u * 4u)
+#define ADRENO_X1_85_RBBM_SECVID_TRUST_CNTL  (0xf400u * 4u)
 #define ADRENO_X1_85_RBBM_GBIF_QOS           (0x0011u * 4u)
 #define ADRENO_X1_85_RBBM_INT_CLEAR          (0x0037u * 4u)
 #define ADRENO_X1_85_RBBM_INT_MASK           (0x0038u * 4u)
@@ -95,6 +96,17 @@
 #define ADRENO_X1_85_UCHE_CLIENT_PF           (0x0e19u * 4u)
 #define ADRENO_X1_85_TPL1_NC_MODE_CNTL         (0xb604u * 4u)
 #define ADRENO_X1_85_SP_NC_MODE_CNTL           (0xae02u * 4u)
+#define ADRENO_X1_85_RB_NC_MODE_CNTL           (0x8e08u * 4u)
+#define ADRENO_X1_85_UCHE_MODE_CNTL            (0x0e01u * 4u)
+#define ADRENO_X1_85_GRAS_NC_MODE_CNTL         (0x8602u * 4u)
+#define ADRENO_X1_85_CP_APERTURE_CNTL_HOST     (0x0a00u * 4u)
+/* X1-85 LPDDR5: highest bank bit 16 (encoded as 16-13), 32-byte
+ * minimum access, AMSBC + RGB565 prediction, UAV flag prediction = 2. */
+#define ADRENO_X1_85_RB_NC_MODE_BOOT           0x00000816u
+#define ADRENO_X1_85_TPL1_NC_MODE_BOOT         0x00000006u
+#define ADRENO_X1_85_SP_NC_MODE_BOOT           0x00000026u
+#define ADRENO_X1_85_UCHE_MODE_BOOT            0x00600000u
+#define ADRENO_X1_85_GRAS_NC_MODE_BOOT         0x00000060u
 #define ADRENO_X1_85_CP_DBG_ECO_CNTL           (0x0843u * 4u)
 #define ADRENO_X1_85_UCHE_WRITE_THRU_BASE    (0x0e07u * 4u)
 #define ADRENO_X1_85_UCHE_TRAP_BASE          (0x0e09u * 4u)
@@ -173,12 +185,23 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
 int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
                                       uint64_t pwrup_record_iova);
 
+/* Requires platform-resident secure zap support; caller must bound the
+ * submission and verify SECVID_TRUST_CNTL before accepting its result. */
+int adreno_x1_85_emit_nonsecure_transition(gpu_command_ring *ring);
+
 /* Emits a direct CP memory write after CP_ME_INIT.  This is deliberately
  * graphics-independent: its completion proves that normal ring packets can
  * reach a mapped system-memory destination before a render submission does. */
 int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                                       uint64_t destination_iova,
                                       uint32_t value);
+
+/* Copies one 32-bit word between two already-mapped GPU virtual addresses.
+ * This is a kernel-only diagnostic primitive used to read an RT pixel back
+ * into the private completion page after a completed cache flush. */
+int adreno_x1_85_emit_cp_memory_copy_u32(gpu_command_ring *ring,
+                                         uint64_t destination_iova,
+                                         uint64_t source_iova);
 
 /* Emits an A7xx RB_DONE_TS event into the private completion allocation.
  * Unlike CP_WAIT_FOR_IDLE, this records completion of actual RB work.  The
@@ -187,6 +210,25 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
 int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
                                     uint64_t destination_iova,
                                     uint32_t value);
+
+/* Takes one A7xx VPC primitive-counter snapshot.  The destination receives
+ * the first stream's two 64-bit values in Mesa's order: primitives written,
+ * then primitives generated.  This is a kernel-only diagnostic boundary;
+ * it accepts only the private, already mapped completion allocation.  Pass
+ * `final_snapshot` for the post-draw sample so the helper also performs the
+ * Mesa-required idle/cache-clean sequence before the CPU observes it. */
+int adreno_x1_85_emit_primitive_count_snapshot(gpu_command_ring *ring,
+                                                uint64_t destination_iova,
+                                                uint8_t final_snapshot);
+
+/* Source-backed CP_REG_TO_MEM diagnostic.  The register offset is a dword
+ * register address (as in a6xx.xml) and the destination must be a private
+ * mapped kernel buffer.  It is used to prove context state reached hardware
+ * before diagnosing shader execution. */
+int adreno_x1_85_emit_register_snapshot(gpu_command_ring *ring,
+                                        uint32_t register_dword_offset,
+                                        uint32_t register_count,
+                                        uint64_t destination_iova);
 
 /* Emits a compact visible triangle made of CP memory writes into an already
  * mapped XRGB/BGRX scanout.  This verifies CP-to-scanout writes; it is not a

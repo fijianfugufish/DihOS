@@ -11,6 +11,10 @@
 volatile uint64_t g_aa64_probe_active = 0u;
 volatile uint64_t g_aa64_probe_faulted = 0u;
 volatile uint64_t g_aa64_probe_resume_elr = 0u;
+/* Retain the requested access separately from FAR.  FAR tells us what the
+ * CPU ultimately addressed, while this tells us which guarded caller asked
+ * for it after the exception path has recovered. */
+volatile uint64_t g_aa64_probe_target_address = 0u;
 volatile uint64_t g_aa64_probe_last_esr = 0u;
 volatile uint64_t g_aa64_probe_last_far = 0u;
 volatile uint64_t g_aa64_probe_last_elr = 0u;
@@ -95,6 +99,9 @@ void aa64_exception_dispatch(const aa64_fault_frame *f)
     extern const boot_info *k_bootinfo_ptr;
     int have_source = k_bootinfo_ptr &&
         kcrash_map_lookup(f->elr, k_bootinfo_ptr->kernel_base_phys, &source) == 0;
+    /* Persist the original exception before attempting the graphical report. */
+    aa64_terminal_panic_report(f, &source, have_source);
+    terminal_flush_log();
     kgfx_panic_begin((kcolor){8,45,120});
     if (g_aa64_panic_font) {
         int x = 56;
@@ -123,8 +130,7 @@ void aa64_exception_dispatch(const aa64_fault_frame *f)
         }
     }
     kgfx_panic_present();
-    aa64_terminal_panic_report(f, &source, have_source);
-    terminal_flush_log(); aa64_exception_panic();
+    aa64_exception_panic();
 }
 
 void aa64_exception_panic(void)
@@ -145,6 +151,17 @@ __attribute__((naked)) void aa64_sync_current_el_sp0(void)
 __attribute__((naked)) void aa64_sync_current_el_spx(void)
 {
     __asm__ __volatile__(
+        /* A guarded read is allowed to fault, but its caller is ordinary C
+         * code.  Preserve every GPR this fast path uses before collecting
+         * syndrome data; returning with x0-x7 clobbered corrupts the caller's
+         * live variables and used to turn a recovered MMIO fault into a
+         * terminal-buffer scribble.  The guarded accesses run with a known
+         * valid kernel stack, unlike the fatal-panic path below. */
+        "sub  sp, sp, #64\n"
+        "stp  x0, x1, [sp, #0]\n"
+        "stp  x2, x3, [sp, #16]\n"
+        "stp  x4, x5, [sp, #32]\n"
+        "stp  x6, x7, [sp, #48]\n"
         "mrs x0, esr_el1\n"
         "mrs x1, far_el1\n"
         "mrs x2, elr_el1\n"
@@ -166,6 +183,16 @@ __attribute__((naked)) void aa64_sync_current_el_spx(void)
         "ldr  x6, [x5]\n"
         "cbz  x6, 9f\n"
 
+        /* Recover only the probed instruction, never a fault in the panic
+         * renderer, logging, or another CPU's unrelated code. All probes put
+         * their resume label immediately after the four-byte instruction. */
+        "adrp x7, g_aa64_probe_resume_elr\n"
+        "add  x7, x7, :lo12:g_aa64_probe_resume_elr\n"
+        "ldr  x6, [x7]\n"
+        "sub  x6, x6, #4\n"
+        "cmp  x2, x6\n"
+        "b.ne 9f\n"
+
         "mov  x6, #1\n"
         "adrp x7, g_aa64_probe_faulted\n"
         "add  x7, x7, :lo12:g_aa64_probe_faulted\n"
@@ -175,9 +202,19 @@ __attribute__((naked)) void aa64_sync_current_el_spx(void)
         "add  x7, x7, :lo12:g_aa64_probe_resume_elr\n"
         "ldr  x6, [x7]\n"
         "msr  elr_el1, x6\n"
+        "ldp  x0, x1, [sp, #0]\n"
+        "ldp  x2, x3, [sp, #16]\n"
+        "ldp  x4, x5, [sp, #32]\n"
+        "ldp  x6, x7, [sp, #48]\n"
+        "add  sp, sp, #64\n"
         "eret\n"
 
         "9:\n"
+        "ldp  x0, x1, [sp, #0]\n"
+        "ldp  x2, x3, [sp, #16]\n"
+        "ldp  x4, x5, [sp, #32]\n"
+        "ldp  x6, x7, [sp, #48]\n"
+        "add  sp, sp, #64\n"
         "b aa64_exception_common\n");
 }
 
@@ -323,6 +360,7 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
     }
 
     g_aa64_probe_faulted = 0u;
+    g_aa64_probe_target_address = addr;
     g_aa64_probe_active = 1u;
 
     __asm__ __volatile__(
@@ -350,6 +388,8 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
         : "r"(&g_aa64_probe_resume_elr), "r"(addr)
         : "memory");
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"
@@ -368,6 +408,8 @@ int asm_aa64_try_read32(uint64_t addr, uint32_t *out_value)
             terminal_print_inline_hex64(g_aa64_probe_last_esr);
             terminal_print(" far=");
             terminal_print_inline_hex64(g_aa64_probe_last_far);
+            terminal_print(" requested=");
+            terminal_print_inline_hex64(g_aa64_probe_target_address);
             terminal_print(" elr=");
             terminal_print_inline_hex64(g_aa64_probe_last_elr);
         }
@@ -433,6 +475,8 @@ int asm_aa64_try_write32(uint64_t addr, uint32_t value)
         : "r"(&g_aa64_probe_resume_elr), "r"(value), "r"(addr)
         : "memory");
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"
@@ -519,6 +563,8 @@ int asm_aa64_try_hvc(uint32_t immediate,
             : "x9", "x10", "memory");
     }
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"
@@ -597,6 +643,8 @@ int asm_aa64_try_smc(uint32_t immediate,
             : "x9", "x10", "memory");
     }
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"
@@ -637,6 +685,8 @@ int asm_aa64_try_smc6(uint32_t immediate,
     register uint64_t r3 __asm__("x3") = x3 ? *x3 : 0u;
     register uint64_t r4 __asm__("x4") = x4 ? *x4 : 0u;
     register uint64_t r5 __asm__("x5") = x5 ? *x5 : 0u;
+    register uint64_t r6 __asm__("x6") = 0u;
+    register uint64_t r7 __asm__("x7") = 0u;
 
     g_aa64_probe_faulted = 0u;
     g_aa64_probe_active = 1u;
@@ -661,7 +711,7 @@ int asm_aa64_try_smc6(uint32_t immediate,
             "smc #0\n"
             "1:\n"
             : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4),
-              "+r"(r5)
+              "+r"(r5), "+r"(r6), "+r"(r7)
             :
             : "x9", "x10", "memory");
     }
@@ -675,11 +725,13 @@ int asm_aa64_try_smc6(uint32_t immediate,
             "smc #1\n"
             "1:\n"
             : "+r"(r0), "+r"(r1), "+r"(r2), "+r"(r3), "+r"(r4),
-              "+r"(r5)
+              "+r"(r5), "+r"(r6), "+r"(r7)
             :
             : "x9", "x10", "memory");
     }
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"
@@ -742,6 +794,8 @@ int asm_aa64_try_hv_set_vpreg(uint32_t reg,
         :
         : "x9", "x10", "memory");
 
+    /* Disarm before restoring interrupts or entering any diagnostic code. */
+    g_aa64_probe_active = 0u;
     __asm__ __volatile__(
         "msr vbar_el1, %0\n"
         "msr daif, %1\n"

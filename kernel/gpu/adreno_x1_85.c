@@ -3,17 +3,20 @@
 #include "terminal/terminal_api.h"
 
 static const gpu_firmware_file g_adreno_x1_85_firmware[] = {
-    {"gen70500_gmu.bin", GPU_FIRMWARE_GMU, 1u, 81312u, 0u},
+    {"upstream/gen70500_gmu.bin", GPU_FIRMWARE_GMU, 1u, 81312u, 0u},
     /* The SQE file has a four-byte container header.  Stage its payload at
      * the naturally aligned instruction-buffer base, as the upstream driver
      * does, rather than making CP fetch that header. */
-    {"gen70500_sqe.fw", GPU_FIRMWARE_SQE, 1u, 77332u, 4u},
-    {"gen70500_zap.mbn", GPU_FIRMWARE_SECURE, 1u, 12088u, 0u},
+    {"upstream/gen70500_sqe.fw", GPU_FIRMWARE_SQE, 1u, 77332u, 4u},
+    /* This machine's Lenovo-signed zap, staged from its active GPU package.
+     * The generic reference-board signature is not interchangeable with OEM
+     * signing. Do not silently fall back to the generic blob. */
+    {"oem/qcdxkmsuc8380.mbn", GPU_FIRMWARE_SECURE, 1u, 12088u, 0u},
 };
 
 static const gpu_firmware_manifest g_adreno_x1_85_manifest = {
     "adreno-x1-85",
-    "0:/OS/Firmware/adreno-x1-85/upstream",
+    "0:/OS/Firmware/adreno-x1-85",
     g_adreno_x1_85_firmware,
     (uint32_t)(sizeof(g_adreno_x1_85_firmware) / sizeof(g_adreno_x1_85_firmware[0])),
 };
@@ -765,6 +768,52 @@ static const adreno_x1_85_reg_value g_adreno_x1_85_hwcg[] = {
     {0x00119u * 4u, 0x00000111u}, {0x0011au * 4u, 0x00000555u},
 };
 
+static int adreno_x1_85_prepare_memory_layout(const gpu_mmio_window *gfx)
+{
+    /* Register encodings: Mesa a6xx.xml; X1-85 bank bit: Mesa's device
+     * profile. The host (not an unprivileged shader stream) owns NC setup.
+     * All memory clients must agree, even when the image itself is linear
+     * and UBWC is disabled. Do not inherit the Windows/firmware values.
+     * See Linux a6xx_set_ubwc_config for the corresponding HW sequence. */
+    static const adreno_x1_85_reg_value layout[] = {
+        {ADRENO_X1_85_RB_NC_MODE_CNTL, ADRENO_X1_85_RB_NC_MODE_BOOT},
+        {ADRENO_X1_85_TPL1_NC_MODE_CNTL, ADRENO_X1_85_TPL1_NC_MODE_BOOT},
+        {ADRENO_X1_85_SP_NC_MODE_CNTL, ADRENO_X1_85_SP_NC_MODE_BOOT},
+        {ADRENO_X1_85_UCHE_MODE_CNTL, ADRENO_X1_85_UCHE_MODE_BOOT},
+    };
+    for (uint32_t i = 0u; i < sizeof(layout) / sizeof(layout[0]); ++i)
+    {
+        uint32_t before, after;
+        if (gpu_mmio_try_read32(gfx, layout[i].offset, &before) != 0 ||
+            adreno_x1_85_write_host_state(gfx, layout[i].offset, layout[i].value) ||
+            gpu_mmio_try_read32(gfx, layout[i].offset, &after) != 0)
+            return -1;
+        terminal_print("[K:GPU] NC layout register/before/after/expected=");
+        terminal_print_inline_hex64(layout[i].offset / 4u);
+        terminal_print_inline_hex64(before);
+        terminal_print_inline_hex64(after);
+        terminal_print_inline_hex64(layout[i].value);
+        terminal_flush_log();
+    }
+    /* GRAS has separate BR and BV copies. Always restore the host aperture,
+     * including on a guarded MMIO failure. Never leave subsequent accesses
+     * directed at only one rendering pipe. */
+    for (uint32_t pipe = 1u; pipe <= 2u; ++pipe)
+    {
+        int rc = adreno_x1_85_write_host_state(
+            gfx, ADRENO_X1_85_CP_APERTURE_CNTL_HOST, pipe << 12);
+        if (!rc)
+            rc = adreno_x1_85_write_host_state(gfx,
+                ADRENO_X1_85_GRAS_NC_MODE_CNTL, ADRENO_X1_85_GRAS_NC_MODE_BOOT);
+        if (rc)
+        {
+            adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_CP_APERTURE_CNTL_HOST, 0u);
+            return -2;
+        }
+    }
+    return adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_CP_APERTURE_CNTL_HOST, 0u);
+}
+
 int adreno_x1_85_prepare_cp_host(const gpu_mmio_window *gfx)
 {
     uint32_t rb_cmp_dbg;
@@ -906,6 +955,9 @@ int adreno_x1_85_prepare_cp_host(const gpu_mmio_window *gfx)
                                       ADRENO_X1_85_RBBM_INT_MASK_BOOT))
         return -6;
 
+    if (adreno_x1_85_prepare_memory_layout(gfx) != 0)
+        return -12;
+
     if (adreno_x1_85_write_host_state(gfx, ADRENO_X1_85_CP_PROTECT_CNTL,
                                       0x0000000bu))
         return -7;
@@ -988,7 +1040,8 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
     /* struct cpu_gpu_lock starts with three request/turn words followed by
      * u8 ifpc_list_len, u8 preemption_list_len and u16 dynamic_list_len.
      * The lists themselves hold (register-index, value) pairs. */
-    if (!gfx || !record || !record->cpu || record->size_bytes < 512u)
+    /* 4 header + 58 IFPC pairs + 14 power-up pairs + 2 pipe triplets. */
+    if (!gfx || !record || !record->cpu || record->size_bytes < 616u)
         return -1;
     words = (uint32_t *)record->cpu;
     for (uint32_t i = 0u; i < record->size_bytes / sizeof(*words); ++i)
@@ -1011,6 +1064,12 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
 
         if (gpu_mmio_try_read32(gfx, ifpc_readback_regs[i], &value) != 0)
             return -2;
+        /* Restore our programmed layout, not a potentially masked host
+         * readback. The readbacks are reported during host initialization. */
+        if (ifpc_readback_regs[i] == ADRENO_X1_85_TPL1_NC_MODE_CNTL)
+            value = ADRENO_X1_85_TPL1_NC_MODE_BOOT;
+        if (ifpc_readback_regs[i] == ADRENO_X1_85_SP_NC_MODE_CNTL)
+            value = ADRENO_X1_85_SP_NC_MODE_BOOT;
         words[4u + ifpc_pairs * 2u] = ifpc_readback_regs[i] / 4u;
         words[5u + ifpc_pairs * 2u] = value;
         ++ifpc_pairs;
@@ -1046,6 +1105,8 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
             ADRENO_X1_85_UCHE_GMEM_RANGE_MAX,
             ADRENO_X1_85_UCHE_GMEM_RANGE_MAX + 4u,
             ADRENO_X1_85_UCHE_CACHE_WAYS,
+            ADRENO_X1_85_UCHE_MODE_CNTL,
+            ADRENO_X1_85_RB_NC_MODE_CNTL,
             ADRENO_X1_85_RB_CMP_DBG_ECO_CNTL,
             ADRENO_X1_85_UCHE_GBIF_GX_CONFIG,
             ADRENO_X1_85_UCHE_CLIENT_PF,
@@ -1058,6 +1119,10 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
 
             if (gpu_mmio_try_read32(gfx, pwrup_regs[i], &value) != 0)
                 return -4;
+            if (pwrup_regs[i] == ADRENO_X1_85_UCHE_MODE_CNTL)
+                value = ADRENO_X1_85_UCHE_MODE_BOOT;
+            if (pwrup_regs[i] == ADRENO_X1_85_RB_NC_MODE_CNTL)
+                value = ADRENO_X1_85_RB_NC_MODE_BOOT;
             words[4u + (ifpc_pairs + pwrup_pairs) * 2u] =
                 pwrup_regs[i] / 4u;
             words[5u + (ifpc_pairs + pwrup_pairs) * 2u] = value;
@@ -1066,7 +1131,16 @@ int adreno_x1_85_build_cp_pwrup_record(const gpu_mmio_window *gfx,
     }
     if (ifpc_pairs > 0xffu || pwrup_pairs > 0xffu)
         return -4;
-    words[3] = ifpc_pairs | (pwrup_pairs << 8);
+    /* Dynamic entries carry (pipe aperture, register index, value), unlike
+     * the static pairs above. Preserve GRAS bank layout on both pipes. */
+    for (uint32_t pipe = 1u; pipe <= 2u; ++pipe)
+    {
+        const uint32_t base = 4u + (ifpc_pairs + pwrup_pairs) * 2u + (pipe - 1u) * 3u;
+        words[base] = pipe << 12;
+        words[base + 1u] = ADRENO_X1_85_GRAS_NC_MODE_CNTL / 4u;
+        words[base + 2u] = ADRENO_X1_85_GRAS_NC_MODE_BOOT;
+    }
+    words[3] = ifpc_pairs | (pwrup_pairs << 8) | (2u << 16);
     gpu_buffer_prepare_for_device(record);
     return 0;
 }
@@ -1085,6 +1159,14 @@ static uint32_t adreno_pkt7(uint32_t opcode, uint32_t count)
            (adreno_packet_parity(count) << 15) |
            ((opcode & 0x7fu) << 16) |
            (adreno_packet_parity(opcode) << 23);
+}
+
+static uint32_t adreno_pkt4(uint32_t register_dword, uint32_t count)
+{
+    return 0x40000000u | count |
+           (adreno_packet_parity(count) << 7) |
+           ((register_dword & 0x3ffffu) << 8) |
+           (adreno_packet_parity(register_dword) << 27);
 }
 
 int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
@@ -1112,6 +1194,21 @@ int adreno_x1_85_emit_minimal_cp_init(gpu_command_ring *ring,
                               sizeof(words) / sizeof(words[0]));
 }
 
+int adreno_x1_85_emit_nonsecure_transition(gpu_command_ring *ring)
+{
+    /* Standard Gen7 CP transition (adreno_pm4.xml). The firmware performs
+     * the secure handoff; no direct write of the protected trust register.
+     * WFI/WFM keeps subsequent diagnostics after its completion. */
+    const uint32_t words[] = {
+        adreno_pkt7(0x66u, 1u), 0u,
+        adreno_pkt7(0x26u, 0u),
+        adreno_pkt7(0x13u, 0u),
+    };
+    if (!ring)
+        return -1;
+    return gpu_ring_emit_many(ring, words, sizeof(words) / sizeof(words[0]));
+}
+
 int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                                       uint64_t destination_iova,
                                       uint32_t value)
@@ -1127,6 +1224,29 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
     words[1] = (uint32_t)destination_iova;
     words[2] = (uint32_t)(destination_iova >> 32);
     words[3] = value;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
+int adreno_x1_85_emit_cp_memory_copy_u32(gpu_command_ring *ring,
+                                         uint64_t destination_iova,
+                                         uint64_t source_iova)
+{
+    /* Mesa emits CP_MEM_TO_MEM (opcode 0x73) as control, 64-bit destination,
+     * then 64-bit source.  A zero control word selects a plain 32-bit copy;
+     * this executes after the preceding CP_WAIT_FOR_IDLE/cache clean in the
+     * direct-sysmem finish path. */
+    uint32_t words[6];
+
+    if (!ring || !destination_iova || !source_iova ||
+        (destination_iova & 3u) || (source_iova & 3u))
+        return -1;
+    words[0] = adreno_pkt7(0x73u, 5u); /* CP_MEM_TO_MEM */
+    words[1] = 0u;
+    words[2] = (uint32_t)destination_iova;
+    words[3] = (uint32_t)(destination_iova >> 32);
+    words[4] = (uint32_t)source_iova;
+    words[5] = (uint32_t)(source_iova >> 32);
     return gpu_ring_emit_many(ring, words,
                               sizeof(words) / sizeof(words[0]));
 }
@@ -1149,6 +1269,60 @@ int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
     words[2] = (uint32_t)destination_iova;
     words[3] = (uint32_t)(destination_iova >> 32);
     words[4] = value;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
+int adreno_x1_85_emit_primitive_count_snapshot(gpu_command_ring *ring,
+                                                uint64_t destination_iova,
+                                                uint8_t final_snapshot)
+{
+    uint32_t words[8];
+    uint32_t count = 5u;
+
+    /* This is Mesa's A6XX/A7XX transform-feedback query mechanism: VPC's
+     * counter event writes four stream slots beginning at this 32-byte
+     * aligned base.  DihOS reads only stream zero's first pair (written,
+     * generated), but reserves the whole 64-byte hardware result range. */
+    if (!ring || !destination_iova || (destination_iova & 31u))
+        return -1;
+    words[0] = adreno_pkt4(0x9218u, 2u); /* VPC_SO_QUERY_BASE lo/hi */
+    words[1] = (uint32_t)destination_iova;
+    words[2] = (uint32_t)(destination_iova >> 32);
+    words[3] = adreno_pkt7(0x46u, 1u);  /* CP_EVENT_WRITE7 */
+    words[4] = 0x09u;                   /* WRITE_PRIMITIVE_COUNTS */
+    if (final_snapshot)
+    {
+        /* Match Mesa's end-query ordering: make the VPC write complete, then
+         * clean UCHE so an EL1 cache invalidate observes the DMA result. */
+        words[5] = adreno_pkt7(0x26u, 0u); /* CP_WAIT_FOR_IDLE */
+        words[6] = adreno_pkt7(0x46u, 1u); /* CP_EVENT_WRITE7 */
+        words[7] = 0x31u;                 /* CACHE_CLEAN on A7xx */
+        count = 8u;
+    }
+    return gpu_ring_emit_many(ring, words, count);
+}
+
+int adreno_x1_85_emit_register_snapshot(gpu_command_ring *ring,
+                                        uint32_t register_dword_offset,
+                                        uint32_t register_count,
+                                        uint64_t destination_iova)
+{
+    uint32_t words[4];
+
+    /* CP_REG_TO_MEM's first payload encodes a raw register offset in bits
+     * 0..17 and the dword count in bits 18..29.  Mesa uses this packet on
+     * A7xx for query snapshots; this narrow wrapper is deliberately limited
+     * to a small, kernel-selected consecutive range. */
+    if (!ring || !destination_iova || (destination_iova & 3u) ||
+        register_dword_offset > 0x3ffffu || !register_count ||
+        register_count > 0xfffu ||
+        register_dword_offset > 0x3ffffu - (register_count - 1u))
+        return -1;
+    words[0] = adreno_pkt7(0x3eu, 3u); /* CP_REG_TO_MEM */
+    words[1] = register_dword_offset | (register_count << 18);
+    words[2] = (uint32_t)destination_iova;
+    words[3] = (uint32_t)(destination_iova >> 32);
     return gpu_ring_emit_many(ring, words,
                               sizeof(words) / sizeof(words[0]));
 }
@@ -1270,11 +1444,14 @@ int adreno_x1_85_emit_cp_constant_ubo(gpu_command_ring *ring,
         return -2;
 
     header = ubo_index | (2u << 14) | (state_block << 18) | (1u << 22);
-    /* Mesa's A6XX_UBO_DESC encodes the vec4 range in the high dword.  The
-     * first DihOS Mesart arena is below 4 GiB, so no descriptor size bits can
-     * overlap an address-high field; future high-address allocators must add
-     * the generated field masks here rather than widening this contract. */
-    descriptor = source_gpu_va | ((uint64_t)size_vec4s << 32);
+    /* A6XX_UBO_DESC is not simply { address, size }.  Its high dword is
+     * BASE_HI in bits 32..48 and SIZE (in vec4 units) in bits 49..63.  The
+     * former encoding put SIZE at bit 32, which selected an invalid high
+     * address and a zero-length UBO.  That lets the CP retire the draw while
+     * the shaders read no constant pool, collapsing the GLSL triangle before
+     * rasterization.  The admitted arena remains below 4 GiB, but preserve
+     * the real descriptor layout for future higher GPU VAs as well. */
+    descriptor = source_gpu_va | ((uint64_t)size_vec4s << 49);
     if (gpu_ring_emit(ring, adreno_pkt7(opcode, 5u)) != 0 ||
         gpu_ring_emit(ring, header) != 0 || gpu_ring_emit(ring, 0u) != 0 ||
         gpu_ring_emit(ring, 0u) != 0 ||
@@ -1325,7 +1502,7 @@ int adreno_x1_85_emit_non_context_regs(
 
 int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring)
 {
-    uint32_t words[4];
+    uint32_t words[6];
 
     if (!ring)
         return -1;
@@ -1336,11 +1513,17 @@ int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring)
      * fd6_draw/Turnip direct draw path.  Selecting IGNORE_VISIBILITY here
      * leaves the A7xx render backend without the direct-pass visibility
      * contract even though CP consumes the packet. */
-    words[0] = adreno_pkt7(0x38u, 3u); /* CP_DRAW_INDX_OFFSET */
-    words[1] = 4u | (2u << 6) | (1u << 8);
+    /* CP state survives display firmware and prior contexts.  In particular,
+     * a failing inherited draw predicate makes CP consume a draw and its
+     * following RB_DONE event while launching no raster work.  Normal Mesa
+     * contexts own this state; DihOS must establish it explicitly. */
+    words[0] = adreno_pkt7(0x19u, 1u); /* CP_DRAW_PRED_ENABLE_GLOBAL */
+    words[1] = 0u;                     /* predication disabled */
+    words[2] = adreno_pkt7(0x38u, 3u); /* CP_DRAW_INDX_OFFSET */
+    words[3] = 4u | (2u << 6) | (1u << 8);
                                            /* TRI list, auto index, use VSC */
-    words[2] = 1u;
-    words[3] = 3u;
+    words[4] = 1u;
+    words[5] = 3u;
     return gpu_ring_emit_many(ring, words,
                               sizeof(words) / sizeof(words[0]));
 }

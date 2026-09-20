@@ -24,6 +24,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
+$defaultPrivateKeyPath = Join-Path $env:USERPROFILE 'Documents\DihOS Keys\mesart-development-p256-private.hex'
+# When this script is launched through `powershell -File`, PowerShell expands
+# @('vert.mir3', 'frag.mir3') before binding this child script.  With the
+# documented command line that can land the second MIR3 argument in the
+# earlier PrivateKeyPath parameter.  Recover that unambiguously rather than
+# trying to read a shader as a signing key.
+if ([IO.Path]::GetExtension($PrivateKeyPath) -ieq '.mir3') {
+  $KernelShaderSourcePath = @($KernelShaderSourcePath) + @($PrivateKeyPath)
+  $PrivateKeyPath = $defaultPrivateKeyPath
+}
 $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
 $clang = Join-Path $llvm 'clang.exe'
 $ld = Join-Path $llvm 'ld.lld.exe'
@@ -184,7 +194,18 @@ if ($LASTEXITCODE) { throw 'Could not link the Mesart EL0 stub.' }
 
 $shaderBundleArray = $shaderBundlePaths.ToArray()
 $pipelineBundleArray = $pipelineBundlePaths.ToArray()
-& $signer -BundleRoot $bundleDir -PrivateKeyPath $PrivateKeyPath -RendererPath 'renderer.elf' -RuntimeAbi 1 -KernelShaderPath $shaderBundleArray -KernelPipelinePath $pipelineBundleArray
+# Splat arrays into the PowerShell script call.  A plain command invocation
+# can expand an array and shift the remaining positional parameters (which
+# made the signer read a non-key file when two MIR3 files were supplied).
+$signerArgs = @{
+  BundleRoot = $bundleDir
+  PrivateKeyPath = $PrivateKeyPath
+  RendererPath = 'renderer.elf'
+  RuntimeAbi = 1
+  KernelShaderPath = $shaderBundleArray
+  KernelPipelinePath = $pipelineBundleArray
+}
+& $signer @signerArgs
 if ($LASTEXITCODE) { throw 'Could not sign the Mesart runtime bundle.' }
 Write-Host "Kernel MIR3 artifacts signed: $($shaderBundleArray.Count) [$($shaderBundleArray -join ', ')]" -ForegroundColor Cyan
 Write-Host "Kernel MPIP artifacts signed: $($pipelineBundleArray.Count) [$($pipelineBundleArray -join ', ')]" -ForegroundColor Cyan

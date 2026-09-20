@@ -6,6 +6,8 @@
 #include "hardware_probes/acpi_probe_pci_lookup.h"
 #include "terminal/terminal_api.h"
 #include "bootinfo.h"
+#include "asm/asm.h"
+#include "memory/aarch64_attr_scan.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -196,6 +198,58 @@ static int start_level_from_tcr(void)
     return (int)(4u - levels);
 }
 
+/* Walk only firmware-owned active tables; leaf AttrIndx bits, not MAIR's
+ * byte value, decide whether a slot is unused. Bound malformed/huge trees. */
+static int read_attr_descriptor(uint64_t phys, uint64_t *value)
+{
+    uint64_t va = (uint64_t)(uintptr_t)pmem_phys_to_virt(phys);
+    uint32_t lo, hi;
+    if (!va || asm_aa64_try_read32(va, &lo) || asm_aa64_try_read32(va+4, &hi)) {
+        terminal_error("Shared RAM attribute scan: unreadable table descriptor at");
+        terminal_print_inline_hex64(phys);
+        return -1;
+    }
+    *value = lo | ((uint64_t)hi << 32);
+    return 0;
+}
+
+int aarch64_mmu_prepare_normal_nc(void)
+{
+    uint64_t tcr = read_tcr_el1(), mair = read_mair_el1(), ttbr1;
+    uint32_t used = 1u << ATTRIDX_DEVICE, budget = 8192;
+    unsigned level, entries;
+    if (!tcr_looks_4k() || a64_attr_root_shape(tcr & 63u, &level, &entries)) return -1;
+    for (unsigned i = 0; i < 8; ++i)
+        if (i != ATTRIDX_DEVICE && ((mair >> (i*8u)) & 255u) == 0x44u) return 0;
+    /* TTBR root alignment follows the actual root size, not always 4 KiB. */
+    uint64_t root_mask = 0x0000ffffffffffffull & ~((uint64_t)entries*8-1);
+    terminal_print("Shared RAM attribute scan root entries=");
+    terminal_print_inline_hex64(entries);
+    if (a64_attr_scan(read_ttbr0_el1() & root_mask, level, entries,
+                      &used, &budget, read_attr_descriptor)) return -2;
+    __asm__ __volatile__("mrs %0, ttbr1_el1" : "=r"(ttbr1));
+    if (!(tcr & (1ull << 23)) && (ttbr1 & A64_ADDR_MASK)) {
+        if (((tcr >> 30) & 3u) != 2u ||
+            a64_attr_root_shape((tcr >> 16) & 63u, &level, &entries)) return -3;
+        root_mask = 0x0000ffffffffffffull & ~((uint64_t)entries*8-1);
+        if (a64_attr_scan(ttbr1 & root_mask, level, entries,
+                          &used, &budget, read_attr_descriptor)) return -3;
+    }
+    for (unsigned i = 0; i < 8; ++i) {
+        if (used & (1u << i)) continue;
+        uint64_t next = (mair & ~(255ull << (i*8u))) | (0x44ull << (i*8u));
+        write_mair_el1(next);
+        tlbi_all();
+        terminal_print("AArch64 shared RAM: reserved unused Normal-NC MAIR slot=");
+        terminal_print_inline_hex64(i);
+        terminal_print("AArch64 shared RAM: MAIR=");
+        terminal_print_inline_hex64(read_mair_el1());
+        return read_mair_el1() == next ? 0 : -4;
+    }
+    terminal_error("AArch64 shared RAM: no unused MAIR slot");
+    return -5;
+}
+
 static uint32_t level_index(uint64_t va, int level)
 {
     uint32_t shift = (uint32_t)(39 - (level * 9));
@@ -285,6 +339,9 @@ static uint64_t *split_existing_block_to_table(uint64_t *table, uint32_t idx, in
     for (uint32_t i = 0; i < PT_ENTRIES; ++i)
         child[i] = make_child_desc_from_block(old_desc, old_pa + ((uint64_t)i * child_size), child_level);
 
+    /* Break before make when replacing a valid block with a table. */
+    table[idx] = 0;
+    tlbi_all();
     table[idx] = make_table_desc(pmem_virt_to_phys(new_page));
     tlbi_all();
 
@@ -319,7 +376,7 @@ static uint64_t *get_or_create_next_table(uint64_t *table, uint32_t idx, int lev
     return (uint64_t *)new_page;
 }
 
-static int map_one_4k(uint64_t va, uint64_t pa, int start_level)
+static int map_one_4k_attrs(uint64_t va, uint64_t pa, int start_level, uint64_t attrs)
 {
     uint64_t *table = (uint64_t *)pmem_phys_to_virt(page_table_base_phys());
 
@@ -334,7 +391,42 @@ static int map_one_4k(uint64_t va, uint64_t pa, int start_level)
             return -2;
     }
 
-    table[level_index(va, 3)] = make_device_page_desc(pa);
+    uint32_t idx = level_index(va, 3);
+    if (table[idx] & DESC_VALID) {
+        table[idx] = 0;
+        tlbi_all();
+    }
+    table[idx] = (pa & A64_ADDR_MASK) | attrs;
+    return 0;
+}
+
+/* Shared RAM is not MMIO. Reuse an existing Normal-NC MAIR entry so other
+ * mappings/CPUs are not silently changed by assigning a new global slot. */
+int aarch64_mmu_map_normal_nc_identity(uint64_t phys, uint64_t size)
+{
+    int level = start_level_from_tcr();
+    uint64_t mair = read_mair_el1();
+    uint32_t index;
+    if (!phys || !size || ((phys | size) & 4095u) || phys + size < phys ||
+        !tcr_looks_4k() || level < 0 || level > 3) return -1;
+    for (index = 0; index < 8; ++index)
+        if (index != ATTRIDX_DEVICE && ((mair >> (index * 8u)) & 255u) == 0x44u)
+            break;
+    terminal_print("Shared RAM Normal-NC map MAIR/PA/bytes=");
+    terminal_print_inline_hex64(mair);
+    terminal_print_inline_hex64(phys);
+    terminal_print_inline_hex64(size);
+    if (index == 8) {
+        terminal_error("No existing Normal-NC MAIR entry; shared RAM mapping withheld");
+        return -2;
+    }
+    uint64_t attrs = DESC_VALID | DESC_PAGE | ((uint64_t)index << 2) |
+                     AP_RW_EL1 | (3ull << 8) | DESC_AF | DESC_PXN | DESC_UXN;
+    for (uint64_t p = phys; p < phys + size; p += 4096) {
+        int rc = map_one_4k_attrs(p, p, level, attrs);
+        if (rc) { tlbi_all(); return rc; }
+    }
+    tlbi_all();
     return 0;
 }
 
@@ -380,7 +472,7 @@ int aarch64_mmu_map_device_identity(uint64_t phys, uint64_t size)
 
     for (uint64_t p = start; p < end; p += PAGE_SIZE_4K)
     {
-        int rc = map_one_4k(p, p, start_level);
+        int rc = map_one_4k_attrs(p, p, start_level, make_device_page_desc(0));
         if (rc != 0)
         {
             terminal_print("MMIO map failed at: ");

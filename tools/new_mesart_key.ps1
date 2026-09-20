@@ -32,7 +32,10 @@ try {
 
   New-Item -ItemType Directory -Force -Path $PrivateKeyDirectory | Out-Null
   $privatePath = Join-Path $PrivateKeyDirectory ("mesart-{0}-p256-private.hex" -f $Purpose.ToLowerInvariant())
-  Set-Content -LiteralPath $privatePath -Value (ConvertTo-Hex $parameters.D) -NoNewline
+  # Explicit ASCII keeps the private scalar's on-disk representation stable
+  # across Windows PowerShell and PowerShell 7.  The packer also accepts the
+  # older UTF-16LE form so existing development keys remain usable.
+  Set-Content -LiteralPath $privatePath -Value (ConvertTo-Hex $parameters.D) -NoNewline -Encoding Ascii
 
   $headerName = if ($Purpose -eq "Development") { "mesart_development_root.h" } else { "mesart_release_root.h" }
   $macroName = if ($Purpose -eq "Development") { "MESART_DEVELOPMENT_ROOT" } else { "MESART_RELEASE_ROOT" }

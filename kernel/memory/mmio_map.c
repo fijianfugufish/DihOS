@@ -35,6 +35,26 @@ int mmio_map_device_identity(uint64_t phys, uint64_t size)
 #endif
 }
 
+int mmio_prepare_normal_nc(void)
+{
+#if defined(DIHOS_MMIO_BACKEND_AARCH64)
+    return aarch64_mmu_prepare_normal_nc();
+#else
+    return -999;
+#endif
+}
+
+int mmio_map_normal_nc_identity(uint64_t phys, uint64_t size)
+{
+#if defined(DIHOS_MMIO_BACKEND_AARCH64)
+    return aarch64_mmu_map_normal_nc_identity(phys, size);
+#else
+    (void)phys;
+    (void)size;
+    return -999;
+#endif
+}
+
 int mmio_map_pci_ecams_from_rsdp(uint64_t rsdp_phys)
 {
 #if defined(DIHOS_MMIO_BACKEND_AARCH64)

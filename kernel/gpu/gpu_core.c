@@ -9,6 +9,7 @@
 #include "gpu/gpu_iommu.h"
 #include "gpu/gpu_mmio.h"
 #include "gpu/gpu_qcom_scm.h"
+#include "gpu/gpu_zap.h"
 #include "gpu/gpu_smmu_v2.h"
 #include "gpu/gpu_ring.h"
 #include "gpu/gpu_render.h"
@@ -34,6 +35,11 @@ static gpu_buffer g_cp_completion;
 static gpu_buffer g_mesart_shader_pool;
 static gpu_buffer g_mesart_uniform_pool;
 static gpu_scanout_target g_scanout_target;
+/* Retained until GPU teardown: never release backing while DMA can refer to it. */
+static gpu_render_target g_triangle_target;
+static uint64_t g_triangle_target_iova;
+static gpu_render_target g_colour_write_probe;
+static uint64_t g_colour_write_probe_iova;
 static gpu_mmio_window g_gpu_regs_window;
 static gpu_mmio_window g_gpu_pdc_window;
 static gpu_mmio_window g_gpu_smmu_window;
@@ -106,6 +112,12 @@ static gpu_core_mesart_3d_inflight g_mesart_3d_inflight;
 #define GPU_CORE_MESART_VERTEX_UBO_OFFSET   0u
 #define GPU_CORE_MESART_FRAGMENT_UBO_OFFSET 16u
 #define GPU_CORE_MESART_DEFAULT_UBO_BYTES   16u
+/* The initial vertex proof is deliberately kernel-owned data rather than a
+ * Mesart EL0 resource.  It shares the private uniform pool only because both
+ * use the same already-mapped unprivileged GPU read transaction class. */
+#define GPU_CORE_MESART_VERTEX_BUFFER_OFFSET 0x100u
+#define GPU_CORE_MESART_VERTEX_BUFFER_BYTES   24u
+#define GPU_CORE_MESART_VERTEX_BUFFER_STRIDE  8u
 #define GPU_CORE_RENDER_SURFACE_VA_BASE 0x0000000060000000ull
 #define GPU_CORE_RENDER_SURFACE_SLOT_BYTES GPU_RENDER_MAX_SURFACE_BYTES
 #define GPU_CORE_RENDER_SURFACE_VA_END \
@@ -118,6 +130,30 @@ static gpu_core_mesart_3d_inflight g_mesart_3d_inflight;
 #define GPU_CORE_CP_BV_RPTR_OFFSET  8u
 #define GPU_CORE_CP_COMPLETION_MAGIC 0x43504F4Bu /* "CPOK" */
 #define GPU_CORE_RUNTIME_COMPLETION_MAGIC 0x52554E00u /* "RUN\0" */
+#define GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET        40u
+#define GPU_CORE_MESART_STATE_SNAPSHOT_BYTES        104u
+#define GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET      144u
+#define GPU_CORE_MESART_RT_STATE_SNAPSHOT_BYTES        80u
+#define GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET    256u
+#define GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET      304u
+#define GPU_CORE_MESART_STAGE_COUNTER_BYTES            48u
+#define GPU_CORE_MESART_RT_GPU_READBACK_OFFSET         352u
+#define GPU_CORE_MESART_CCU_SNAPSHOT_OFFSET            356u
+#define GPU_CORE_MESART_CCU_START_OFFSET               368u
+#define GPU_CORE_MESART_CCU_END_OFFSET                 408u
+#define GPU_CORE_MESART_RT_POST_DRAW_OFFSET            448u
+#define GPU_CORE_MESART_CP_WRITE_PROBE_OFFSET          528u
+#define GPU_CORE_MESART_BLIT_READBACK_OFFSET           532u
+#define GPU_CORE_MESART_UFC_START_OFFSET               536u
+#define GPU_CORE_MESART_UFC_END_OFFSET                 568u
+#define GPU_CORE_MESART_UFC_BLIT_OFFSET                600u
+#define GPU_CORE_MESART_RBBM_START_OFFSET              632u
+#define GPU_CORE_MESART_RBBM_DRAW_OFFSET               636u
+#define GPU_CORE_MESART_RBBM_BLIT_OFFSET               640u
+#define GPU_CORE_MESART_SECURE_BEGIN_OFFSET            644u
+#define GPU_CORE_MESART_SECURE_END_OFFSET              648u
+#define GPU_CORE_MESART_DIAGNOSTIC_BYTES \
+    (GPU_CORE_MESART_SECURE_END_OFFSET + 4u)
 #define GPU_CORE_MESART_3D_TIMEOUT_TICKS \
     (2u * DIHOS_TIME_TICKS_PER_SECOND)
 #define GPU_CORE_GOP_BGRX_8888       1u
@@ -548,8 +584,13 @@ static int map_staged_firmware(void)
     gpu_buffer_prepare_for_device(&g_mesart_shader_pool);
     gpu_buffer_prepare_for_device(&g_mesart_uniform_pool);
     if (g_scanout_target.buffer.cpu &&
-        gpu_iommu_map_buffer(&g_iommu_domain, &g_scanout_target.buffer,
-                             GPU_CORE_SCANOUT_IOVA) != 0)
+        /* Gen7 RB colour stores use the same unprivileged transaction class
+         * as SQ instruction fetch and UBO reads.  CP can still address this
+         * mapping from EL1, whereas a privileged-only scanout mapping lets
+         * CP's boot triangle work but drops the 3D render-target writes. */
+        gpu_iommu_map_buffer_with_attributes(
+            &g_iommu_domain, &g_scanout_target.buffer,
+            GPU_CORE_SCANOUT_IOVA, 0u) != 0)
     {
         gpu_ring_release(&g_submission_ring);
         gpu_ring_release(&g_runtime_ring);
@@ -585,6 +626,10 @@ int gpu_core_init(const boot_info *boot)
     g_primary = (gpu_device_info){0};
     gpu_scheduler_init(&g_scheduler);
     gpu_render_init();
+    g_triangle_target = (gpu_render_target){0};
+    g_triangle_target_iova = 0u;
+    g_colour_write_probe = (gpu_render_target){0};
+    g_colour_write_probe_iova = 0u;
     g_iommu_topology = (gpu_iommu_topology){0};
     g_iommu_attach_plan = (gpu_iommu_attach_plan){0};
     g_gpu_smmu_caps = (gpu_smmuv2_caps){0};
@@ -1470,6 +1515,48 @@ int gpu_core_mesart_shader_slot(uint32_t slot, gpu_buffer **out_storage,
     return 0;
 }
 
+static int gpu_core_mesart_configure_vertex_buffer(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    adreno_x1_85_3d_draw *draw, uint32_t write_values)
+{
+    const mesart_pipeline_header *reflection;
+    uint32_t *words;
+
+    if (!pipeline || !draw || !pipeline->pipeline_reflection_ready ||
+        !g_mesart_uniform_pool.cpu ||
+        g_mesart_uniform_pool.iova != GPU_CORE_MESART_UNIFORM_POOL_IOVA ||
+        GPU_CORE_MESART_VERTEX_BUFFER_OFFSET +
+            GPU_CORE_MESART_VERTEX_BUFFER_BYTES >
+                g_mesart_uniform_pool.size_bytes)
+        return -1;
+    reflection = &pipeline->reflection;
+    if (reflection->vertex_attribute_count != 1u ||
+        /* IR3 encodes GLSL location zero as VERT_ATTRIB_GENERIC0 (slot 15). */
+        reflection->vertex_attribute0_slot != 15u ||
+        reflection->vertex_attribute0_compmask != 0x3u)
+        return -2;
+    draw->vertex_buffer_gpu_va = GPU_CORE_MESART_UNIFORM_POOL_IOVA +
+                                 GPU_CORE_MESART_VERTEX_BUFFER_OFFSET;
+    draw->vertex_buffer_bytes = GPU_CORE_MESART_VERTEX_BUFFER_BYTES;
+    draw->vertex_buffer_stride = GPU_CORE_MESART_VERTEX_BUFFER_STRIDE;
+    if (!write_values)
+        return 0;
+
+    /* (-1,-1), (3,-1), (-1,3): an oversized fullscreen test triangle.
+     * Exact IEEE values test VFD independently of gl_VertexID and without
+     * accepting host-supplied geometry. */
+    words = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                         GPU_CORE_MESART_VERTEX_BUFFER_OFFSET);
+    words[0] = 0xbf800000u;
+    words[1] = 0xbf800000u;
+    words[2] = 0x40400000u;
+    words[3] = 0xbf800000u;
+    words[4] = 0xbf800000u;
+    words[5] = 0x40400000u;
+    asm_dma_clean_range(words, GPU_CORE_MESART_VERTEX_BUFFER_BYTES);
+    return 0;
+}
+
 /* The first parameterized hardware profile is deliberately fixed-data: it
  * proves Mesa's default-UBO ABI without giving an EL0 process a descriptor or
  * a GPU address.  The eventual driver-neutral resource API will replace
@@ -1580,8 +1667,11 @@ int gpu_core_render_target_iova(const gpu_render_target *target,
         g_gpu_smmu_bound_stream_count != ADRENO_X1_85_DRIVER_SID_COUNT ||
         !(g_primary.caps.flags & GPU_CAP_DMA_ISOLATED) ||
         !g_iommu_domain.root_phys ||
-        gpu_iommu_map_buffer(&g_iommu_domain, surface_buffer,
-                             gpu_va) != 0)
+        /* Render-backend targets are consumed by RB, not just by CP.  Keep
+         * their privilege attribute identical to the first scanout target so
+         * a future offscreen surface has the same valid colour-store path. */
+        gpu_iommu_map_buffer_with_attributes(&g_iommu_domain, surface_buffer,
+                                             gpu_va, 0u) != 0)
         return -6;
     gpu_iommu_domain_prepare_for_device(&g_iommu_domain);
     if (gpu_smmuv2_invalidate_context(&g_gpu_smmu_window, &g_gpu_smmu_caps,
@@ -1627,8 +1717,10 @@ int gpu_core_mesart_3d_preflight(
         .target = &target,
         .target_gpu_va = g_scanout_target.buffer.iova,
     };
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 0u) != 0)
         return -2;
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u) != 0)
+        return -3;
     /* This uses the private runtime-ring allocation as a bounded scratch
      * encoder buffer only. It never seals, binds, writes a CP pointer or
      * acquires GX, so preflight has no hardware side effect. */
@@ -1674,6 +1766,7 @@ int gpu_core_mesart_3d_kick(
     uint32_t gx_ack = 0u;
     uint32_t completion_magic;
     uint32_t completion_markers[9];
+    uint64_t scanout_probe_iova;
     uint8_t submitted = 0u;
     int rc;
 
@@ -1689,24 +1782,76 @@ int gpu_core_mesart_3d_kick(
         g_scanout_target.width < 3u || g_scanout_target.height < 3u ||
         g_scanout_target.pixel_format != GPU_CORE_GOP_BGRX_8888)
         return -1;
-    target = (gpu_render_target){
-        .surface = GPU_RENDER_EXTERNAL_SURFACE,
-        .cpu_pixels = g_scanout_target.buffer.cpu,
-        .cpu_bytes = g_scanout_target.buffer.size_bytes,
-        .width = g_scanout_target.width,
-        .height = g_scanout_target.height,
-        .stride_bytes = g_scanout_target.pitch,
-        .format = GPU_RENDER_FORMAT_BGRX8888,
-    };
+    /* A small linear render surface keeps RB writes in normal kernel RAM.
+     * Present only after the fence and CPU invalidation in poll(). */
+    if (!g_triangle_target.cpu_pixels)
+    {
+        const gpu_render_surface_desc desc = {256u, 256u,
+                                               GPU_RENDER_FORMAT_BGRX8888};
+        gpu_render_surface_handle surface;
+        if (g_scanout_target.width < desc.width ||
+            g_scanout_target.height < desc.height ||
+            gpu_render_surface_create(&desc, &surface) != 0)
+            return -2;
+        if (gpu_render_surface_target(surface, &g_triangle_target) != 0)
+            return -2;
+    }
+    if (!g_triangle_target_iova &&
+        gpu_core_render_target_iova(&g_triangle_target,
+                                    &g_triangle_target_iova) != 0)
+        return -2;
+    if (!g_colour_write_probe.cpu_pixels)
+    {
+        const gpu_render_surface_desc desc = {16u, 16u, GPU_RENDER_FORMAT_BGRX8888};
+        gpu_render_surface_handle surface;
+        if (gpu_render_surface_create(&desc, &surface) != 0 ||
+            gpu_render_surface_target(surface, &g_colour_write_probe) != 0)
+            return -2;
+    }
+    if (g_colour_write_probe.stride_bytes != 64u ||
+        g_colour_write_probe.cpu_bytes < 1024u)
+        return -2;
+    if (!g_colour_write_probe_iova &&
+        gpu_core_render_target_iova(&g_colour_write_probe,
+                                    &g_colour_write_probe_iova) != 0)
+        return -2;
+    for (uint32_t i = 0u; i < 256u; ++i)
+        ((uint32_t *)g_colour_write_probe.cpu_pixels)[i] = GPU_CORE_MESART_SCANOUT_PROBE_MARKER;
+    asm_dma_clean_range(g_colour_write_probe.cpu_pixels, 1024u);
+    target = g_triangle_target;
     draw = (adreno_x1_85_3d_draw){
         .pipeline = pipeline,
         .target = &target,
-        .target_gpu_va = g_scanout_target.buffer.iova,
+        .target_gpu_va = g_triangle_target_iova,
     };
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u) != 0)
         return -2;
-    if (adreno_x1_85_3d_validate_draw(&draw) != 0)
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u) != 0)
         return -3;
+    if (adreno_x1_85_3d_validate_draw(&draw) != 0)
+        return -4;
+    /* Keep a source-level build witness next to the first hardware draw. A
+     * failed visual test is otherwise indistinguishable from booting an older
+     * USB kernel. Revision 18 records independent VPC/TSE/RB counters around
+     * the draw, replacing the old stream-out query which cannot measure a
+     * pass with stream-out intentionally disabled. */
+    terminal_print("[K:GPU] Mesart A7xx draw-state revision=48 (Lenovo OEM zap)");
+    /* Authenticate before allowing CP's secure-mode transition. An unreadable
+     * trust register is not evidence that a secure firmware load is needed. */
+    {
+        uint32_t trust = 0u;
+        if (gpu_mmio_try_read32(&g_gpu_regs_window,
+                ADRENO_X1_85_RBBM_SECVID_TRUST_CNTL, &trust) != 0 || trust > 1u) {
+            terminal_error("[K:GPU] Draw withheld: secure-mode register unavailable");
+            terminal_flush_log();
+            return -114;
+        }
+        if (trust && gpu_zap_start(&g_firmware) != 0) {
+            terminal_error("[K:GPU] Draw withheld: zap authentication/start failed (see PAS stage above)");
+            terminal_flush_log();
+            return -114;
+        }
+    }
     sqe = gpu_firmware_find(&g_firmware, GPU_FIRMWARE_SQE);
     if (!sqe || !gpu_firmware_payload_iova(sqe))
         return -4;
@@ -1728,23 +1873,31 @@ int gpu_core_mesart_3d_kick(
         GPU_CORE_MESART_SCANOUT_PROBE_MARKER;
     g_mesart_3d_inflight.scanout_probe_changed = 0u;
     g_mesart_3d_inflight.scanout_probe_after = 0u;
+    scanout_probe_iova = g_triangle_target_iova +
+                         (uint64_t)(g_triangle_target.height / 2u) *
+                             g_triangle_target.stride_bytes +
+                         (uint64_t)(g_triangle_target.width / 2u) * 4u;
+    /* Seed every pixel: the result check measures the entire allocation. */
+    for (uint32_t i = 0u; i < target.width * target.height; ++i)
+        ((uint32_t *)target.cpu_pixels)[i] = GPU_CORE_MESART_SCANOUT_PROBE_MARKER;
     for (uint32_t probe_y = 0u; probe_y < 3u; ++probe_y)
     {
         for (uint32_t probe_x = 0u; probe_x < 3u; ++probe_x)
         {
-            uint32_t x = g_scanout_target.width / 2u + probe_x - 1u;
-            uint32_t y = g_scanout_target.height / 2u + probe_y - 1u;
-            uint8_t *pixel = (uint8_t *)g_scanout_target.buffer.cpu +
-                             (uint64_t)y * g_scanout_target.pitch +
+            uint32_t x = g_triangle_target.width / 2u + probe_x - 1u;
+            uint32_t y = g_triangle_target.height / 2u + probe_y - 1u;
+            uint8_t *pixel = (uint8_t *)g_triangle_target.cpu_pixels +
+                             (uint64_t)y * g_triangle_target.stride_bytes +
                              (uint64_t)x * 4u;
 
             *(uint32_t *)pixel = GPU_CORE_MESART_SCANOUT_PROBE_MARKER;
         }
     }
+    for (uint32_t i = 0u; i < GPU_CORE_MESART_DIAGNOSTIC_BYTES; ++i)
+        ((uint8_t *)g_cp_completion.cpu)[i] = 0u;
     for (uint32_t i = 0u; i < sizeof(completion_markers) /
                               sizeof(completion_markers[0]); ++i)
     {
-        ((uint32_t *)g_cp_completion.cpu)[i] = 0u;
         /* Each value is per-submit and distinct, so a stale cache line or a
          * partially consumed 3D ring cannot masquerade as a completion. */
         completion_markers[i] = completion_magic ^ (0x00010101u * (i + 1u));
@@ -1754,8 +1907,8 @@ int gpu_core_mesart_3d_kick(
     /* The CPU shell/desktop may have just used this framebuffer. Clean it
      * before RB renders, then invalidate it only after the RB completion
      * fence below. */
-    asm_dma_clean_range(g_scanout_target.buffer.cpu,
-                        g_scanout_target.buffer.size_bytes);
+    asm_dma_clean_range(g_triangle_target.cpu_pixels,
+                        g_triangle_target.cpu_bytes);
     if (!g_runtime_gx_lease_held)
     {
         rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
@@ -1763,7 +1916,7 @@ int gpu_core_mesart_3d_kick(
             return -5;
         g_runtime_gx_lease_held = 1u;
     }
-    if (gpu_cp_snapshot_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+    if (gpu_cp_status_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
                              &cp) != 0 || cp.hw_fault || cp.protect_status)
     {
         rc = -6;
@@ -1774,6 +1927,18 @@ int gpu_core_mesart_3d_kick(
         adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
                                            g_cp_completion.iova,
                                            completion_markers[0]) != 0 ||
+        /* CP initialization does NOT leave SECVID secure mode. Request the
+         * normal firmware-mediated transition, never force TRUST_CNTL from
+         * EL1. This relies on platform-resident zap support; staging its file
+         * alone does not authenticate it. A missing handler is bounded by
+         * the existing asynchronous timeout, with markers isolating it. */
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_MESART_SECURE_BEGIN_OFFSET,
+            0x53454330u) != 0 ||
+        adreno_x1_85_emit_nonsecure_transition(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_MESART_SECURE_END_OFFSET,
+            0x53454331u) != 0 ||
         adreno_x1_85_3d_emit_sysmem_prologue(&g_runtime_ring) != 0 ||
         adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
                                            g_cp_completion.iova + 4u,
@@ -1786,6 +1951,66 @@ int gpu_core_mesart_3d_kick(
         adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
                                            g_cp_completion.iova + 12u,
                                            completion_markers[3]) != 0 ||
+        /* Read back the state that decides whether the front end can launch
+         * this draw.  These ranges are Mesa a6xx.xml dword offsets and are
+         * intentionally diagnostic-only: shader bases, RT base, VFD system
+         * values, shader enable/instruction size, and RB render routing. */
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa81cu, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa983u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 8u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8825u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 16u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa000u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 24u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa823u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 32u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xab04u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 40u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8800u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 48u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8812u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 56u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x88e4u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 60u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa010u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 64u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa090u, 2u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 80u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa0d0u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 88u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa989u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 92u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8865u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET + 96u) != 0 ||
+        /* Keep a separate, contiguous capture of the actual RT0 attachment
+         * and FS output routing.  The previous summary established that RB
+         * ran; these exact dwords distinguish a missing store enable from a
+         * store directed at an inherited surface. */
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8820u, 8u,
+            g_cp_completion.iova + GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa98bu, 12u,
+            g_cp_completion.iova + GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET + 32u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x88e5u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_CCU_SNAPSHOT_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8e07u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_CCU_SNAPSHOT_OFFSET + 4u) != 0 ||
+        adreno_x1_85_3d_emit_stage_counter_select(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03fau, 8u,
+            g_cp_completion.iova + GPU_CORE_MESART_UFC_START_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0036u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_RBBM_START_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x035cu, 10u,
+            g_cp_completion.iova + GPU_CORE_MESART_CCU_START_OFFSET) != 0 ||
+        /* Register snapshots are pairs of low/high dwords.  VPC says whether
+         * primitive assembly happened; TSE says whether it reached
+         * rasterization; RB says whether fragments executed and stored. */
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0350u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0366u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET + 16u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03d6u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET + 32u) != 0 ||
         /* Deliberately bracket the first draw with two RB completion events.
          * The pre-draw event determines whether direct-sysmem RB completion
          * works at all; the post-draw event then isolates an actual draw/state
@@ -1797,9 +2022,52 @@ int gpu_core_mesart_3d_kick(
                                            g_cp_completion.iova + 20u,
                                            completion_markers[5]) != 0 ||
         adreno_x1_85_emit_auto_triangle_draw(&g_runtime_ring) != 0 ||
+        adreno_x1_85_3d_emit_sysmem_fini(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03fau, 8u,
+            g_cp_completion.iova + GPU_CORE_MESART_UFC_END_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0036u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_RBBM_DRAW_OFFSET) != 0 ||
+        /* Pre-draw readback cannot detect draw-time replay of stale groups.
+         * Capture exactly the same RT/fragment routing range after the draw. */
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x8820u, 8u,
+            g_cp_completion.iova + GPU_CORE_MESART_RT_POST_DRAW_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0xa98bu, 12u,
+            g_cp_completion.iova + GPU_CORE_MESART_RT_POST_DRAW_OFFSET + 32u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x035cu, 10u,
+            g_cp_completion.iova + GPU_CORE_MESART_CCU_END_OFFSET) != 0 ||
+        /* The CPU witness below can be stale on a non-coherent mapping.
+         * Read the same centre pixel through CP after the RT flush into the
+         * private coherent completion page, proving what the GPU observes. */
+        adreno_x1_85_emit_cp_memory_copy_u32(
+            &g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_MESART_RT_GPU_READBACK_OFFSET,
+            scanout_probe_iova) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0350u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0366u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET + 16u) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03d6u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET + 32u) != 0 ||
         adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
                                            g_cp_completion.iova + 24u,
                                            completion_markers[6]) != 0 ||
+        /* Only after capturing every shader result: test another allocation.
+         * CP stores establish mapping visibility; the 2D engine exercises
+         * colour writes without the signed vertex/fragment programs. */
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_colour_write_probe_iova, 0xc0dec0deu) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_MESART_CP_WRITE_PROBE_OFFSET,
+            g_colour_write_probe_iova) != 0 ||
+        adreno_x1_85_emit_solid_fill_probe(&g_runtime_ring,
+            g_colour_write_probe_iova) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03fau, 8u,
+            g_cp_completion.iova + GPU_CORE_MESART_UFC_BLIT_OFFSET) != 0 ||
+        adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0036u, 1u,
+            g_cp_completion.iova + GPU_CORE_MESART_RBBM_BLIT_OFFSET) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_MESART_BLIT_READBACK_OFFSET,
+            g_colour_write_probe_iova + 8u * 64u + 8u * 4u) != 0 ||
         adreno_x1_85_emit_rb_done_fence(&g_runtime_ring,
                                          g_cp_completion.iova + 28u,
                                          completion_markers[7]) != 0 ||
@@ -1872,7 +2140,18 @@ static int gpu_core_mesart_3d_fail(int rc)
 
     terminal_error("[K:GPU] Mesart 3D stall rc=");
     terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
-    if (gpu_cp_snapshot_read(&g_gpu_regs_window,
+    if (g_cp_completion.cpu) {
+        asm_dma_invalidate_range(g_cp_completion.cpu, GPU_CORE_MESART_DIAGNOSTIC_BYTES);
+        const uint32_t *words = (const uint32_t *)g_cp_completion.cpu;
+        terminal_print(" secure-transition begin/end=");
+        terminal_print_inline_hex64(words[GPU_CORE_MESART_SECURE_BEGIN_OFFSET / 4u]);
+        terminal_print("/");
+        terminal_print_inline_hex64(words[GPU_CORE_MESART_SECURE_END_OFFSET / 4u]);
+        if (words[GPU_CORE_MESART_SECURE_BEGIN_OFFSET / 4u] == 0x53454330u &&
+            words[GPU_CORE_MESART_SECURE_END_OFFSET / 4u] != 0x53454331u)
+            terminal_error("[K:GPU] Non-secure transition did not finish; platform zap support may be unavailable");
+    }
+    if (gpu_cp_status_read(&g_gpu_regs_window,
                              adreno_x1_85_cp_layout(), &failure_cp) == 0)
     {
         terminal_print(" CP-fault=");
@@ -1932,7 +2211,7 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
      * old busy wait while retaining the stronger proof that the draw reached
      * the render backend, rather than merely being parsed by CP. */
     asm_dma_invalidate_range(g_cp_completion.cpu,
-                             sizeof(g_mesart_3d_inflight.completion_markers));
+                             GPU_CORE_MESART_DIAGNOSTIC_BYTES);
     if (((uint32_t *)g_cp_completion.cpu)[7] !=
         g_mesart_3d_inflight.completion_markers[7])
     {
@@ -1947,18 +2226,247 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
             g_mesart_3d_inflight.completion_markers[i])
             return gpu_core_mesart_3d_fail(-101 - (int)i);
     }
+    /* CP/SMMU status alone misses GPU-side rejection of colour writes.
+     * Keep stage-specific sticky status; do not clear or alter trust state
+     * to hide an error. These RBBM bits are from Mesa's A7xx register XML. */
+    {
+        const uint32_t *words = (const uint32_t *)g_cp_completion.cpu;
+        uint32_t before = words[GPU_CORE_MESART_RBBM_START_OFFSET / 4u];
+        uint32_t draw = words[GPU_CORE_MESART_RBBM_DRAW_OFFSET / 4u];
+        uint32_t blit = words[GPU_CORE_MESART_RBBM_BLIT_OFFSET / 4u];
+        uint32_t trust = 0u;
+        uint32_t host_status = 0u;
+        uint32_t faults = 0u;
+        /* CP snapshots can return the bus's invalid-read sentinel. Never
+         * decode its set bits as hardware faults (rev41 did exactly that). */
+        if (before != 0xdeafbeadu && before != 0xffffffffu) faults |= before;
+        if (draw != 0xdeafbeadu && draw != 0xffffffffu) faults |= draw;
+        if (blit != 0xdeafbeadu && blit != 0xffffffffu) faults |= blit;
+        terminal_print("[K:GPU] RBBM interrupt status before/draw/blit=");
+        terminal_print_inline_hex64(before);
+        terminal_print("/"); terminal_print_inline_hex64(draw);
+        terminal_print("/"); terminal_print_inline_hex64(blit);
+        /* Host-only guarded read: this register must never be read through
+         * an unprivileged command packet (CP protection rejects that). */
+        if (before == 0xdeafbeadu || draw == 0xdeafbeadu || blit == 0xdeafbeadu)
+            terminal_print(" (DEAFBEAD snapshots unavailable, not fault bits)");
+        if (gpu_mmio_try_read32(&g_gpu_regs_window,
+                ADRENO_X1_85_RBBM_INT_STATUS, &host_status) == 0 &&
+            host_status != 0xdeafbeadu && host_status != 0xffffffffu) {
+            terminal_print(" host-status=");
+            terminal_print_inline_hex64(host_status);
+            faults |= host_status;
+        }
+        int trust_valid = gpu_mmio_try_read32(&g_gpu_regs_window,
+            ADRENO_X1_85_RBBM_SECVID_TRUST_CNTL, &trust) == 0 &&
+            trust != 0xdeafbeadu && trust != 0xffffffffu;
+        if (trust_valid) {
+            terminal_print(" SECVID trust=");
+            terminal_print_inline_hex64(trust);
+        } else {
+            terminal_print(" SECVID trust=unreadable");
+        }
+        if (faults & (1u << 28))
+            terminal_error("[K:GPU] TSBWRITEERROR: GPU rejected a write against its trusted-memory policy");
+        if (faults & (1u << 29))
+            terminal_error("[K:GPU] SWFUSEVIOLATION: GPU reports a security-policy violation");
+        const uint64_t *start = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_UFC_START_OFFSET);
+        const uint64_t *end = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_UFC_END_OFFSET);
+        const uint64_t *after_blit = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_UFC_BLIT_OFFSET);
+        const char *names[] = {" write-data=", " write-requests=",
+                               " incoming-writes=", " write-stalls="};
+        terminal_print("[K:GPU] UFC draw/blit deltas");
+        for (uint32_t i = 0u; i < 4u; ++i) {
+            terminal_print(names[i]);
+            terminal_print_inline_hex64(end[i] - start[i]);
+            terminal_print("/");
+            terminal_print_inline_hex64(after_blit[i] - end[i]);
+        }
+        terminal_flush_log();
+        if (!trust_valid || trust != 0u) {
+            terminal_error("[K:GPU] Non-secure mode not confirmed; refusing to report rendering success");
+            return gpu_core_mesart_3d_fail(-113);
+        }
+        if (faults & ((1u << 28) | (1u << 29)))
+            return gpu_core_mesart_3d_fail(-112);
+    }
+    /* A drained CP ring is not proof that a non-stalling DMA fault was absent. */
+    {
+        gpu_smmuv2_context_fault fault = {0};
+        gpu_smmuv2_global_fault global = {0};
+        if (gpu_smmuv2_read_context_fault(&g_gpu_smmu_window, &g_gpu_smmu_caps,
+                g_gpu_smmu_context_bank, &fault) != 0 ||
+            gpu_smmuv2_read_global_fault(&g_gpu_smmu_window, &global) != 0)
+            return gpu_core_mesart_3d_fail(-109);
+        if ((fault.fsr & GPU_SMMUV2_FSR_FAULT_MASK) || global.gfsr)
+            return gpu_core_mesart_3d_fail(-110);
+    }
+    {
+        const uint32_t *state = (const uint32_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_STATE_SNAPSHOT_OFFSET);
+
+        terminal_print("[K:GPU] Mesart state-readback VS=");
+        terminal_print_inline_hex64((uint64_t)state[0] |
+                                    ((uint64_t)state[1] << 32));
+        terminal_print(" PS=");
+        terminal_print_inline_hex64((uint64_t)state[2] |
+                                    ((uint64_t)state[3] << 32));
+        terminal_print(" RT=");
+        terminal_print_inline_hex64((uint64_t)state[4] |
+                                    ((uint64_t)state[5] << 32));
+        terminal_print(" VFD=");
+        terminal_print_inline_hex64((uint64_t)state[6] |
+                                    ((uint64_t)state[7] << 32));
+        terminal_print(" VS-config/size=");
+        terminal_print_inline_hex64((uint64_t)state[8] |
+                                    ((uint64_t)state[9] << 32));
+        terminal_print(" PS-config/size=");
+        terminal_print_inline_hex64((uint64_t)state[10] |
+                                    ((uint64_t)state[11] << 32));
+        terminal_print(" RB-cntl/render=");
+        terminal_print_inline_hex64((uint64_t)state[12] |
+                                    ((uint64_t)state[13] << 32));
+        terminal_print(" RB-buffer/clear=");
+        terminal_print_inline_hex64((uint64_t)state[14] |
+                                    ((uint64_t)state[15] << 32));
+        terminal_print(" VBO=");
+        terminal_print_inline_hex64((uint64_t)state[16] |
+                                    ((uint64_t)state[17] << 32));
+        terminal_print(" size/stride=");
+        terminal_print_inline_hex64((uint64_t)state[18] |
+                                    ((uint64_t)state[19] << 32));
+        terminal_print(" fetch/dest=");
+        terminal_print_inline_hex64((uint64_t)state[20] |
+                                    ((uint64_t)state[22] << 32));
+        terminal_print(" blend=");
+        terminal_print_inline_hex64((uint64_t)state[23] |
+                                    ((uint64_t)state[24] << 32));
+        terminal_print("");
+    }
+    {
+        const uint32_t *rt = (const uint32_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET);
+
+        terminal_print("[K:GPU] Mesart RT0 retained control/blend=");
+        terminal_print_inline_hex64((uint64_t)rt[0] |
+                                    ((uint64_t)rt[1] << 32));
+        terminal_print(" buf/pitch=");
+        terminal_print_inline_hex64((uint64_t)rt[2] |
+                                    ((uint64_t)rt[3] << 32));
+        terminal_print(" array/base=");
+        terminal_print_inline_hex64((uint64_t)rt[4] |
+                                    ((uint64_t)rt[5] << 32));
+        terminal_print(" basehi/gmem=");
+        terminal_print_inline_hex64((uint64_t)rt[6] |
+                                    ((uint64_t)rt[7] << 32));
+        terminal_print(" PS-mask/cntl=");
+        terminal_print_inline_hex64((uint64_t)rt[8] |
+                                    ((uint64_t)rt[9] << 32));
+        terminal_print(" PS-mrt/output=");
+        terminal_print_inline_hex64((uint64_t)rt[10] |
+                                    ((uint64_t)rt[11] << 32));
+        terminal_print(" PS-rtfmt=");
+        terminal_print_inline_hex64(rt[19]);
+        terminal_print("");
+    }
+    {
+        const uint64_t *start = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET);
+        const uint64_t *end = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET);
+
+        terminal_print("[K:GPU] Mesart stages delta VPC-PC=");
+        terminal_print_inline_hex64(end[0] - start[0]);
+        terminal_print(" VPC-visible=");
+        terminal_print_inline_hex64(end[1] - start[1]);
+        terminal_print(" TSE-input=");
+        terminal_print_inline_hex64(end[2] - start[2]);
+        terminal_print(" TSE-visible=");
+        terminal_print_inline_hex64(end[3] - start[3]);
+        terminal_print(" RB-PS=");
+        terminal_print_inline_hex64(end[4] - start[4]);
+        terminal_print(" RB-C-write=");
+        terminal_print_inline_hex64(end[5] - start[5]);
+        terminal_print("");
+    }
+    {
+        const uint64_t *start = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_CCU_START_OFFSET);
+        const uint64_t *end = (const uint64_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_CCU_END_OFFSET);
+        const char *names[5] = {" busy=", " colour-blocks=", " colour-hits=",
+                                " GMEM-writes=", " colour-drops="};
+        terminal_print("[K:GPU] Mesart CCU deltas");
+        for (uint32_t i = 0; i < 5u; ++i) {
+            terminal_print(names[i]);
+            terminal_print_inline_hex64(end[i] - start[i]);
+        }
+    }
+    {
+        const uint32_t *before = (const uint32_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET);
+        const uint32_t *after = (const uint32_t *)((const uint8_t *)
+            g_cp_completion.cpu + GPU_CORE_MESART_RT_POST_DRAW_OFFSET);
+        uint32_t changed = 0u;
+        for (uint32_t i = 0u; i < GPU_CORE_MESART_RT_STATE_SNAPSHOT_BYTES / 4u; ++i) {
+            if (before[i] == after[i])
+                continue;
+            ++changed;
+            terminal_print("[K:GPU] Mesart draw changed register=");
+            terminal_print_inline_hex64(i < 8u ? 0x8820u + i : 0xa98bu + i - 8u);
+            terminal_print(" before=");
+            terminal_print_inline_hex64(before[i]);
+            terminal_print(" after=");
+            terminal_print_inline_hex64(after[i]);
+        }
+        terminal_print("[K:GPU] Mesart post-draw RT state changes=");
+        terminal_print_inline_hex64(changed);
+        terminal_print(" target=");
+        terminal_print_inline_hex64((uint64_t)after[5] | ((uint64_t)after[6] << 32));
+    }
+    terminal_print("[K:GPU] Mesart CCU cache/control=");
+    terminal_print_inline_hex64(*(const uint32_t *)((const uint8_t *)
+        g_cp_completion.cpu + GPU_CORE_MESART_CCU_SNAPSHOT_OFFSET));
+    terminal_print("/");
+    terminal_print_inline_hex64(*(const uint32_t *)((const uint8_t *)
+        g_cp_completion.cpu + GPU_CORE_MESART_CCU_SNAPSHOT_OFFSET + 4u));
+    terminal_print("");
+    {
+        uint32_t green = 0u;
+        asm_dma_invalidate_range(g_colour_write_probe.cpu_pixels, 1024u);
+        for (uint32_t i = 0u; i < 256u; ++i)
+            green += ((const uint32_t *)g_colour_write_probe.cpu_pixels)[i] == 0xff00ff00u;
+        terminal_print("[K:GPU] Independent write test CP echo=");
+        terminal_print_inline_hex64(*(const uint32_t *)((const uint8_t *)g_cp_completion.cpu +
+            GPU_CORE_MESART_CP_WRITE_PROBE_OFFSET));
+        terminal_print(" expected=C0DEC0DE; 2D GPU centre=");
+        terminal_print_inline_hex64(*(const uint32_t *)((const uint8_t *)g_cp_completion.cpu +
+            GPU_CORE_MESART_BLIT_READBACK_OFFSET));
+        terminal_print(" green pixels=");
+        terminal_print_inline_hex64(green);
+        terminal_print("/256 (diagnostic only, not shader success)");
+    }
+    terminal_print("[K:GPU] Mesart RT GPU readback centre=");
+    terminal_print_inline_hex64(*(const uint32_t *)((const uint8_t *)
+        g_cp_completion.cpu + GPU_CORE_MESART_RT_GPU_READBACK_OFFSET));
+    terminal_print(" marker=");
+    terminal_print_inline_hex64(g_mesart_3d_inflight.scanout_probe_marker);
+    terminal_print("");
     if (out_fence)
         *out_fence = g_mesart_3d_inflight.fence;
-    asm_dma_invalidate_range(g_scanout_target.buffer.cpu,
-                             g_scanout_target.buffer.size_bytes);
+    asm_dma_invalidate_range(g_triangle_target.cpu_pixels,
+                             g_triangle_target.cpu_bytes);
     for (uint32_t probe_y = 0u; probe_y < 3u; ++probe_y)
     {
         for (uint32_t probe_x = 0u; probe_x < 3u; ++probe_x)
         {
-            uint32_t x = g_scanout_target.width / 2u + probe_x - 1u;
-            uint32_t y = g_scanout_target.height / 2u + probe_y - 1u;
-            uint8_t *pixel = (uint8_t *)g_scanout_target.buffer.cpu +
-                             (uint64_t)y * g_scanout_target.pitch +
+            uint32_t x = g_triangle_target.width / 2u + probe_x - 1u;
+            uint32_t y = g_triangle_target.height / 2u + probe_y - 1u;
+            uint8_t *pixel = (uint8_t *)g_triangle_target.cpu_pixels +
+                             (uint64_t)y * g_triangle_target.stride_bytes +
                              (uint64_t)x * 4u;
             uint32_t value = *(uint32_t *)pixel;
 
@@ -1968,13 +2476,48 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
                 ++g_mesart_3d_inflight.scanout_probe_changed;
         }
     }
-    terminal_print("[K:GPU] Mesart scanout pixel witness changed=");
+    terminal_print("[K:GPU] Mesart offscreen pixel witness changed=");
     terminal_print_inline_hex64(g_mesart_3d_inflight.scanout_probe_changed);
     terminal_print("/9 centre=");
     terminal_print_inline_hex64(g_mesart_3d_inflight.scanout_probe_after);
     terminal_print(" marker=");
     terminal_print_inline_hex64(g_mesart_3d_inflight.scanout_probe_marker);
     terminal_print("");
+    {
+        const uint32_t *pixels = (const uint32_t *)g_triangle_target.cpu_pixels;
+        uint32_t changed = 0u;
+        const uint32_t count = g_triangle_target.width * g_triangle_target.height;
+        for (uint32_t i = 0u; i < count; ++i)
+            changed += pixels[i] != GPU_CORE_MESART_SCANOUT_PROBE_MARKER;
+        terminal_print("[K:GPU] Mesart offscreen changed pixels=");
+        terminal_print_inline_hex64(changed);
+        terminal_print(" total=");
+        terminal_print_inline_hex64(count);
+        terminal_print("");
+        if (changed)
+        {
+            const uint32_t x = (g_scanout_target.width - g_triangle_target.width) / 2u;
+            const uint32_t y = (g_scanout_target.height - g_triangle_target.height) / 2u;
+            for (uint32_t row = 0u; row < g_triangle_target.height; ++row)
+            {
+                uint32_t *dst = (uint32_t *)((uint8_t *)g_scanout_target.buffer.cpu +
+                    (uint64_t)(y + row) * g_scanout_target.pitch + (uint64_t)x * 4u);
+                const uint32_t *src = (const uint32_t *)((const uint8_t *)pixels +
+                    (uint64_t)row * g_triangle_target.stride_bytes);
+                for (uint32_t col = 0u; col < g_triangle_target.width; ++col)
+                    dst[col] = src[col];
+                asm_dma_clean_range(dst, g_triangle_target.width * 4u);
+            }
+            terminal_print("[K:GPU] Mesart GPU surface copied to screen centre (256x256)");
+        }
+        else
+        {
+            terminal_error("[K:GPU] Mesart draw completed without changing any target pixel");
+            terminal_flush_log();
+            g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
+            return -111;
+        }
+    }
     terminal_flush_log();
     g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
     return 0;
@@ -2136,7 +2679,7 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
             return -6;
         g_runtime_gx_lease_held = 1u;
     }
-    if (gpu_cp_snapshot_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+    if (gpu_cp_status_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
                              &cp) != 0 || cp.hw_fault || cp.protect_status)
     {
         rc = -7;

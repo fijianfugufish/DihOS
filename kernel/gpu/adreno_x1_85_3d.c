@@ -12,6 +12,8 @@
 #define A7XX_GRAS_CL_CNTL             0x8000u
 #define A7XX_GRAS_SC_SCREEN_SCISSOR   0x80b0u
 #define A7XX_GRAS_SC_VIEWPORT_SCISSOR 0x80d0u
+#define A7XX_GRAS_SC_WINDOW_SCISSOR   0x80f0u
+#define A7XX_GRAS_A2D_SCISSOR         0x840au
 #define A7XX_GRAS_SC_BIN_CNTL          0x80a1u
 #define A7XX_GRAS_MODE_CNTL           0x8110u
 #define A7XX_GRAS_SU_CNTL              0x8090u
@@ -23,8 +25,14 @@
 #define A7XX_RB_PS_OUTPUT_MASK         0x880du
 #define A7XX_RB_SRGB_CNTL              0x880fu
 #define A7XX_RB_BUFFER_CNTL           0x8812u
+#define A7XX_RB_BLEND_CNTL             0x8865u
+#define A7XX_RB_WINDOW_OFFSET          0x8890u
+#define A7XX_RB_RESOLVE_WINDOW_OFFSET  0x88d4u
 #define A7XX_RB_CLEAR_TARGET          0x88e4u
+#define A7XX_RB_CCU_CACHE_CNTL        0x88e5u
+#define A7XX_RB_CCU_CNTL              0x8e07u
 #define A7XX_RB_MRT_CONTROL           0x8820u
+#define A7XX_RB_MRT_BLEND_CONTROL     0x8821u
 #define A7XX_RB_MRT_BUF_INFO           0x8822u
 #define A7XX_RB_MRT_PITCH              0x8823u
 #define A7XX_RB_MRT_ARRAY_PITCH        0x8824u
@@ -57,6 +65,11 @@
 #define A7XX_VFD_CNTL_6                0xa006u
 #define A7XX_VFD_RENDER_MODE           0xa007u
 #define A7XX_VFD_MODE_CNTL             0xa009u
+#define A7XX_VFD_VERTEX_BUFFER_BASE     0xa010u
+#define A7XX_VFD_VERTEX_BUFFER_SIZE     0xa012u
+#define A7XX_VFD_VERTEX_BUFFER_STRIDE   0xa013u
+#define A7XX_VFD_FETCH_INSTR            0xa090u
+#define A7XX_VFD_DEST_CNTL              0xa0d0u
 #define A7XX_SP_VS_CNTL_0              0xa800u
 #define A7XX_SP_VS_OUTPUT_CNTL         0xa802u
 #define A7XX_SP_VS_OUTPUT_REG          0xa803u
@@ -115,21 +128,57 @@
 #define A7XX_SP_VS_CONFIG               0xa823u
 #define A7XX_SP_VS_INSTR_SIZE           0xa824u
 #define A7XX_TPL1_MODE_CNTL             0xb309u
+#define A7XX_TPL1_WINDOW_OFFSET         0xb307u
+#define A7XX_SP_WINDOW_OFFSET           0xab21u
+
+/* A7xx performance-counter register dword offsets from Mesa's a6xx.xml.
+ * Selector event IDs below are from a7xx_perfcntrs.xml.  RBBM_PERFCTR_CNTL
+ * is enabled by the captured X1E baseline; this routine changes only the
+ * per-counter selectors, as Mesa's query path does. */
+#define A7XX_VPC_PERFCTR_VPC_SEL         0x960bu
+#define A7XX_GRAS_PERFCTR_TSE_SEL        0x8610u
+#define A7XX_RB_PERFCTR_RB_SEL           0x8e10u
 
 #define A7XX_FMT_8_8_8_8_UNORM         0x30u
 #define A7XX_SWAP_WXYZ                  0x1u
 #define A7XX_TILE_LINEAR                0u
 #define A7XX_RENDERING_PASS             0u
 
+/* fd6_program.cc programs the active graphics stages with Mesa's bindless
+ * texture/sampler capability bits as well as ENABLED.  The X1-85 trace
+ * retains 0x103 for both VS and PS even in the no-texture triangle, so this
+ * is stage configuration rather than a descriptor binding. */
 #define A7XX_SP_XS_ENABLED              0x00000100u
+#define A7XX_SP_XS_BINDLESS_TEX         0x00000001u
+#define A7XX_SP_XS_BINDLESS_SAMP        0x00000002u
+#define A7XX_SP_XS_MESA_GRAPHICS        \
+    (A7XX_SP_XS_ENABLED | A7XX_SP_XS_BINDLESS_TEX | A7XX_SP_XS_BINDLESS_SAMP)
 #define A7XX_SP_PS_INOUT_REG_OVERLAP    0x01000000u
 #define A7XX_SP_UPDATE_ALL_STATE         0x000000ffu
 #define A7XX_TPL1_MODE_GL                0x000000a2u
 #define A7XX_CONST_ENABLED               0x00000100u
 #define A7XX_RB_ALL_BUFFERS_SYSMEM      0x000003ffu
-#define A7XX_RENDER_BUFFERS_SYSMEM      (3u << 22)
+/* X1-85 inherits a7xx_base: six 256 KiB depth caches. Mesa places colour
+ * after that allocation; COLOR_OFFSET is bits 23:31 in 4 KiB units. */
+#define X1_85_CCU_DEPTH_BYTES          (6u * 256u * 1024u)
+#define X1_85_CCU_SYSMEM_CACHE_CNTL    ((X1_85_CCU_DEPTH_BYTES >> 12) << 23)
+_Static_assert(X1_85_CCU_SYSMEM_CACHE_CNTL == 0xc0000000u,
+               "X1-85 colour CCU must begin at GMEM offset 0x180000");
+/* On A7xx direct sysmem routing is selected per attachment by RB_BUFFER_CNTL.
+ * The older RB_CNTL.BUFFERS_LOCATION field is A6xx-only and must remain zero
+ * here; writing its old bit position is ignored by A7xx hardware. */
+#define A7XX_DIRECT_SYSMEM_BIN_CNTL     0x00000000u
 #define A7XX_RB_MRT_COMPONENT_RGBA      (0xfu << 7)
-#define A7XX_VPC_SO_ENABLE               0x00000000u
+/* Ordinary shader colour writes use the blend factors below, not a logic
+ * operation.  ROP_CODE is ignored unless ROP_ENABLE is set, so leave the
+ * whole ROP field clear exactly as Mesa's normal graphics pipeline does. */
+#define A7XX_RB_MRT_CONTROL_REPLACE      A7XX_RB_MRT_COMPONENT_RGBA
+/* Mesa fd6_blend.cc leaves both independent-blend fields clear for the
+ * ordinary single-RT, blending-disabled pipeline.  SAMPLE_MASK remains full
+ * coverage; only blend routing itself is disabled. */
+#define A7XX_RB_BLEND_CNTL_NO_BLEND      0xffff0000u
+#define A7XX_VPC_SO_DISABLE              0x00000001u
+#define A7XX_POLYMODE6_TRIANGLES          0x00000003u
 #define A7XX_GRAS_CL_Z_CLAMP             0x00000020u
 #define A7XX_GRAS_CL_VP_CLIP_IGNORE      0x00000080u
 #define A7XX_VPC_INVALID_LOCATION         0x0000ffffu
@@ -152,16 +201,145 @@ static uint32_t a7xx_pkt7(uint32_t opcode, uint32_t count)
            (a7xx_odd_parity(opcode) << 23);
 }
 
+static uint32_t a7xx_pkt4(uint32_t register_dword, uint32_t count)
+{
+    return 0x40000000u | count |
+           (a7xx_odd_parity(count) << 7) |
+           ((register_dword & 0x3ffffu) << 8) |
+           (a7xx_odd_parity(register_dword) << 27);
+}
+
+/* Mesa's tu_cs_emit_regs() uses a type-4 register packet for render-pass
+ * steering state.  Unlike ordinary draw context state, A7xx RB routing bits
+ * are masked when they arrive through CP_CONTEXT_REG_BUNCH. */
+static int a7xx_emit_reg32(gpu_command_ring *ring, uint32_t register_dword,
+                           uint32_t value)
+{
+    if (!ring || register_dword > 0x3ffffu)
+        return -1;
+    if (gpu_ring_emit(ring, a7xx_pkt4(register_dword, 1u)) != 0 ||
+        gpu_ring_emit(ring, value) != 0)
+        return -2;
+    return 0;
+}
+
+static int a7xx_emit_wait_for_idle(gpu_command_ring *ring);
+
 static int a7xx_emit_event(gpu_command_ring *ring, uint32_t event)
 {
     /* Gen7 CP_EVENT_WRITE7 events without timestamps have a one-dword
      * payload. The event values are from Mesa's adreno_pm4.xml: CCU
      * invalidate depth/color (24/25), LRZ invalidate (40), cache invalidate
-     * (51), and colour clean (33). */
+     * (51), CCU colour clean (33), and cache clean (49). */
     if (!ring || event > 0xffu)
         return -1;
     if (gpu_ring_emit(ring, a7xx_pkt7(0x46u, 1u)) != 0 ||
         gpu_ring_emit(ring, event) != 0)
+        return -2;
+    return 0;
+}
+
+int adreno_x1_85_3d_emit_sysmem_fini(gpu_command_ring *ring)
+{
+    /* This is fd6_emit_sysmem_fini()'s relevant A7xx barrier sequence for
+     * a colour-only direct-sysmem pass:
+     *
+     *   CCU_CLEAN_COLOR, CCU_INVALIDATE_COLOR, CACHE_CLEAN,
+     *   CP_WAIT_MEM_WRITES, WFI, CP_CCHE_INVALIDATE, WFI, WFM.
+     *
+     * RB_DONE only proves the render backend retired the draw; without this
+     * sequence the final colour can remain resident in CCU/UCHE rather than
+     * becoming observable through the scanout allocation. */
+    if (!ring)
+        return -1;
+    if (a7xx_emit_event(ring, 0x21u) != 0 || /* CCU_CLEAN_COLOR */
+        a7xx_emit_event(ring, 0x19u) != 0 || /* CCU_INVALIDATE_COLOR */
+        a7xx_emit_event(ring, 0x31u) != 0 || /* CACHE_CLEAN */
+        /* CACHE_CLEAN starts an asynchronous writeback.  WFI only drains
+         * the graphics pipes; the CP-specific wait is what guarantees the
+         * cleaned sysmem writes are observable before our CP readback. */
+        gpu_ring_emit(ring, a7xx_pkt7(0x12u, 0u)) != 0 ||
+        a7xx_emit_wait_for_idle(ring) != 0 ||
+        gpu_ring_emit(ring, a7xx_pkt7(0x3au, 0u)) != 0 ||
+        a7xx_emit_wait_for_idle(ring) != 0 ||
+        /* WFI drains graphics work, but does not by itself serialize SQE
+         * memory/register reads. Turnip uses WFI + WAIT_FOR_ME before CP
+         * consumes GPU results (e.g. VSC readback). Our next packets read
+         * the render target and counters, then write the CPU completion.
+         * Keep those on the far side of the completed cache flush. */
+        gpu_ring_emit(ring, a7xx_pkt7(0x13u, 0u)) != 0)
+        return -2;
+    return 0;
+}
+
+int adreno_x1_85_emit_solid_fill_probe(gpu_command_ring *ring, uint64_t iova)
+{
+    /* Mesa tu_clear_blit.cc: r2d_setup_common, r2d_dst_buffer,
+     * r2d_clear_value, r2d_coords and r2d_run, specialized to a bounded
+     * 16x16 linear RGBA8 diagnostic allocation. No shader is executed. */
+    const uint32_t control = (1u << 7) | (0x30u << 8) | (0xfu << 20);
+    const adreno_x1_85_context_reg regs[] = {
+        {0x8c01u, 0u},                         /* pixel op disabled */
+        {0x8c00u, control}, {0x8400u, control}, /* solid UNORM8 RGBA */
+        {0xb2d2u, 1u << 29},                  /* TPL1: TEX_2D */
+        {0xa9bfu, (0x30u << 3) | (0xfu << 12)},
+        {0x8c17u, 0x30u},                     /* linear RGBA8, no UBWC */
+        {0x8c18u, (uint32_t)iova}, {0x8c19u, (uint32_t)(iova >> 32)},
+        {0x8c1au, 1u},                        /* 64-byte pitch, shr=6 */
+        {0x8c20u, 0u}, {0x8c21u, 0u}, {0x8c22u, 0u},
+        {0x8c2cu, 0u}, {0x8c2du, 255u}, {0x8c2eu, 0u}, {0x8c2fu, 255u},
+        {0x8405u, 0u}, {0x8406u, 15u | (15u << 16)},
+        {0xb2d1u, 0u},                        /* A2D window offset */
+    };
+    if (!ring || !iova || (iova & 63u))
+        return -1;
+    if (a7xx_emit_wait_for_idle(ring) != 0)
+        return -2;
+    for (uint32_t i = 0u; i < sizeof(regs) / sizeof(regs[0]); ++i)
+        if (a7xx_emit_reg32(ring, regs[i].dword_offset, regs[i].value) != 0)
+            return -2;
+    if (gpu_ring_emit(ring, a7xx_pkt7(0x2cu, 1u)) != 0 ||
+        gpu_ring_emit(ring, 3u) != 0 ||      /* CP_BLIT: BLIT_OP_SCALE */
+        a7xx_emit_wait_for_idle(ring) != 0 ||
+        a7xx_emit_event(ring, 0x1au) != 0)  /* A7xx blit-cache clean */
+        return -2;
+    return adreno_x1_85_3d_emit_sysmem_fini(ring);
+}
+
+int adreno_x1_85_3d_emit_stage_counter_select(gpu_command_ring *ring)
+{
+    /* Counter groups are deliberately chosen to locate the first silent
+     * stage of a draw without modifying any rendering state:
+     *
+     * VPC 0: PC_PRIMITIVES (9), VPC 1: RB_VISIBLE_PRIMITIVES (13)
+     * TSE 0: INPUT_PRIM (6),    TSE 1: OUTPUT_VISIBLE_PRIM (14)
+     * RB  0: PS_INVOCATIONS (22), RB 1: C_WRITE (15)
+     *
+     * Each selector is a raw type-4 write, matching Mesa Turnip's
+     * `counter->select_reg` path rather than passing non-context state
+     * through CP_CONTEXT_REG_BUNCH. */
+    if (!ring)
+        return -1;
+    if (a7xx_emit_reg32(ring, A7XX_VPC_PERFCTR_VPC_SEL, 9u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_VPC_PERFCTR_VPC_SEL + 1u, 13u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_GRAS_PERFCTR_TSE_SEL, 6u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_GRAS_PERFCTR_TSE_SEL + 1u, 14u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_PERFCTR_RB_SEL, 22u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_PERFCTR_RB_SEL + 1u, 15u) != 0 ||
+        /* a7xx_perfcntrs.xml (not the differing A6xx selector numbers):
+         * busy cycles, colour blocks, colour hits, GMEM writes, drops. */
+        a7xx_emit_reg32(ring, 0x8e18u, 0u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e19u, 4u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e1au, 6u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e1bu, 9u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e1cu, 14u) != 0 ||
+        /* Trace the downstream fabric, not just writes into GMEM/CCU.
+         * a7xx_perfcntrs.xml UFC: output data, output requests, incoming
+         * UBWC writes, stalls waiting for GBIF write data. */
+        a7xx_emit_reg32(ring, 0x8e30u, 2u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e31u, 4u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e32u, 28u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8e33u, 31u) != 0)
         return -2;
     return 0;
 }
@@ -177,9 +355,9 @@ int adreno_x1_85_3d_emit_x1e_baseline(gpu_command_ring *ring)
      * freedreno_devices.py X1-85 entry (chip 0xffff43050c01).  They are a
      * driver-owned hardware profile, never a Mesa renderer input. */
     static const adreno_x1_85_context_reg baseline[] = {
-        /* A7xx's static CCU setup: X1-85 has six CCUs, 256 KiB depth cache
-         * per CCU and 64 KiB colour cache per CCU in sysmem mode. */
-        {0x8e07u, 0x00000001u}, {0x88e5u, 0xc0000000u},
+        /* X1-85 has 256 KiB depth and 64 KiB colour cache per CCU.
+         * The dynamic colour offset is encoded separately below. */
+        {A7XX_RB_CCU_CNTL, 0x00000001u},
         {0x0e17u, 0x00040004u}, {0xb600u, 0x11100000u},
         {0xb602u, 0x00040724u}, {0xae03u, 0x10001400u},
         {0xae08u, 0x00400400u}, {0xae09u, 0x00430800u},
@@ -200,8 +378,18 @@ int adreno_x1_85_3d_emit_x1e_baseline(gpu_command_ring *ring)
         {0x9600u, 0x02000000u}, {0x0e12u, 0x00000000u},
     };
 
-    return adreno_x1_85_emit_non_context_regs(
-        ring, baseline, sizeof(baseline) / sizeof(baseline[0]));
+    if (adreno_x1_85_emit_non_context_regs(
+            ring, baseline, sizeof(baseline) / sizeof(baseline[0])) != 0)
+        return -1;
+
+    /* Mesa documents RB_CCU_CNTL as static A7xx state which only takes
+     * effect after CP_WAIT_FOR_IDLE.  RB_CCU_CACHE_CNTL is dynamic command
+     * state, so send it through a direct type-4 packet afterwards, exactly
+     * as fd6_emit_gmem_cache_cntl(A7XX, sysmem) does. */
+    if (a7xx_emit_wait_for_idle(ring) != 0)
+        return -2;
+    return a7xx_emit_reg32(ring, A7XX_RB_CCU_CACHE_CNTL,
+                           X1_85_CCU_SYSMEM_CACHE_CNTL) == 0 ? 0 : -3;
 }
 
 int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
@@ -210,7 +398,10 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
      * 128 writes.  The previous one-word loop cleared only SIZE, leaving a
      * firmware-owned BASE/STRIDE live below a zero fetch count.  An
      * input-free draw must not inherit any vertex-DMA address state. */
-    adreno_x1_85_context_reg regs[160];
+    /* 29 static controls + four zeroed window offsets + all 32 complete
+     * VFD descriptors require 161 entries.  Leave explicit headroom so a
+     * later direct-sysmem reset cannot silently overwrite the kernel stack. */
+    adreno_x1_85_context_reg regs[192];
     uint32_t count = 0u;
 
     if (!ring)
@@ -218,26 +409,42 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
     /* Matches the Gen7 direct-render restore ordering in fd6_emit_restore
      * and fd6_emit_sysmem_prep, without a generic draw-state or descriptor
      * interface. */
-    if (gpu_ring_emit(ring, a7xx_pkt7(0x17u, 1u)) != 0 ||
+    /* fd6_emit_restore / tu_disable_draw_states discard all persistent
+     * draw-state groups. Direct register writes do not disable them: a
+     * surviving group can replay at DRAW and replace the state just written.
+     * DihOS installs its entire state directly, so owns no such groups. */
+    if (gpu_ring_emit(ring, a7xx_pkt7(0x43u, 3u)) != 0 ||
+        gpu_ring_emit(ring, 1u << 18) != 0 || /* DISABLE_ALL_GROUPS */
+        gpu_ring_emit(ring, 0u) != 0 ||      /* null address lo */
+        gpu_ring_emit(ring, 0u) != 0 ||      /* null address hi */
+        gpu_ring_emit(ring, a7xx_pkt7(0x17u, 1u)) != 0 ||
         gpu_ring_emit(ring, 0x08000001u) != 0 ||
+        /* fd6_emit_flushes requires clean before invalidate, including
+         * inherited dirty data. Invalidation alone cannot reset a dirty CCU. */
+        a7xx_emit_event(ring, 33u) != 0 ||
+        a7xx_emit_event(ring, 32u) != 0 ||
         a7xx_emit_event(ring, 25u) != 0 ||
         a7xx_emit_event(ring, 24u) != 0 ||
         a7xx_emit_event(ring, 40u) != 0 ||
         a7xx_emit_event(ring, 51u) != 0 ||
         a7xx_emit_wait_for_idle(ring) != 0 ||
-        gpu_ring_emit(ring, a7xx_pkt7(0x63u, 1u)) != 0 ||
-        gpu_ring_emit(ring, 0u) != 0 ||
         /* Mesa marks the stream as direct sysmem rendering before a draw.
-         * On A7xx this is CP state, not a VFD register; without it CP can
-         * consume a draw packet while RB never launches the render pass. */
+         * CP_SET_MARKER (0x65) is the Gen7 render-mode packet. */
         gpu_ring_emit(ring, a7xx_pkt7(0x65u, 1u)) != 0 ||
         gpu_ring_emit(ring, 1u) != 0 || /* RM6_DIRECT_RENDER */
+        /* Match fd6_emit_sysmem_prep exactly: global skipping is off, local
+         * skipping is on, and visibility is overridden for direct sysmem.
+         * These are CP controls, not draw-state packets. */
         gpu_ring_emit(ring, a7xx_pkt7(0x1du, 1u)) != 0 ||
         gpu_ring_emit(ring, 0u) != 0 ||
         gpu_ring_emit(ring, a7xx_pkt7(0x23u, 1u)) != 0 ||
         gpu_ring_emit(ring, 1u) != 0 ||
         gpu_ring_emit(ring, a7xx_pkt7(0x64u, 1u)) != 0 ||
-        gpu_ring_emit(ring, 1u) != 0)
+        gpu_ring_emit(ring, 1u) != 0 ||
+        /* Visibility override does not reset a firmware-inherited binning
+         * mode.  Turnip explicitly selects mode zero for direct sysmem. */
+        gpu_ring_emit(ring, a7xx_pkt7(0x63u, 1u)) != 0 ||
+        gpu_ring_emit(ring, 0u) != 0)
         return -2;
 
 #define STATIC_REG(offset, value) do { regs[count++] = (adreno_x1_85_context_reg){ (offset), (value) }; } while (0)
@@ -253,9 +460,9 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
     STATIC_REG(0x8818u, 0u);         /* RB_UNKNOWN_8818 */
     STATIC_REG(0x9236u, 0u);         /* VPC_REPLACE_MODE_CNTL */
     STATIC_REG(0x9300u, 0u);         /* VPC_ROTATION_CNTL */
-    /* fd6_emit_sysmem_prep enables stream-out for its one direct-render
-     * pass.  A value of one is explicitly the VPC_SO_OVERRIDE.DISABLE bit. */
-    STATIC_REG(A7XX_VPC_SO_OVERRIDE, A7XX_VPC_SO_ENABLE);
+    /* Ordinary direct rendering must disable stream-out when no SO buffers
+     * are bound.  Bit zero is explicitly VPC_SO_OVERRIDE.DISABLE. */
+    STATIC_REG(A7XX_VPC_SO_OVERRIDE, A7XX_VPC_SO_DISABLE);
     STATIC_REG(0x9107u, 0u);         /* VPC_RAST_STREAM_CNTL */
     STATIC_REG(0x9317u, 0u);         /* VPC_RAST_STREAM_CNTL_V2 */
     STATIC_REG(0x9b07u, 0u);         /* PC_STEREO_RENDERING_CNTL */
@@ -263,12 +470,18 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
     STATIC_REG(0x8099u, 0u);         /* GRAS_SU_CONSERVATIVE_RAS_CNTL */
     STATIC_REG(0x809bu, 0u);         /* GRAS_SU_VS_SIV_CNTL */
     STATIC_REG(0x80a0u, 0x2u);       /* GRAS_SC_CNTL, CCU cache line 2 */
-    /* These two controls are the render-pass-level sysmem selection. They
-     * are distinct from RB_BUFFER_CNTL's per-target RT0 bit below; omitting
-     * them leaves A7xx configured for GMEM even with a sysmem MRT address. */
-    STATIC_REG(A7XX_GRAS_SC_BIN_CNTL, A7XX_RENDER_BUFFERS_SYSMEM);
-    STATIC_REG(A7XX_RB_CNTL, A7XX_RENDER_BUFFERS_SYSMEM);
+    /* A7xx direct sysmem uses the per-target RB_BUFFER_CNTL later in the
+     * draw state.  There is no global sysmem-domain bit to set here. */
+    STATIC_REG(A7XX_GRAS_SC_BIN_CNTL, A7XX_DIRECT_SYSMEM_BIN_CNTL);
+    STATIC_REG(A7XX_RB_CNTL, 0u);
     STATIC_REG(0x8007u, 0u);         /* GRAS_LRZ_CB_CNTL (no CB) */
+    /* Mesa's set_window_offset(0, 0), required for direct sysmem rendering.
+     * These are command-state registers, not framebuffer metadata: inherited
+     * display firmware offsets can move all raster writes off the target. */
+    STATIC_REG(A7XX_RB_WINDOW_OFFSET, 0u);
+    STATIC_REG(A7XX_RB_RESOLVE_WINDOW_OFFSET, 0u);
+    STATIC_REG(A7XX_SP_WINDOW_OFFSET, 0u);
+    STATIC_REG(A7XX_TPL1_WINDOW_OFFSET, 0u);
     STATIC_REG(0xb986u, 0xfcfcu);    /* SP_REG_PROG_ID_3 invalid regids */
     STATIC_REG(A7XX_VFD_RENDER_MODE, A7XX_RENDERING_PASS);
     STATIC_REG(0xa008u, 0u);         /* VFD_STEREO_RENDERING_CNTL */
@@ -289,7 +502,15 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring)
         STATIC_REG(base + 3u, 0u);   /* VFD_VERTEX_BUFFER[i].STRIDE */
     }
 #undef STATIC_REG
-    return adreno_x1_85_emit_context_regs(ring, regs, count);
+    if (adreno_x1_85_emit_context_regs(ring, regs, count) != 0)
+        return -3;
+    /* Reassert the A7xx bin setup with command packets so inherited display
+     * firmware state cannot affect this direct-sysmem draw. */
+    if (a7xx_emit_reg32(ring, A7XX_GRAS_SC_BIN_CNTL,
+                         A7XX_DIRECT_SYSMEM_BIN_CNTL) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_CNTL, 0u) != 0)
+        return -4;
+    return 0;
 }
 
 static uint32_t a7xx_pack_footprint(const mesart_pipeline_stage_state *stage,
@@ -357,9 +578,9 @@ static uint32_t a7xx_float_bits(float value)
 
 static uint32_t a7xx_pack_const_config(uint32_t const_vec4s)
 {
-    /* a6xx.xml: CONSTLEN lives in bits 2..9 and ENABLED is bit 8.  The
-     * compiler's count is in vec4s, while hardware encodes the same count
-     * shifted by two. */
+    /* a6xx.xml: CONSTLEN occupies bits 0..7 with a two-bit hardware
+     * granularity (shr=2); ENABLED is bit 8.  The compiler reports vec4s,
+     * so preserve the hardware's shifted representation. */
     return (const_vec4s << 2) | A7XX_CONST_ENABLED;
 }
 
@@ -427,6 +648,20 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
      * field width as well. */
     if (reflection->vertex.vertex_id_regid > 0xffu ||
         reflection->vertex.instance_id_regid > 0xffu)
+        return -2;
+    /* This first VBO profile admits one, and only one, position attribute.
+     * MPIP's reflection identifies the compiler-assigned destination
+     * register; the address, size, stride, format and contents are owned by
+     * the kernel draw descriptor. */
+    if (reflection->vertex_attribute_count != 1u ||
+        /* IR3 encodes GLSL location zero as VERT_ATTRIB_GENERIC0 (slot 15). */
+        reflection->vertex_attribute0_slot != 15u ||
+        reflection->vertex_attribute0_compmask != 0x3u ||
+        reflection->vertex_attribute0_regid >= MESART_PIPELINE_INVALID_REGID ||
+        !draw->vertex_buffer_gpu_va ||
+        (draw->vertex_buffer_gpu_va & 7u) ||
+        draw->vertex_buffer_bytes != 24u ||
+        draw->vertex_buffer_stride != 8u)
         return -2;
     if (a7xx_validate_static_constant_data(
             pipeline->vertex_constant_data_gpu_va,
@@ -511,11 +746,11 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_SP_GS_CONST_CONFIG, 0u);
     REG(A7XX_SP_PS_CONST_CONFIG,
         a7xx_pack_const_config(reflection->fragment_const_vec4s));
-    REG(A7XX_SP_VS_CONFIG, A7XX_SP_XS_ENABLED);
+    REG(A7XX_SP_VS_CONFIG, A7XX_SP_XS_MESA_GRAPHICS);
     REG(A7XX_SP_HS_CONFIG, 0u);
     REG(A7XX_SP_DS_CONFIG, 0u);
     REG(A7XX_SP_GS_CONFIG, 0u);
-    REG(A7XX_SP_PS_CONFIG, A7XX_SP_XS_ENABLED);
+    REG(A7XX_SP_PS_CONFIG, A7XX_SP_XS_MESA_GRAPHICS);
     REG(A7XX_SP_GFX_UAV_BASE, 0u);
     REG(A7XX_SP_GFX_UAV_BASE + 1u, 0u);
     REG(A7XX_SP_GFX_USIZE, 0u);
@@ -548,8 +783,8 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     /* This profile's FS has no system values, varyings, or texture
      * prefetches.  These fields are still stateful on A7xx, so establish
      * Mesa's no-input values instead of inheriting display-firmware state. */
-    REG(A7XX_SP_PS_INITIAL_TEX_LOAD_CNTL, 0x01ff7fc8u);
-    REG(A7XX_SP_PS_CNTL_1, 0x00000300u);
+    REG(A7XX_SP_PS_INITIAL_TEX_LOAD_CNTL, 0x01ff7fc0u);
+    REG(A7XX_SP_PS_CNTL_1, 0x00000200u);
     REG(A7XX_SP_PS_WAVE_CNTL, 0u);
     REG(A7XX_SP_LB_PARAM_LIMIT, 0x7u);
     REG(A7XX_SP_REG_PROG_ID_0, 0xfcfcfcfcu);
@@ -584,21 +819,22 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_VPC_PC_CNTL, 0u);
     REG(A7XX_PC_RESTART_INDEX, 0u);
     REG(A7XX_GRAS_SU_CNTL, 0u);
-    REG(A7XX_VPC_RAST_CNTL, 0u);       /* POLYMODE6_TRIANGLES */
-    REG(A7XX_VPC_PS_RAST_CNTL, 0u);
-    REG(A7XX_PC_DGEN_RAST_CNTL, 0u);   /* POLYMODE6_TRIANGLES */
+    /* Mesa's A7xx trace programs POLYMODE6_TRIANGLES as 3 in all three
+     * raster-stage registers. Zero is not triangle mode. */
+    REG(A7XX_VPC_RAST_CNTL, A7XX_POLYMODE6_TRIANGLES);
+    REG(A7XX_VPC_PS_RAST_CNTL, A7XX_POLYMODE6_TRIANGLES);
+    REG(A7XX_PC_DGEN_RAST_CNTL, A7XX_POLYMODE6_TRIANGLES);
     REG(A7XX_PC_DGEN_SU_CONSERVATIVE_RAS_CNTL, 0u);
     REG(A7XX_PC_VS_CNTL, reflection->varying_stride_dwords | 0x100u);
     REG(A7XX_PC_PS_CNTL, 0u);
     /* VPC_PS_CNTL's low byte is NUMNONPOSVAR, not an invalid-location
-     * field.  The previous value accidentally set it to 255 for a fragment
-     * shader with zero inputs, making the VPC wait for nonexistent data.
-     * PRIMIDLOC and VIEWIDLOC are separately invalid (0xff). */
+     * field. PRIMIDLOC and VIEWIDLOC are VPC locations and therefore use
+     * Mesa's 0xff location sentinel, not IR3's r63.x (0xfc) sentinel. */
     REG(A7XX_VPC_PS_CNTL,
         (uint32_t)reflection->fragment.total_varying_components |
-        ((uint32_t)A7XX_INVALID_REGID << 8) |
+        ((uint32_t)0xffu << 8) |
         (reflection->fragment.total_varying_components ? 0x00010000u : 0u) |
-        ((uint32_t)A7XX_INVALID_REGID << 24));
+        ((uint32_t)0xffu << 24));
     REG(A7XX_VPC_VS_CLIP_CULL_CNTL, 0x00ffff00u);
     REG(A7XX_VPC_VS_CLIP_CULL_CNTL_V2, 0x00ffff00u);
     REG(A7XX_VPC_VS_SIV_CNTL, A7XX_VPC_INVALID_SIV_LOCATION);
@@ -607,7 +843,11 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     for (uint32_t word = 0u; word < 4u; ++word)
         REG(A7XX_VPC_VARYING_LM_TRANSFER + word,
             ~reflection->varying_mask[word]);
-    REG(A7XX_VPC_SO_OVERRIDE, A7XX_VPC_SO_ENABLE);
+    /* a6xx.xml names bit zero DISABLE. Mesa's direct-sysmem draw path
+     * explicitly clears it immediately before CP_DRAW: VPC's primitive path
+     * is still needed even without transform-feedback buffers. Keeping it
+     * set consumes vertices but produces no raster primitives or RB stores. */
+    REG(A7XX_VPC_SO_OVERRIDE, 0u);
     REG(A7XX_GRAS_CL_CNTL, A7XX_GRAS_CL_Z_CLAMP |
         A7XX_GRAS_CL_VP_CLIP_IGNORE);
     REG(A7XX_GRAS_MODE_CNTL, 0x2u);
@@ -624,11 +864,24 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_GRAS_SC_VIEWPORT_SCISSOR, a7xx_pack_scissor(0u, 0u));
     REG(A7XX_GRAS_SC_VIEWPORT_SCISSOR + 1u,
         a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
-    /* The compiler assigns gl_VertexID to a real IR3 register, but only VFD
-     * can populate it for an auto-indexed draw.  Until this is programmed
-     * the shader executes with an undefined index and A7xx can consume the
-     * packet without ever reaching the RB completion event. */
-    REG(A7XX_VFD_CNTL_0, 0u); /* no memory vertex fetches or decodes */
+    /* fd6_emit_sysmem_prep() calls set_scissor() for every direct-sysmem
+     * pass.  Screen and viewport scissors do not replace this window clip:
+     * leaving it inherited can retain a zero-area firmware scissor, which
+     * lets CP/RB finish a draw while rasterizing zero fragments. */
+    REG(A7XX_GRAS_SC_WINDOW_SCISSOR, a7xx_pack_scissor(0u, 0u));
+    REG(A7XX_GRAS_SC_WINDOW_SCISSOR + 1u,
+        a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
+    /* Mesa's paired A7xx set_scissor() write.  It is inert for this 3D draw
+     * but prevents inherited 2D/scissor state from disagreeing with GRAS. */
+    REG(A7XX_GRAS_A2D_SCISSOR, a7xx_pack_scissor(0u, 0u));
+    REG(A7XX_GRAS_A2D_SCISSOR + 1u,
+        a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
+    /* Keep the first visible proof independent from the gl_VertexID
+     * sideband path: Mesa reflects one vec2 position attribute and the
+     * kernel supplies its fixed three-vertex buffer.  0xc6700000 is Mesa's
+     * A7xx VFD_FETCH encoding for R32G32_FLOAT (format 0x67, UNK30, FLOAT).
+     */
+    REG(A7XX_VFD_CNTL_0, 0x00000101u); /* one fetch and one decode */
     REG(A7XX_VFD_CNTL_1,
         (uint32_t)reflection->vertex.vertex_id_regid |
         ((uint32_t)reflection->vertex.instance_id_regid << 8) |
@@ -643,6 +896,32 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_VFD_RENDER_MODE, A7XX_RENDERING_PASS);
     REG(0xa00eu, 0u);                /* VFD_INDEX_OFFSET */
     REG(0xa00fu, 0u);                /* VFD_INSTANCE_START_OFFSET */
+    REG(A7XX_VFD_VERTEX_BUFFER_BASE, (uint32_t)draw->vertex_buffer_gpu_va);
+    REG(A7XX_VFD_VERTEX_BUFFER_BASE + 1u,
+        (uint32_t)(draw->vertex_buffer_gpu_va >> 32));
+    REG(A7XX_VFD_VERTEX_BUFFER_SIZE, draw->vertex_buffer_bytes);
+    REG(A7XX_VFD_VERTEX_BUFFER_STRIDE, draw->vertex_buffer_stride);
+    REG(A7XX_VFD_FETCH_INSTR, 0xc6700000u);
+    REG(A7XX_VFD_FETCH_INSTR + 1u, 1u);
+    REG(A7XX_VFD_DEST_CNTL,
+        (uint32_t)reflection->vertex_attribute0_compmask |
+        ((uint32_t)reflection->vertex_attribute0_regid << 4));
+    /* The first fragment shader has neither inputs nor side effects.  Do
+     * not inherit any display-firmware interpolation, alpha-test, depth, or
+     * stencil enables: each is capable of discarding every fragment while CP
+     * and RB_DONE still complete normally. */
+    REG(0x8005u, 0u);                /* GRAS_CL_INTERP_CNTL */
+    REG(0x8809u, 0u);                /* RB_INTERP_CNTL */
+    REG(0x880au, 0u);                /* RB_PS_INPUT_CNTL */
+    REG(0x8810u, 0u);                /* RB_PS_SAMPLEFREQ_CNTL */
+    REG(0x880eu, 0u);                /* RB_DITHER_CNTL */
+    REG(0x8864u, 0u);                /* RB_ALPHA_TEST_CNTL */
+    REG(0x8871u, 0u);                /* RB_DEPTH_CNTL */
+    REG(0x8880u, 0u);                /* RB_STENCIL_CNTL */
+    REG(0x8114u, 0u);                /* GRAS_SU_DEPTH_CNTL */
+    REG(0x8115u, 0u);                /* GRAS_SU_STENCIL_CNTL */
+    /* Mesa has no A7xx RB_RENDER_CNTL write in its direct-sysmem path; the
+     * hardware's reset value zero is the correct Gen7 default. */
     REG(A7XX_RB_RENDER_CNTL, 0u);
     REG(A7XX_GRAS_SU_RENDER_CNTL, 0u);
     REG(A7XX_SP_RENDER_CNTL, 0u);
@@ -662,14 +941,23 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     /* A7xx's sysmem render-begin sequence explicitly selects the sysmem
      * clear-target mode, even though this first pipeline issues no clear. */
     REG(A7XX_RB_CLEAR_TARGET, 0u);
-    REG(A7XX_RB_MRT_CONTROL, A7XX_RB_MRT_COMPONENT_RGBA);
+    REG(A7XX_RB_MRT_CONTROL, A7XX_RB_MRT_CONTROL_REPLACE);
+    /* fd6_emit_blend programs every attachment's factors even when blending
+     * is disabled.  Explicit source-one/destination-zero ADD is the normal
+     * replace path and prevents an inherited blend descriptor from discarding
+     * RT0's fragment colour. */
+    REG(A7XX_RB_MRT_BLEND_CONTROL, 0x00010001u);
     REG(A7XX_RB_MRT_BUF_INFO, A7XX_FMT_8_8_8_8_UNORM |
         (A7XX_TILE_LINEAR << 8) | (A7XX_SWAP_WXYZ << 13));
-    /* RB_MRT_PITCH and RB_MRT_ARRAY_PITCH are byte values.  Unlike the
-     * LRZ/flag-buffer pitch fields they do not carry an implicit shift. */
-    REG(A7XX_RB_MRT_PITCH, draw->target->stride_bytes);
+    /* A7xx encodes both linear-MRT pitch fields in 64-byte units (the
+     * generated a6xx.xml declares `shr=6`).  Feeding raw byte counts makes
+     * the RB walk each row 64x too far, so a draw can retire without ever
+     * reaching the imported scanout surface.  Validation above requires a
+     * 64-byte stride, making this conversion exact and lossless. */
+    REG(A7XX_RB_MRT_PITCH, draw->target->stride_bytes >> 6);
     REG(A7XX_RB_MRT_ARRAY_PITCH,
-        (uint32_t)((uint64_t)draw->target->stride_bytes * draw->target->height));
+        (uint32_t)(((uint64_t)draw->target->stride_bytes *
+                    draw->target->height) >> 6));
     REG(A7XX_RB_MRT_BASE, (uint32_t)draw->target_gpu_va);
     REG(A7XX_RB_MRT_BASE + 1u, (uint32_t)(draw->target_gpu_va >> 32));
     REG(A7XX_RB_MRT_BASE_GMEM, 0u);
@@ -685,19 +973,79 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_RB_PS_OUTPUT_CNTL, 0u);
     REG(A7XX_RB_PS_MRT_CNTL, 1u);
     REG(A7XX_RB_PS_OUTPUT_MASK, 0xfu);
+    /* fd6_blend.cc leaves both blend-enable and independent-blend clear for
+     * a single replacement MRT.  Keep the full RB sample mask, but do not
+     * route the shader through an unbound independent-blend descriptor. */
     REG(A7XX_SP_BLEND_CNTL, 0u);
+    REG(A7XX_RB_BLEND_CNTL, A7XX_RB_BLEND_CNTL_NO_BLEND);
     REG(A7XX_SP_PS_OUTPUT_MASK, 0xfu);
     /* Depth/sample-mask/stencil outputs are absent.  A7xx uses r63.x
      * (0xfc), not zero, as the disabled register sentinel. */
-    REG(A7XX_SP_PS_OUTPUT_CNTL, 0xfcfc00fcu);
+    REG(A7XX_SP_PS_OUTPUT_CNTL, 0xfcfcfc00u);
     REG(A7XX_SP_PS_MRT_CNTL, 1u);
     REG(A7XX_SP_PS_OUTPUT_REG, reflection->fragment.primary_output_regid);
     REG(A7XX_SP_PS_MRT_REG, A7XX_FMT_8_8_8_8_UNORM);
-    REG(A7XX_SP_PS_OUTPUT_CONST_CNTL, 0u);
-    REG(A7XX_SP_PS_OUTPUT_CONST_MASK, 0u);
+    /* IR3 aliases constant-folded fragment-colour components to the
+     * authenticated static constant pool.  Mesa's fd6_program emits these
+     * two fields from aliased_components; leaving them zero can execute the
+     * whole FS yet give RB no colour source. */
+    REG(A7XX_SP_PS_OUTPUT_CONST_CNTL,
+        reflection->fragment.output_const_mask ? 1u : 0u);
+    REG(A7XX_SP_PS_OUTPUT_CONST_MASK,
+        reflection->fragment.output_const_mask);
 #undef REG
     if (adreno_x1_85_emit_context_regs(ring, regs, reg_count) != 0)
         return -3;
+    /* Mesa emits the complete render-target attachment block through its
+     * command-register builder, rather than relying on context restore.
+     * Keeping only RB_BUFFER_CNTL outside the bunch lets an inherited
+     * firmware attachment shadow a valid shader draw: RB can execute every
+     * fragment yet route no colour store to RT0.  Reassert the whole one-MRT
+     * direct-sysmem contract immediately before the draw. */
+    if (a7xx_emit_reg32(ring, A7XX_RB_CNTL, 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_BUFFER_CNTL,
+                         A7XX_RB_ALL_BUFFERS_SYSMEM) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_CLEAR_TARGET, 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_CONTROL,
+                         A7XX_RB_MRT_CONTROL_REPLACE) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_BLEND_CONTROL,
+                         0x00010001u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_BUF_INFO,
+                         A7XX_FMT_8_8_8_8_UNORM |
+                         (A7XX_TILE_LINEAR << 8) |
+                         (A7XX_SWAP_WXYZ << 13)) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_PITCH,
+                         draw->target->stride_bytes >> 6) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_ARRAY_PITCH,
+                         (uint32_t)(((uint64_t)draw->target->stride_bytes *
+                                     draw->target->height) >> 6)) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_BASE,
+                         (uint32_t)draw->target_gpu_va) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_BASE + 1u,
+                         (uint32_t)(draw->target_gpu_va >> 32)) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_MRT_BASE_GMEM, 0u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8903u, 0u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8904u, 0u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8905u, 0u) != 0 ||
+        a7xx_emit_reg32(ring, 0x8102u,
+                         A7XX_FMT_8_8_8_8_UNORM) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_SRGB_CNTL, 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_SRGB_CNTL, 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_PS_OUTPUT_CNTL, 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_PS_MRT_CNTL, 1u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_RB_PS_OUTPUT_MASK, 0xfu) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_OUTPUT_MASK, 0xfu) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_OUTPUT_CNTL, 0xfcfcfc00u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_MRT_CNTL, 1u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_OUTPUT_REG,
+                         reflection->fragment.primary_output_regid) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_MRT_REG,
+                         A7XX_FMT_8_8_8_8_UNORM) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_OUTPUT_CONST_CNTL,
+                         reflection->fragment.output_const_mask ? 1u : 0u) != 0 ||
+        a7xx_emit_reg32(ring, A7XX_SP_PS_OUTPUT_CONST_MASK,
+                         reflection->fragment.output_const_mask) != 0)
+        return -4;
     /* Mesa's NIR constant pool is appended to each MIR3 binary.  Match
      * Turnip's tu6_emit_xs path: bind it by compiler-selected UBO index
      * before the draw, while addresses and packet contents remain wholly
@@ -711,26 +1059,26 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
             ring, ADRENO_X1_85_CONSTANT_VERTEX, 0u,
             draw->vertex_default_ubo_gpu_va,
             draw->vertex_default_ubo_bytes / 16u) != 0)
-        return -4;
+        return -5;
     if (reflection->fragment_app_ubo_count &&
         adreno_x1_85_emit_cp_constant_ubo(
             ring, ADRENO_X1_85_CONSTANT_FRAGMENT, 0u,
             draw->fragment_default_ubo_gpu_va,
             draw->fragment_default_ubo_bytes / 16u) != 0)
-        return -5;
+        return -6;
     if (pipeline->vertex_constant_data_bytes &&
         adreno_x1_85_emit_cp_constant_ubo(
             ring, ADRENO_X1_85_CONSTANT_VERTEX,
             pipeline->vertex_constant_data_ubo_index,
             pipeline->vertex_constant_data_gpu_va,
             pipeline->vertex_constant_data_bytes / 16u) != 0)
-        return -6;
+        return -7;
     if (pipeline->fragment_constant_data_bytes &&
         adreno_x1_85_emit_cp_constant_ubo(
             ring, ADRENO_X1_85_CONSTANT_FRAGMENT,
             pipeline->fragment_constant_data_ubo_index,
             pipeline->fragment_constant_data_gpu_va,
             pipeline->fragment_constant_data_bytes / 16u) != 0)
-        return -7;
+        return -8;
     return 0;
 }

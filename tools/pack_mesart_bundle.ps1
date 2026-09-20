@@ -69,25 +69,26 @@ function Convert-HexToBytes {
 
 function Read-P256PrivateScalar {
   param([string]$Path)
-  # The generator's private-key contract is deliberately narrower than the
-  # generic public/artifact formatting parser: exactly 32 bytes encoded as
-  # 64 ASCII hex characters.  Decoding raw bytes avoids PowerShell text
-  # provider behavior and keeps the scalar out of diagnostic strings.
+  # Accept the original Windows PowerShell generator's UTF-16LE output as
+  # well as the current ASCII contract.  Both represent exactly the same
+  # 64 hex characters.  Decode locally and never place the scalar in an
+  # error message or output stream.
   $raw = [IO.File]::ReadAllBytes($Path)
-  if ($raw.Length -ne 64) { throw 'Private key is not a 32-byte ASCII scalar.' }
-  $out = [byte[]]::new(32)
-  for ($i = 0; $i -lt 32; ++$i) {
-    $pair = $raw[($i * 2)..($i * 2 + 1)]
-    if (!(($pair[0] -ge 48 -and $pair[0] -le 57) -or
-          ($pair[0] -ge 65 -and $pair[0] -le 70) -or
-          ($pair[0] -ge 97 -and $pair[0] -le 102)) -or
-        !(($pair[1] -ge 48 -and $pair[1] -le 57) -or
-          ($pair[1] -ge 65 -and $pair[1] -le 70) -or
-          ($pair[1] -ge 97 -and $pair[1] -le 102))) {
-      throw 'Private key is not a 32-byte ASCII scalar.'
-    }
-    $out[$i] = [Convert]::ToByte([Text.Encoding]::ASCII.GetString($pair), 16)
+  if (!$raw.Length) { throw 'Private key is empty.' }
+  if ($raw.Length -ge 2 -and $raw[0] -eq 0xff -and $raw[1] -eq 0xfe) {
+    $text = [Text.Encoding]::Unicode.GetString($raw)
+  } elseif ($raw.Length -ge 2 -and $raw[0] -eq 0xfe -and $raw[1] -eq 0xff) {
+    $text = [Text.Encoding]::BigEndianUnicode.GetString($raw)
+  } else {
+    # Decode bare UTF-8/ASCII keys as text.  Validation below accepts only a
+    # single exact scalar, so this cannot reinterpret arbitrary bytes as key
+    # material; it merely avoids PowerShell's output-array coercion.
+    $text = [Text.Encoding]::UTF8.GetString($raw)
   }
+  $normalized = ($text -replace '[\s\uFEFF\u200B]', '')
+  Write-Host ("[mesart] private key input: bytes={0} normalized-chars={1} hex={2}" -f $raw.Length, $normalized.Length, ($normalized -match '^[0-9a-fA-F]+$')) -ForegroundColor DarkGray
+  $out = Convert-HexToBytes $text 'Private key'
+  if ($out.Length -ne 32) { throw 'Private key is not a 32-byte scalar.' }
   return ,$out
 }
 

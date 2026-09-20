@@ -270,7 +270,14 @@ function Compile-C {
       if (!$CppFlags) { throw "C++ source needs CppFlags: $f" }
       & $clang $CppFlags "-c" $f "-o" $o
     } else {
-      & $clang $CFlags "-c" $f "-o" $o
+      # Fault reporting must work even with alignment checking enabled.
+      # In particular, packed RGB constants must not become unaligned LDRH.
+      $fileCFlags = @($CFlags)
+      if ([IO.Path]::GetFileName($f) -eq 'aa64_exceptions.c' -and
+          ($CFlags -match 'aarch64')) {
+        $fileCFlags += '-mstrict-align'
+      }
+      & $clang $fileCFlags "-c" $f "-o" $o
     }
 
     if ($LASTEXITCODE) { throw "clang failed on $f" }

@@ -3,6 +3,7 @@ backups/
 build/
 linux-firmware/
 hardware-dossiers/
+OS/Firmware/adreno-x1-85/oem/*.mbn
 
 *.ps1
 *.sacx

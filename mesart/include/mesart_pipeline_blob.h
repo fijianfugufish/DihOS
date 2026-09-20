@@ -10,7 +10,7 @@
  * kernel-owned.
  */
 #define MESART_PIPELINE_MAGIC          0x5049504du /* "MPIP" little-endian */
-#define MESART_PIPELINE_VERSION        2u
+#define MESART_PIPELINE_VERSION        4u
 #define MESART_PIPELINE_HEADER_BYTES   256u
 #define MESART_PIPELINE_MAX_VARYINGS   32u
 /* Mesa/Freedreno encodes r63.x as (63 << 2), its INVALID_REG sentinel.  MPIP
@@ -40,8 +40,7 @@ typedef struct __attribute__((packed)) mesart_pipeline_stage_state
     uint8_t half_reg_footprint;
     uint8_t branchstack;
     uint8_t flags;
-    /* Only the input/system and output registers needed by DihOS' initial
-     * auto-indexed triangle profile are admitted. */
+    /* System values and stage outputs used by DihOS' narrow first profile. */
     uint16_t vertex_id_regid;
     uint16_t instance_id_regid;
     /* VS: position then point-size. FS: primary colour output then invalid. */
@@ -49,7 +48,11 @@ typedef struct __attribute__((packed)) mesart_pipeline_stage_state
     uint16_t secondary_output_regid;
     uint16_t total_varying_components;
     uint16_t output_dwords;
-    uint32_t reserved;
+    /* FS only: Mesa IR3 can alias constant-folded colour components directly
+     * to its authenticated constant data.  These four bits are RT0's
+     * aliased_components mask, consumed solely for SP_PS_OUTPUT_CONST_MASK.
+     * VS and every bit above RT0 must remain zero. */
+    uint32_t output_const_mask;
 } mesart_pipeline_stage_state;
 
 typedef struct __attribute__((packed)) mesart_pipeline_varying
@@ -86,7 +89,15 @@ typedef struct __attribute__((packed)) mesart_pipeline_header
     uint8_t varying_stride_dwords;
     uint8_t position_location;
     uint8_t point_size_location;
+    /* The first visible proof admits exactly one kernel-owned vertex stream:
+     * location 0, R32G32_FLOAT.  Reflection carries only the compiler's
+     * destination register and component mask; it never carries a GPU
+     * address, stride, format command, or packet data. */
+    uint8_t vertex_attribute_count;
+    uint8_t vertex_attribute0_slot;
+    uint8_t vertex_attribute0_regid;
+    uint8_t vertex_attribute0_compmask;
     uint32_t varying_mask[4];
     mesart_pipeline_varying varyings[MESART_PIPELINE_MAX_VARYINGS];
-    uint8_t reserved[16];
+    uint8_t reserved[12];
 } mesart_pipeline_header;
