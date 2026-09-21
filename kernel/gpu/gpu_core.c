@@ -83,6 +83,7 @@ typedef struct gpu_core_mesart_3d_inflight
 } gpu_core_mesart_3d_inflight;
 
 static gpu_core_mesart_3d_inflight g_mesart_3d_inflight;
+static uint8_t g_mesart_3d_frame_ready;
 
 #define GPU_SMMUV2_FSR_FAULT_MASK 0xC00001FEu
 
@@ -652,6 +653,7 @@ int gpu_core_init(const boot_info *boot)
     g_runtime_gx_lease_held = 0u;
     g_runtime_3d_sequence = 0u;
     g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
+    g_mesart_3d_frame_ready = 0u;
     gpu_gmu_memory_release(&g_gmu_memory);
     rpmh_cmd_db_mapping_release(&g_rpmh_cmd_db);
     gpu_buffer_release(&g_scanout_target.buffer);
@@ -2619,19 +2621,11 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
         terminal_print("");
         if (changed)
         {
-            const uint32_t x = (g_scanout_target.width - g_triangle_target.width) / 2u;
-            const uint32_t y = (g_scanout_target.height - g_triangle_target.height) / 2u;
-            for (uint32_t row = 0u; row < g_triangle_target.height; ++row)
-            {
-                uint32_t *dst = (uint32_t *)((uint8_t *)g_scanout_target.buffer.cpu +
-                    (uint64_t)(y + row) * g_scanout_target.pitch + (uint64_t)x * 4u);
-                const uint32_t *src = (const uint32_t *)((const uint8_t *)pixels +
-                    (uint64_t)row * g_triangle_target.stride_bytes);
-                for (uint32_t col = 0u; col < g_triangle_target.width; ++col)
-                    dst[col] = src[col];
-                asm_dma_clean_range(dst, g_triangle_target.width * 4u);
-            }
-            terminal_print("[K:GPU] Mesart GPU surface copied to screen centre (256x256)");
+            /* Retain the completed offscreen surface. Presentation happens
+             * after each normal KGFX frame, so the desktop remains live and
+             * can use this shader result without racing the GPU fence. */
+            g_mesart_3d_frame_ready = 1u;
+            terminal_print("[K:GPU] Mesart GPU surface cached for asynchronous composition");
         }
         else
         {
@@ -2644,6 +2638,47 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
     terminal_flush_log();
     g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
     return 0;
+}
+
+int gpu_core_mesart_3d_present_cached(void)
+{
+    const uint32_t *pixels;
+    uint32_t x;
+    uint32_t y;
+
+    if (!g_mesart_3d_frame_ready)
+        return 1;
+    if (!g_triangle_target.cpu_pixels || !g_scanout_target.buffer.cpu ||
+        g_triangle_target.width > g_scanout_target.width ||
+        g_triangle_target.height > g_scanout_target.height)
+        return -1;
+    pixels = (const uint32_t *)g_triangle_target.cpu_pixels;
+    x = (g_scanout_target.width - g_triangle_target.width) / 2u;
+    y = (g_scanout_target.height - g_triangle_target.height) / 2u;
+    for (uint32_t row = 0u; row < g_triangle_target.height; ++row)
+    {
+        uint32_t *dst = (uint32_t *)((uint8_t *)g_scanout_target.buffer.cpu +
+            (uint64_t)(y + row) * g_scanout_target.pitch + (uint64_t)x * 4u);
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)pixels +
+            (uint64_t)row * g_triangle_target.stride_bytes);
+        /* The diagnostic seed is the transparent portion of this first
+         * offscreen profile. Only shader-written pixels cover KGFX. */
+        for (uint32_t col = 0u; col < g_triangle_target.width; ++col)
+            if (src[col] != GPU_CORE_MESART_SCANOUT_PROBE_MARKER)
+                dst[col] = src[col];
+        asm_dma_clean_range(dst, g_triangle_target.width * 4u);
+    }
+    return 0;
+}
+
+void gpu_core_mesart_3d_discard_cached(void)
+{
+    g_mesart_3d_frame_ready = 0u;
+}
+
+uint8_t gpu_core_mesart_3d_frame_ready(void)
+{
+    return g_mesart_3d_frame_ready;
 }
 
 uint8_t gpu_core_mesart_3d_busy(void)

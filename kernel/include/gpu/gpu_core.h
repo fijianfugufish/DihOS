@@ -106,6 +106,12 @@ int gpu_core_mesart_3d_kick(
  * and a negative error after failing the runtime closed. */
 int gpu_core_mesart_3d_poll(uint64_t *out_fence);
 
+/* Composites the most recently completed offscreen shader result over the
+ * current CPU-rendered scanout. It never waits for an in-flight fence. */
+int gpu_core_mesart_3d_present_cached(void);
+void gpu_core_mesart_3d_discard_cached(void);
+uint8_t gpu_core_mesart_3d_frame_ready(void);
+
 /* True only while CP/RB own the trusted runtime ring. The compositor uses
  * this to avoid a CPU present racing an in-flight GPU render. */
 uint8_t gpu_core_mesart_3d_busy(void);

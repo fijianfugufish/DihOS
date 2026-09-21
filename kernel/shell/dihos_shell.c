@@ -4665,6 +4665,7 @@ static void dihos_mesart_visual_release(void)
     if (!G_mesart_visual.active)
         return;
     process = G_mesart_visual.service.process;
+    gpu_core_mesart_3d_discard_cached();
     mesart_renderer_release(&G_mesart_visual.service);
     (void)dihos_process_reap(&G_mesart_processes, process);
     G_mesart_visual = (dihos_mesart_visual_state){0};
@@ -4679,11 +4680,17 @@ uint8_t dihos_shell_mesart_visual_frame_busy(void)
         dihos_mesart_visual_release();
         return 0u;
     }
-    /* The first visual proof deliberately holds the completed scanout frame
-     * instead of asking KGFX to repaint over it. The kernel, input, scheduler
-     * and fence poll continue running; only CPU presentation is paused until
-     * `mesart:triangle stop`. */
-    return 1u;
+    /* GPU work and cached presentation never suppress KGFX. The completed
+     * shader surface is overlaid after the normal CPU frame instead. */
+    return 0u;
+}
+
+void dihos_shell_mesart_visual_present_after_cpu(void)
+{
+    if (!G_mesart_visual.active || G_mesart_visual.stop_requested ||
+        !G_mesart_visual.submitted)
+        return;
+    (void)gpu_core_mesart_3d_present_cached();
 }
 
 void dihos_shell_mesart_visual_submit_after_cpu(void)
@@ -4736,6 +4743,8 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
         terminal_print(gpu_core_mesart_3d_busy() ? "yes" : "no");
         terminal_print(" frame-submitted=");
         terminal_print(G_mesart_visual.submitted ? "yes" : "no");
+        terminal_print(" frame-ready=");
+        terminal_print(gpu_core_mesart_3d_frame_ready() ? "yes" : "no");
         terminal_flush_log();
         return 0;
     }
@@ -4811,7 +4820,7 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
     G_mesart_visual.service = service;
     G_mesart_visual.pipeline = pipeline;
     G_mesart_visual.active = 1u;
-    terminal_success("Mesart textured triangle queued asynchronously; CPU presentation pauses only while its GPU frame is retained");
+    terminal_success("Mesart textured triangle queued asynchronously; KGFX remains live and composites the completed shader surface each frame");
     terminal_flush_log();
     return 0;
 

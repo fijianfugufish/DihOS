@@ -522,10 +522,11 @@ void kmain(boot_info *bi)
         }
 
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
-        /* The visual test holds its one completed GPU frame on scanout. CPU
-         * presentation resumes immediately when the test is stopped. */
+        /* KGFX remains the fallback/base compositor while the GPU works.
+         * A completed shader surface is overlaid only after its fence. */
         if (!dihos_shell_mesart_visual_frame_busy())
             kgfx_render_all(black);
+        dihos_shell_mesart_visual_present_after_cpu();
         dihos_shell_mesart_visual_submit_after_cpu();
         task_accounting_add(TASK_ACCOUNT_SACX, 1u);
         sacx_runtime_update();
