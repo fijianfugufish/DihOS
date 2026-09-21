@@ -89,7 +89,8 @@ static uint32_t fragment_color0_alias_mask(const ir3_shader_variant *variant)
 
 static bool write_blob(const char *path, uint32_t stage,
                        const ir3_shader_variant *variant,
-                       uint32_t application_ubos)
+                       uint32_t application_ubos,
+                       uint32_t application_samplers)
 {
     const uint64_t code_bytes = (uint64_t)variant->info.sizedwords * sizeof(uint32_t);
     const uint64_t binary_bytes = variant->info.size;
@@ -121,7 +122,7 @@ static bool write_blob(const char *path, uint32_t stage,
         flags,
         variant->instrlen,
         variant->constlen,
-        (uint16_t)variant->num_samp,
+        (uint16_t)application_samplers,
         (uint16_t)app_ubos,
         (uint16_t)variant->inputs_count,
         (uint16_t)variant->outputs_count,
@@ -148,8 +149,7 @@ static bool write_blob(const char *path, uint32_t stage,
           constant_data_offset < code_bytes ||
           constant_data_offset > binary_bytes ||
           constant_data_bytes > binary_bytes - constant_data_offset)) ||
-        variant->num_samp < 0 ||
-        (uint32_t)variant->num_samp > MESART_IR3_BLOB_MAX_SAMPLERS ||
+        application_samplers > MESART_IR3_BLOB_MAX_SAMPLERS ||
         app_ubos > MESART_IR3_BLOB_MAX_UBOS ||
         variant->constlen > MESART_IR3_BLOB_MAX_CONST_VECS ||
         variant->inputs_count > MESART_IR3_BLOB_MAX_STAGE_IO ||
@@ -221,10 +221,14 @@ static bool reflect_default_ubo_push(const ir3_shader_variant *variant,
 static mesart_pipeline_stage_state pipeline_stage(
     const ir3_shader_variant *variant, bool vertex_stage)
 {
-    const uint32_t vertex_id = vertex_stage ?
-        ir3_find_sysval_regid(variant, SYSTEM_VALUE_VERTEX_ID) : INVALID_REG;
-    const uint32_t instance_id = vertex_stage ?
-        ir3_find_sysval_regid(variant, SYSTEM_VALUE_INSTANCE_ID) : INVALID_REG;
+    /* These two compact stage-specific fields carry VS vertex/instance IDs
+     * or the FS perspective/linear pixel barycentric register IDs. */
+    const uint32_t vertex_id = ir3_find_sysval_regid(
+        variant, vertex_stage ? SYSTEM_VALUE_VERTEX_ID :
+                                SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL);
+    const uint32_t instance_id = ir3_find_sysval_regid(
+        variant, vertex_stage ? SYSTEM_VALUE_INSTANCE_ID :
+                                SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL);
     const uint32_t primary_output = vertex_stage ?
         ir3_find_output_regid(variant, VARYING_SLOT_POS) : INVALID_REG;
     const uint32_t secondary_output = vertex_stage ?
@@ -250,8 +254,10 @@ static mesart_pipeline_stage_state pipeline_stage(
  * packet opcode, a GPU address, a buffer stride, or a render target. */
 static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
                            uint32_t vertex_application_ubos,
+                           uint32_t vertex_application_samplers,
                            const ir3_shader_variant *fragment,
-                           uint32_t fragment_application_ubos)
+                           uint32_t fragment_application_ubos,
+                           uint32_t fragment_application_samplers)
 {
     ir3_shader_linkage linkage = {};
     mesart_pipeline_header header = {};
@@ -270,7 +276,9 @@ static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
         /* Mesa's IR3 uses VERT_ATTRIB_GENERIC0 (slot 15) for GLSL
          * layout(location = 0), not the user-facing location number. */
         vertex->inputs[0].sysval || vertex->inputs[0].slot != 15u ||
-        vertex->inputs[0].compmask != 0x3u || vertex->pvtmem_size != 0u ||
+        (vertex->inputs[0].compmask != 0x3u &&
+         vertex->inputs[0].compmask != 0xfu) ||
+        vertex->pvtmem_size != 0u ||
         fragment->pvtmem_size != 0u || vertex->shared_size != 0u ||
         fragment->shared_size != 0u || vertex->clip_mask || vertex->cull_mask ||
         fragment->reads_primid || position_regid == INVALID_REG ||
@@ -305,10 +313,12 @@ static bool write_pipeline(const char *path, const ir3_shader_variant *vertex,
     header.fragment_instruction_groups = fragment->instrlen;
     header.vertex_const_vec4s = vertex->constlen;
     header.fragment_const_vec4s = fragment->constlen;
-    header.vertex_sampler_count = (uint16_t)vertex->num_samp;
-    header.fragment_sampler_count = (uint16_t)fragment->num_samp;
+    header.vertex_sampler_count = (uint16_t)vertex_application_samplers;
+    header.fragment_sampler_count = (uint16_t)fragment_application_samplers;
     if (vertex_application_ubos > MESART_IR3_BLOB_MAX_UBOS ||
-        fragment_application_ubos > MESART_IR3_BLOB_MAX_UBOS)
+        fragment_application_ubos > MESART_IR3_BLOB_MAX_UBOS ||
+        vertex_application_samplers > MESART_IR3_BLOB_MAX_SAMPLERS ||
+        fragment_application_samplers > MESART_IR3_BLOB_MAX_SAMPLERS)
         return false;
     header.vertex_app_ubo_count = (uint16_t)vertex_application_ubos;
     header.fragment_app_ubo_count = (uint16_t)fragment_application_ubos;
@@ -416,9 +426,16 @@ int main(int argc, char **argv)
     }
     std::fprintf(stderr, "[mesart-glslc] X1-85 Mesa device record selected\n");
 
+    /* The first DihOS texture profile intentionally uses an ordinary SAM
+     * instruction.  IR3's optional FS pre-dispatch optimization moves a
+     * texture operation out of the machine code and requires extra
+     * chip-specific command reflection.  Disable only that optimization in
+     * this host tool until MPIP grows an authenticated prefetch record. */
+    struct fd_dev_info mesart_device_info = *device_info;
+    mesart_device_info.props.has_fs_tex_prefetch = false;
     ir3_compiler_options compiler_options = {};
     ir3_compiler *compiler = ir3_compiler_create(
-        nullptr, &device_id, device_info, &compiler_options);
+        nullptr, &device_id, &mesart_device_info, &compiler_options);
     if (!compiler) {
         std::fprintf(stderr, "Could not create the Mesa Freedreno compiler.\n");
         standalone_compiler_cleanup(program, &context);
@@ -436,6 +453,7 @@ int main(int argc, char **argv)
     ir3_shader *shaders[2] = {};
     ir3_shader_variant *variants[2] = {};
     uint32_t application_ubos[2] = {};
+    uint32_t application_samplers[2] = {};
     bool written = true;
     for (uint32_t index = 0; index < 2u; ++index) {
         /* The standalone link path performs Mesa's mandatory cross-stage and
@@ -463,6 +481,11 @@ int main(int argc, char **argv)
         nir_lower_io(nir, nir_var_uniform, mesart_uniform_vec4_slots,
                      (nir_lower_io_options)0);
         nir_lower_uniforms_to_ubo(nir, false, false);
+        /* Gallium's state tracker normally replaces GLSL sampler derefs with
+         * bounded texture/sampler indices before a backend sees NIR.  This
+         * standalone bridge has no state tracker, so perform that standard
+         * lowering explicitly (u_texture is binding/index zero). */
+        nir_lower_samplers(nir);
         if (!nir->info.io_lowered) {
             ir3_nir_lower_io_vars_to_temporaries(nir);
             ir3_nir_lower_io(nir);
@@ -474,6 +497,7 @@ int main(int argc, char **argv)
          * const_state also clamps its app count to one. Neither is a GLSL
          * application resource DihOS must expose. */
         application_ubos[index] = nir->info.num_ubos;
+        application_samplers[index] = nir->info.num_textures;
         std::fprintf(stderr, "[mesart-glslc] NIR finalized for IR3 (%s)\n",
                      index == 0u ? "vertex" : "fragment");
         ir3_shader *shader = ir3_shader_from_nir(compiler, nir, &ir3_options);
@@ -498,7 +522,8 @@ int main(int argc, char **argv)
     if (written) {
         for (uint32_t index = 0u; index < 2u; ++index) {
             if (!write_blob(output_paths[index], stage_types[index],
-                            variants[index], application_ubos[index])) {
+                            variants[index], application_ubos[index],
+                            application_samplers[index])) {
                 std::fprintf(stderr, "Could not write the %s MIR3 shader artifact.\n",
                              index == 0u ? "vertex" : "fragment");
                 written = false;
@@ -511,7 +536,9 @@ int main(int argc, char **argv)
         }
     }
     if (written && !write_pipeline(argv[5], variants[0], application_ubos[0],
-                                   variants[1], application_ubos[1])) {
+                                   application_samplers[0], variants[1],
+                                   application_ubos[1],
+                                   application_samplers[1])) {
         std::fprintf(stderr, "Could not write an initial-profile MPIP pipeline artifact.\n");
         written = false;
     } else if (written) {

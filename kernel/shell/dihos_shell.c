@@ -4724,8 +4724,6 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
         stage->positional[0] : "status";
     mesart_renderer_service service = {0};
     mesart_renderer_graphics_pipeline pipeline = {0};
-    uint64_t status = 0u;
-    int enter_rc;
     int rc;
 
     if (strcmp(mode, "status") == 0)
@@ -4791,40 +4789,15 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
         rc = -2;
         goto failed;
     }
-    enter_rc = aa64_user_enter_with_handler(&service.vm, service.image.entry_va,
-                                            service.stack_top_va, &status,
-                                            mesart_renderer_syscall, &service);
-    if (enter_rc != 0 || (status & DIHOS_EL0_EXIT_FAULT) ||
-        status != 0x4d535254u)
-    {
-        rc = -3;
-        goto failed;
-    }
-    rc = mesart_renderer_test_complete_queued(&service);
-    if (rc != 0)
-    {
-        /* Keep this distinct from graphics setup.  The first queued resource
-         * write is a CP/SMMU admission witness, and collapsing it into the
-         * old visual rc=4 hid the one value needed to diagnose a fresh-boot
-         * rejection. */
-        terminal_error("Mesart visual queue witness failed rc=");
-        terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
-        terminal_print(" backend-rc=");
-        terminal_print_inline_hex64(
-            (uint64_t)(uint32_t)(-service.last_backend_result));
-        terminal_print(" syscall-op=");
-        terminal_print_inline_hex64(service.last_syscall_operation);
-        terminal_print(" syscall-rc=");
-        terminal_print_inline_hex64(
-            (uint64_t)(uint32_t)(-service.last_syscall_result));
-        terminal_print(" queued=");
-        terminal_print_inline_hex64(service.command_buffer.queued_fence);
-        terminal_print("");
-        rc = -4;
-        goto failed;
-    }
+    /* The visual path consumes only the verified MIR3/MPIP assets.  Do not
+     * enter the Mesart stub or run its blocking CP write witness here: the
+     * real render is submitted after this shell turn and completed by the
+     * once-per-frame fence poll. `mesart:selftest` retains the full EL0 and
+     * syscall witness when that diagnostic is explicitly requested. */
     if (mesart_renderer_prepare_graphics_pipeline(
-            &service, &(mesart_renderer_graphics_request){0}, &pipeline) != 0 ||
+            &service, &(mesart_renderer_graphics_request){
+                .fragment_texture_count = 1u,
+            }, &pipeline) != 0 ||
         gpu_core_mesart_3d_preflight(&pipeline, &(uint32_t){0}) != 0)
     {
         rc = -5;
@@ -4838,7 +4811,7 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
     G_mesart_visual.service = service;
     G_mesart_visual.pipeline = pipeline;
     G_mesart_visual.active = 1u;
-    terminal_success("Mesart translated tint triangle started; CPU presentation is paused so the completed GPU frame remains visible");
+    terminal_success("Mesart textured triangle queued asynchronously; CPU presentation pauses only while its GPU frame is retained");
     terminal_flush_log();
     return 0;
 

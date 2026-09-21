@@ -87,11 +87,15 @@ int mesart_pipeline_validate(const void *bytes, uint64_t byte_count,
         header->vertex_attribute_count != 1u ||
         header->vertex_attribute0_slot != 15u ||
         header->vertex_attribute0_regid >= MESART_PIPELINE_INVALID_REGID ||
-        header->vertex_attribute0_compmask != 0x3u ||
+        (header->vertex_attribute0_compmask != 0x3u &&
+         header->vertex_attribute0_compmask != 0xfu) ||
         header->vertex.primary_output_regid == MESART_PIPELINE_INVALID_REGID ||
         header->vertex.secondary_output_regid == MESART_PIPELINE_INVALID_REGID ||
-        header->fragment.vertex_id_regid != MESART_PIPELINE_INVALID_REGID ||
-        header->fragment.instance_id_regid != MESART_PIPELINE_INVALID_REGID ||
+        (header->fragment.total_varying_components == 0u &&
+         (header->fragment.vertex_id_regid != MESART_PIPELINE_INVALID_REGID ||
+          header->fragment.instance_id_regid != MESART_PIPELINE_INVALID_REGID)) ||
+        (header->fragment.total_varying_components != 0u &&
+         header->fragment.vertex_id_regid == MESART_PIPELINE_INVALID_REGID) ||
         header->fragment.primary_output_regid == MESART_PIPELINE_INVALID_REGID ||
         header->fragment.secondary_output_regid != MESART_PIPELINE_INVALID_REGID ||
         header->varying_count < 2u ||

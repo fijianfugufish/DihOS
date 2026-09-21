@@ -49,18 +49,33 @@ int main(int argc, char **argv)
     if (mesart_pipeline_validate(p, pb, MESART_FREEDRENO_CHIP_ID_ADRENO_X1_85,
                                  &vi, &fi, &reflection))
         return 4;
-    if (reflection.vertex_app_ubo_count != 1 ||
+    if (reflection.vertex_app_ubo_count != 0 ||
         reflection.fragment_app_ubo_count != 1 ||
         reflection.vertex_attribute_count != 1 ||
         reflection.vertex_attribute0_slot != 15 ||
-        reflection.vertex_attribute0_compmask != 3 ||
-        reflection.vertex_ubo_push_vec4_count != 4 ||
+        reflection.vertex_attribute0_compmask != 15 ||
+        reflection.vertex_ubo_push_vec4_count != 0 ||
         reflection.fragment_ubo_push_vec4_count != 4 ||
         reflection.vertex_ubo_push_src_vec4 != 0 ||
         reflection.fragment_ubo_push_src_vec4 != 0 ||
-        reflection.vertex_sampler_count || reflection.fragment_sampler_count)
+        reflection.vertex_sampler_count || reflection.fragment_sampler_count != 1) {
+        fprintf(stderr,
+            "profile mismatch: ubos=%u/%u attr=%u slot=%u mask=0x%x "
+            "push=%u/%u src=%u/%u samplers=%u/%u\n",
+            reflection.vertex_app_ubo_count,
+            reflection.fragment_app_ubo_count,
+            reflection.vertex_attribute_count,
+            reflection.vertex_attribute0_slot,
+            reflection.vertex_attribute0_compmask,
+            reflection.vertex_ubo_push_vec4_count,
+            reflection.fragment_ubo_push_vec4_count,
+            reflection.vertex_ubo_push_src_vec4,
+            reflection.fragment_ubo_push_src_vec4,
+            reflection.vertex_sampler_count,
+            reflection.fragment_sampler_count);
         return 5;
-    puts("PASS: signed-profile inputs validate as translated/tinted VBO+UBO pipeline");
+    }
+    puts("PASS: signed-profile inputs validate as textured VBO+sampler pipeline");
     free(v); free(f); free(p);
     return 0;
 }

@@ -105,6 +105,8 @@
 #define A7XX_SP_PS_PVT_MEM_SIZE         0xa988u
 #define A7XX_SP_BLEND_CNTL              0xa989u
 #define A7XX_SP_PS_TSIZE                0xa9a7u
+#define A7XX_SP_PS_SAMPLER_BASE         0xa9e0u
+#define A7XX_SP_PS_TEXMEMOBJ_BASE       0xa9e4u
 #define A7XX_SP_PS_PVT_MEM_STACK_OFFSET 0xa9a9u
 #define A7XX_SP_PS_VGS_CNTL             0xaa01u
 #define A7XX_SP_PS_OUTPUT_CONST_CNTL     0xaa02u
@@ -219,6 +221,33 @@ static int a7xx_emit_reg32(gpu_command_ring *ring, uint32_t register_dword,
         return -1;
     if (gpu_ring_emit(ring, a7xx_pkt4(register_dword, 1u)) != 0 ||
         gpu_ring_emit(ring, value) != 0)
+        return -2;
+    return 0;
+}
+
+static int a7xx_emit_fragment_texture_state(gpu_command_ring *ring,
+                                             uint64_t sampler_gpu_va,
+                                             uint64_t texture_gpu_va)
+{
+    const uint32_t state_block_fs_tex = 4u;
+    const uint32_t state_src_indirect = 2u;
+    const uint32_t sampler_header =
+        (state_src_indirect << 16) | (state_block_fs_tex << 18) | (1u << 22);
+    const uint32_t texture_header = sampler_header | (1u << 14);
+
+    if (!ring || !sampler_gpu_va || (sampler_gpu_va & 15u) ||
+        !texture_gpu_va || (texture_gpu_va & 63u))
+        return -1;
+    /* fd6_texture.cc uses one indirect ST6_SHADER load for A6XX_TEX_SAMP
+     * and one indirect ST6_CONSTANTS load for A6XX_TEX_MEMOBJ. */
+    if (gpu_ring_emit(ring, a7xx_pkt7(0x34u, 3u)) != 0 ||
+        gpu_ring_emit(ring, sampler_header) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)sampler_gpu_va) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)(sampler_gpu_va >> 32)) != 0 ||
+        gpu_ring_emit(ring, a7xx_pkt7(0x34u, 3u)) != 0 ||
+        gpu_ring_emit(ring, texture_header) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)texture_gpu_va) != 0 ||
+        gpu_ring_emit(ring, (uint32_t)(texture_gpu_va >> 32)) != 0)
         return -2;
     return 0;
 }
@@ -625,10 +654,10 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
             reflection->fragment_code_dwords / 2u ||
         reflection->vertex_const_vec4s > 63u ||
         reflection->fragment_const_vec4s > 63u ||
-        reflection->vertex_sampler_count || reflection->fragment_sampler_count ||
+        reflection->vertex_sampler_count || reflection->fragment_sampler_count > 1u ||
         reflection->vertex_app_ubo_count > 1u ||
         reflection->fragment_app_ubo_count > 1u ||
-        pipeline->vertex_texture_count || pipeline->fragment_texture_count ||
+        pipeline->vertex_texture_count || pipeline->fragment_texture_count > 1u ||
         pipeline->vertex_uniform_vec4s || pipeline->fragment_uniform_vec4s)
         return -2;
     if ((reflection->vertex_app_ubo_count == 0u) !=
@@ -649,7 +678,9 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
      * keep the privileged packet construction explicit about the hardware
      * field width as well. */
     if (reflection->vertex.vertex_id_regid > 0xffu ||
-        reflection->vertex.instance_id_regid > 0xffu)
+        reflection->vertex.instance_id_regid > 0xffu ||
+        reflection->fragment.vertex_id_regid > 0xffu ||
+        reflection->fragment.instance_id_regid > 0xffu)
         return -2;
     /* This first VBO profile admits one, and only one, position attribute.
      * MPIP's reflection identifies the compiler-assigned destination
@@ -658,12 +689,31 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
     if (reflection->vertex_attribute_count != 1u ||
         /* IR3 encodes GLSL location zero as VERT_ATTRIB_GENERIC0 (slot 15). */
         reflection->vertex_attribute0_slot != 15u ||
-        reflection->vertex_attribute0_compmask != 0x3u ||
+        (reflection->vertex_attribute0_compmask != 0x3u &&
+         reflection->vertex_attribute0_compmask != 0xfu) ||
         reflection->vertex_attribute0_regid >= MESART_PIPELINE_INVALID_REGID ||
         !draw->vertex_buffer_gpu_va ||
         (draw->vertex_buffer_gpu_va & 7u) ||
-        draw->vertex_buffer_bytes != 24u ||
-        draw->vertex_buffer_stride != 8u)
+        (reflection->vertex_attribute0_compmask == 0x3u &&
+         (draw->vertex_buffer_bytes != 24u ||
+          draw->vertex_buffer_stride != 8u)) ||
+        (reflection->vertex_attribute0_compmask == 0xfu &&
+         (draw->vertex_buffer_bytes != 48u ||
+          draw->vertex_buffer_stride != 16u)))
+        return -2;
+    if ((reflection->fragment_sampler_count !=
+            pipeline->fragment_texture_count) ||
+        (pipeline->fragment_texture_count == 0u &&
+         (draw->fragment_sampler_descriptor_gpu_va ||
+          draw->fragment_texture_descriptor_gpu_va ||
+          draw->fragment_texture_pixels_gpu_va)) ||
+        (pipeline->fragment_texture_count == 1u &&
+         (!draw->fragment_sampler_descriptor_gpu_va ||
+          (draw->fragment_sampler_descriptor_gpu_va & 15u) ||
+          !draw->fragment_texture_descriptor_gpu_va ||
+          (draw->fragment_texture_descriptor_gpu_va & 63u) ||
+          !draw->fragment_texture_pixels_gpu_va ||
+          (draw->fragment_texture_pixels_gpu_va & 63u))))
         return -2;
     if (a7xx_validate_static_constant_data(
             pipeline->vertex_constant_data_gpu_va,
@@ -696,10 +746,10 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
 {
     const mesart_renderer_graphics_pipeline *pipeline;
     const mesart_pipeline_header *reflection;
-    /* The fixed initial profile has fewer than 128 context writes even with
-     * all admitted output/varying slots.  Keep this capacity local and
-     * bounded rather than silently truncating a signed pipeline. */
-    adreno_x1_85_context_reg regs[160];
+    /* Texture bases plus interpolation state bring the current profile to
+     * 163 writes. Leave bounded growth room, and guard every append: the old
+     * 160-entry array overwrote this function's stack during preflight. */
+    adreno_x1_85_context_reg regs[192];
     uint32_t reg_count = 0u;
     uint32_t output_registers;
     uint32_t destination_registers;
@@ -721,7 +771,10 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     if (output_registers > 16u || destination_registers > 8u)
         return -2;
 
-#define REG(offset, value) do { regs[reg_count++] = (adreno_x1_85_context_reg){ (offset), (value) }; } while (0)
+#define REG(offset, value) do { \
+    if (reg_count >= sizeof(regs) / sizeof(regs[0])) return -2; \
+    regs[reg_count++] = (adreno_x1_85_context_reg){ (offset), (value) }; \
+} while (0)
     /* Source: Mesa fd6_program.cc and a6xx.xml.  The first profile admits no
      * private/shared memory, attributes, application UBOs or kill; Mesa's
      * immutable embedded $consts UBO is bound separately below. */
@@ -779,18 +832,38 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_SP_PS_PVT_MEM_BASE, 0u);
     REG(A7XX_SP_PS_PVT_MEM_BASE + 1u, 0u);
     REG(A7XX_SP_PS_PVT_MEM_SIZE, 0u);
-    REG(A7XX_SP_PS_TSIZE, 0u);
+    REG(A7XX_SP_PS_TSIZE, pipeline->fragment_texture_count);
+    REG(A7XX_SP_PS_SAMPLER_BASE,
+        (uint32_t)draw->fragment_sampler_descriptor_gpu_va);
+    REG(A7XX_SP_PS_SAMPLER_BASE + 1u,
+        (uint32_t)(draw->fragment_sampler_descriptor_gpu_va >> 32));
+    REG(A7XX_SP_PS_TEXMEMOBJ_BASE,
+        (uint32_t)draw->fragment_texture_descriptor_gpu_va);
+    REG(A7XX_SP_PS_TEXMEMOBJ_BASE + 1u,
+        (uint32_t)(draw->fragment_texture_descriptor_gpu_va >> 32));
     REG(A7XX_SP_PS_PVT_MEM_STACK_OFFSET, 0u);
     REG(A7XX_SP_PS_VGS_CNTL, 0u);
-    /* This profile's FS has no system values, varyings, or texture
-     * prefetches.  These fields are still stateful on A7xx, so establish
-     * Mesa's no-input values instead of inheriting display-firmware state. */
-    REG(A7XX_SP_PS_INITIAL_TEX_LOAD_CNTL, 0x01ff7fc0u);
-    REG(A7XX_SP_PS_CNTL_1, 0x00000200u);
-    REG(A7XX_SP_PS_WAVE_CNTL, 0u);
+    /* Texture prefetch is disabled in the host compiler for this first
+     * profile. Reflect the one optional smooth UV barycentric register while
+     * explicitly invalidating every unused fragment system-value slot. */
+    REG(A7XX_SP_PS_INITIAL_TEX_LOAD_CNTL,
+        0x01ff7fc0u |
+        (reflection->fragment.vertex_id_regid ==
+             MESART_PIPELINE_INVALID_REGID ? 0x8u : 0u));
+    REG(A7XX_SP_PS_CNTL_1,
+        0x00000300u +
+        (reflection->fragment.vertex_id_regid !=
+             MESART_PIPELINE_INVALID_REGID ? 2u : 0u) +
+        (reflection->fragment.instance_id_regid !=
+             MESART_PIPELINE_INVALID_REGID ? 2u : 0u));
+    REG(A7XX_SP_PS_WAVE_CNTL,
+        reflection->fragment.total_varying_components ? 0x2u : 0u);
     REG(A7XX_SP_LB_PARAM_LIMIT, 0x7u);
     REG(A7XX_SP_REG_PROG_ID_0, 0xfcfcfcfcu);
-    REG(A7XX_SP_REG_PROG_ID_1, 0xfcfcfcfcu);
+    REG(A7XX_SP_REG_PROG_ID_1,
+        (uint32_t)reflection->fragment.vertex_id_regid |
+        ((uint32_t)reflection->fragment.instance_id_regid << 8) |
+        0xfcfc0000u);
     REG(A7XX_SP_REG_PROG_ID_2, 0xfcfcfcfcu);
     REG(A7XX_SP_REG_PROG_ID_3, 0x0000fcfcu);
     REG(A7XX_SP_VS_OUTPUT_CNTL, reflection->varying_count);
@@ -903,17 +976,19 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         (uint32_t)(draw->vertex_buffer_gpu_va >> 32));
     REG(A7XX_VFD_VERTEX_BUFFER_SIZE, draw->vertex_buffer_bytes);
     REG(A7XX_VFD_VERTEX_BUFFER_STRIDE, draw->vertex_buffer_stride);
-    REG(A7XX_VFD_FETCH_INSTR, 0xc6700000u);
+    REG(A7XX_VFD_FETCH_INSTR,
+        reflection->vertex_attribute0_compmask == 0xfu ?
+            0xc8200000u : 0xc6700000u);
     REG(A7XX_VFD_FETCH_INSTR + 1u, 1u);
     REG(A7XX_VFD_DEST_CNTL,
         (uint32_t)reflection->vertex_attribute0_compmask |
         ((uint32_t)reflection->vertex_attribute0_regid << 4));
-    /* The first fragment shader has neither inputs nor side effects.  Do
-     * not inherit any display-firmware interpolation, alpha-test, depth, or
-     * stencil enables: each is capable of discarding every fragment while CP
-     * and RB_DONE still complete normally. */
-    REG(0x8005u, 0u);                /* GRAS_CL_INTERP_CNTL */
-    REG(0x8809u, 0u);                /* RB_INTERP_CNTL */
+    /* Establish the exact optional smooth-UV interpolation path, and do not
+     * inherit alpha-test, depth, or stencil enables from display firmware. */
+    REG(0x8005u, reflection->fragment.total_varying_components ?
+                      0x1u : 0u);    /* GRAS_CL_INTERP_CNTL */
+    REG(0x8809u, reflection->fragment.total_varying_components ?
+                      0x401u : 0u);  /* RB_INTERP_CNTL + INTERP_EN */
     REG(0x880au, 0u);                /* RB_PS_INPUT_CNTL */
     REG(0x8810u, 0u);                /* RB_PS_SAMPLEFREQ_CNTL */
     REG(0x880eu, 0u);                /* RB_DITHER_CNTL */
@@ -997,6 +1072,11 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         reflection->fragment.output_const_mask);
 #undef REG
     if (adreno_x1_85_emit_context_regs(ring, regs, reg_count) != 0)
+        return -3;
+    if (pipeline->fragment_texture_count &&
+        a7xx_emit_fragment_texture_state(
+            ring, draw->fragment_sampler_descriptor_gpu_va,
+            draw->fragment_texture_descriptor_gpu_va) != 0)
         return -3;
     /* Mesa emits the complete render-target attachment block through its
      * command-register builder, rather than relying on context restore.

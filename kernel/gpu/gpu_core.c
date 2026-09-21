@@ -116,8 +116,17 @@ static gpu_core_mesart_3d_inflight g_mesart_3d_inflight;
  * Mesart EL0 resource.  It shares the private uniform pool only because both
  * use the same already-mapped unprivileged GPU read transaction class. */
 #define GPU_CORE_MESART_VERTEX_BUFFER_OFFSET 0x100u
-#define GPU_CORE_MESART_VERTEX_BUFFER_BYTES   24u
-#define GPU_CORE_MESART_VERTEX_BUFFER_STRIDE  8u
+#define GPU_CORE_MESART_POSITION_BUFFER_BYTES 24u
+#define GPU_CORE_MESART_POSITION_BUFFER_STRIDE 8u
+#define GPU_CORE_MESART_TEXTURED_BUFFER_BYTES 48u
+#define GPU_CORE_MESART_TEXTURED_BUFFER_STRIDE 16u
+#define GPU_CORE_MESART_SAMPLER_DESC_OFFSET   0x200u
+#define GPU_CORE_MESART_TEXTURE_DESC_OFFSET   0x240u
+#define GPU_CORE_MESART_TEXTURE_PIXELS_OFFSET 0x400u
+#define GPU_CORE_MESART_TEXTURE_WIDTH         16u
+#define GPU_CORE_MESART_TEXTURE_HEIGHT        16u
+#define GPU_CORE_MESART_TEXTURE_PITCH         64u
+#define GPU_CORE_MESART_TEXTURE_BYTES         1024u
 #define GPU_CORE_RENDER_SURFACE_VA_BASE 0x0000000060000000ull
 #define GPU_CORE_RENDER_SURFACE_SLOT_BYTES GPU_RENDER_MAX_SURFACE_BYTES
 #define GPU_CORE_RENDER_SURFACE_VA_END \
@@ -1526,19 +1535,24 @@ static int gpu_core_mesart_configure_vertex_buffer(
         !g_mesart_uniform_pool.cpu ||
         g_mesart_uniform_pool.iova != GPU_CORE_MESART_UNIFORM_POOL_IOVA ||
         GPU_CORE_MESART_VERTEX_BUFFER_OFFSET +
-            GPU_CORE_MESART_VERTEX_BUFFER_BYTES >
+            GPU_CORE_MESART_TEXTURED_BUFFER_BYTES >
                 g_mesart_uniform_pool.size_bytes)
         return -1;
     reflection = &pipeline->reflection;
     if (reflection->vertex_attribute_count != 1u ||
         /* IR3 encodes GLSL location zero as VERT_ATTRIB_GENERIC0 (slot 15). */
         reflection->vertex_attribute0_slot != 15u ||
-        reflection->vertex_attribute0_compmask != 0x3u)
+        (reflection->vertex_attribute0_compmask != 0x3u &&
+         reflection->vertex_attribute0_compmask != 0xfu))
         return -2;
     draw->vertex_buffer_gpu_va = GPU_CORE_MESART_UNIFORM_POOL_IOVA +
                                  GPU_CORE_MESART_VERTEX_BUFFER_OFFSET;
-    draw->vertex_buffer_bytes = GPU_CORE_MESART_VERTEX_BUFFER_BYTES;
-    draw->vertex_buffer_stride = GPU_CORE_MESART_VERTEX_BUFFER_STRIDE;
+    draw->vertex_buffer_bytes = reflection->vertex_attribute0_compmask == 0xfu ?
+        GPU_CORE_MESART_TEXTURED_BUFFER_BYTES :
+        GPU_CORE_MESART_POSITION_BUFFER_BYTES;
+    draw->vertex_buffer_stride = reflection->vertex_attribute0_compmask == 0xfu ?
+        GPU_CORE_MESART_TEXTURED_BUFFER_STRIDE :
+        GPU_CORE_MESART_POSITION_BUFFER_STRIDE;
     if (!write_values)
         return 0;
 
@@ -1550,13 +1564,26 @@ static int gpu_core_mesart_configure_vertex_buffer(
     /* GOP memory is top-down, so invert Y in the test geometry while
      * retaining counter-clockwise clip-space winding.  A negative hardware
      * viewport scale made this X1-85 TSE path reject the primitive. */
-    words[0] = 0x00000000u; /*  0.00 */
-    words[1] = 0xbf266666u; /* -0.65: visible apex */
-    words[2] = 0x3f266666u; /*  0.65 */
-    words[3] = 0x3f266666u; /*  0.65 */
-    words[4] = 0xbf266666u; /* -0.65 */
-    words[5] = 0x3f266666u; /*  0.65 */
-    asm_dma_clean_range(words, GPU_CORE_MESART_VERTEX_BUFFER_BYTES);
+    if (reflection->vertex_attribute0_compmask == 0xfu)
+    {
+        const uint32_t textured_vertices[12] = {
+            0x00000000u, 0xbf266666u, 0x3f000000u, 0x00000000u,
+            0x3f266666u, 0x3f266666u, 0x3f800000u, 0x3f800000u,
+            0xbf266666u, 0x3f266666u, 0x00000000u, 0x3f800000u,
+        };
+        for (uint32_t i = 0u; i < 12u; ++i)
+            words[i] = textured_vertices[i];
+    }
+    else
+    {
+        words[0] = 0x00000000u; /*  0.00 */
+        words[1] = 0xbf266666u; /* -0.65: visible apex */
+        words[2] = 0x3f266666u; /*  0.65 */
+        words[3] = 0x3f266666u; /*  0.65 */
+        words[4] = 0xbf266666u; /* -0.65 */
+        words[5] = 0x3f266666u; /*  0.65 */
+    }
+    asm_dma_clean_range(words, draw->vertex_buffer_bytes);
     return 0;
 }
 
@@ -1627,13 +1654,87 @@ static int gpu_core_mesart_configure_default_uniforms(
     words[2] = 0u;
     words[3] = 0u;
     fragment_words[0] = 0x3f800000u;
-    fragment_words[1] = 0x3e19999au;
-    fragment_words[2] = 0x3ca3d70au;
+    fragment_words[1] = pipeline->fragment_texture_count ? 0x3f800000u : 0x3e19999au;
+    fragment_words[2] = pipeline->fragment_texture_count ? 0x3f800000u : 0x3ca3d70au;
     fragment_words[3] = 0x3f800000u;
     asm_dma_clean_range(g_mesart_uniform_pool.cpu,
                         GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
                             GPU_CORE_MESART_DEFAULT_UBO_BYTES);
-    terminal_print("[K:GPU] tint UBO+constant promotion translation=(0.25,-0.125) colour=(1.0,0.15,0.02,1.0)");
+    terminal_print(pipeline->fragment_texture_count ?
+        "[K:GPU] texture tint UBO+constant promotion colour=(1,1,1,1)" :
+        "[K:GPU] tint UBO+constant promotion translation=(0.25,-0.125) colour=(1.0,0.15,0.02,1.0)");
+    return 0;
+}
+
+static int gpu_core_mesart_configure_checker_texture(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    adreno_x1_85_3d_draw *draw, uint32_t write_values)
+{
+    uint32_t *sampler;
+    uint32_t *texture;
+    uint32_t *pixels;
+
+    if (!pipeline || !draw)
+        return -1;
+    if (!pipeline->fragment_texture_count)
+        return 0;
+    if (pipeline->vertex_texture_count != 0u ||
+        pipeline->fragment_texture_count != 1u ||
+        pipeline->reflection.vertex_sampler_count != 0u ||
+        pipeline->reflection.fragment_sampler_count != 1u ||
+        !g_mesart_uniform_pool.cpu ||
+        GPU_CORE_MESART_TEXTURE_PIXELS_OFFSET +
+            GPU_CORE_MESART_TEXTURE_BYTES > g_mesart_uniform_pool.size_bytes)
+        return -2;
+
+    draw->fragment_sampler_descriptor_gpu_va =
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_SAMPLER_DESC_OFFSET;
+    draw->fragment_texture_descriptor_gpu_va =
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_TEXTURE_DESC_OFFSET;
+    draw->fragment_texture_pixels_gpu_va =
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_TEXTURE_PIXELS_OFFSET;
+    if (!write_values)
+        return 0;
+
+    sampler = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                           GPU_CORE_MESART_SAMPLER_DESC_OFFSET);
+    texture = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                           GPU_CORE_MESART_TEXTURE_DESC_OFFSET);
+    pixels = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                          GPU_CORE_MESART_TEXTURE_PIXELS_OFFSET);
+    for (uint32_t i = 0u; i < 4u; ++i)
+        sampler[i] = 0u;
+    for (uint32_t i = 0u; i < 16u; ++i)
+        texture[i] = 0u;
+
+    /* Mesa a6xx_descriptors.xml: nearest sampling, clamp-to-edge, and the
+     * MIPFILTER_LINEAR_FAR bit which denotes no mip chain. */
+    sampler[0] = (1u << 5) | (1u << 8) | (1u << 11);
+    sampler[1] = 1u << 6;
+    /* One linear 16x16 FMT6_8_8_8_8_UNORM texture with identity swizzle.
+     * Width/height/depth fields contain their actual sizes on A7xx. */
+    texture[0] = (0u << 4) | (1u << 7) | (2u << 10) | (3u << 13) |
+                 (0x30u << 22);
+    texture[1] = GPU_CORE_MESART_TEXTURE_WIDTH |
+                 (GPU_CORE_MESART_TEXTURE_HEIGHT << 15);
+    texture[2] = (GPU_CORE_MESART_TEXTURE_PITCH << 7) | (1u << 29);
+    texture[3] = 0u;
+    texture[4] = (uint32_t)draw->fragment_texture_pixels_gpu_va;
+    texture[5] = (uint32_t)(draw->fragment_texture_pixels_gpu_va >> 32) |
+                 (1u << 17);
+    for (uint32_t y = 0u; y < GPU_CORE_MESART_TEXTURE_HEIGHT; ++y)
+    {
+        for (uint32_t x = 0u; x < GPU_CORE_MESART_TEXTURE_WIDTH; ++x)
+        {
+            /* Four-pixel cyan/magenta checks make interpolation and actual
+             * texel fetch visibly different from the previous flat shader. */
+            pixels[y * GPU_CORE_MESART_TEXTURE_WIDTH + x] =
+                (((x >> 2) ^ (y >> 2)) & 1u) ? 0xffff00ffu : 0xff00ffffu;
+        }
+    }
+    asm_dma_clean_range(sampler, 16u);
+    asm_dma_clean_range(texture, 64u);
+    asm_dma_clean_range(pixels, GPU_CORE_MESART_TEXTURE_BYTES);
     return 0;
 }
 
@@ -1739,6 +1840,8 @@ int gpu_core_mesart_3d_preflight(
         return -2;
     if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u) != 0)
         return -3;
+    if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 0u) != 0)
+        return -4;
     /* This uses the private runtime-ring allocation as a bounded scratch
      * encoder buffer only. It never seals, binds, writes a CP pointer or
      * acquires GX, so preflight has no hardware side effect. */
@@ -1846,6 +1949,8 @@ int gpu_core_mesart_3d_kick(
         return -2;
     if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u) != 0)
         return -3;
+    if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 1u) != 0)
+        return -3;
     if (adreno_x1_85_3d_validate_draw(&draw) != 0)
         return -4;
     /* Keep a source-level build witness next to the first hardware draw. A
@@ -1853,7 +1958,7 @@ int gpu_core_mesart_3d_kick(
      * USB kernel. Revision 18 records independent VPC/TSE/RB counters around
      * the draw, replacing the old stream-out query which cannot measure a
      * pass with stream-out intentionally disabled. */
-    terminal_print("[K:GPU] Mesart A7xx draw-state revision=51 (Mesa UBO promotion + upright CCW geometry)");
+    terminal_print("[K:GPU] Mesart A7xx draw-state revision=52 (kernel checker texture + async visual submit)");
     /* Authenticate before allowing CP's secure-mode transition. An unreadable
      * trust register is not evidence that a secure firmware load is needed. */
     {

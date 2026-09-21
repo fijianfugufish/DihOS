@@ -33,6 +33,11 @@ typedef struct adreno_x1_85_3d_draw
     uint32_t fragment_default_ubo_bytes;
     const uint32_t *vertex_default_ubo_values;
     const uint32_t *fragment_default_ubo_values;
+    /* First texture profile: one kernel-owned FS sampler, descriptor and
+     * 16x16 linear RGBA8 image. No address originates in MPIP or EL0. */
+    uint64_t fragment_sampler_descriptor_gpu_va;
+    uint64_t fragment_texture_descriptor_gpu_va;
+    uint64_t fragment_texture_pixels_gpu_va;
 } adreno_x1_85_3d_draw;
 
 /* Checks the exact first 3D profile before a command ring is touched.  The

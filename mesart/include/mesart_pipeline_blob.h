@@ -41,6 +41,7 @@ typedef struct __attribute__((packed)) mesart_pipeline_stage_state
     uint8_t branchstack;
     uint8_t flags;
     /* System values and stage outputs used by DihOS' narrow first profile. */
+    /* VS: vertex/instance ID. FS: perspective/linear pixel barycentric ID. */
     uint16_t vertex_id_regid;
     uint16_t instance_id_regid;
     /* VS: position then point-size. FS: primary colour output then invalid. */
@@ -89,10 +90,9 @@ typedef struct __attribute__((packed)) mesart_pipeline_header
     uint8_t varying_stride_dwords;
     uint8_t position_location;
     uint8_t point_size_location;
-    /* The first visible proof admits exactly one kernel-owned vertex stream:
-     * location 0, R32G32_FLOAT.  Reflection carries only the compiler's
-     * destination register and component mask; it never carries a GPU
-     * address, stride, format command, or packet data. */
+    /* The visible proofs admit exactly one kernel-owned vertex stream at
+     * location 0: R32G32_FLOAT for position-only or R32G32B32A32_FLOAT for
+     * packed position+UV. Reflection never carries an address or packet. */
     uint8_t vertex_attribute_count;
     uint8_t vertex_attribute0_slot;
     uint8_t vertex_attribute0_regid;
