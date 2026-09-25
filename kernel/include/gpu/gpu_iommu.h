@@ -88,6 +88,11 @@ int gpu_iommu_map_buffer_with_attributes(gpu_iommu_domain *domain,
 /* Cleans all page-table memory after mapping changes; still no hardware I/O. */
 void gpu_iommu_domain_prepare_for_device(const gpu_iommu_domain *domain);
 
+/* Read-only CPU walk of one stage-1 leaf for fault diagnosis.  The returned
+ * descriptor is the software copy, not proof of what a GPU TLB cached. */
+int gpu_iommu_query_page(const gpu_iommu_domain *domain, uint64_t iova,
+                         uint64_t *out_descriptor);
+
 /* Copies an endpoint and a completed page-table root into a bounded plan.
  * This is data preparation only; it cannot access an IOMMU. */
 int gpu_iommu_build_attach_plan(const gpu_iommu_topology *topology,

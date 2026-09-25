@@ -24,6 +24,16 @@ typedef struct adreno_x1_85_3d_draw
     uint64_t vertex_buffer_gpu_va;
     uint32_t vertex_buffer_bytes;
     uint32_t vertex_buffer_stride;
+    uint32_t vertex_count;
+    /* Kernel-only blit primitive. A7xx RECTLIST consumes two diagonal
+     * vertices and synthesizes the other corners in VPC. */
+    uint8_t rectangle_list;
+    /* Optional top-left raster clip. Zero means the full render target. */
+    uint32_t clip_width;
+    uint32_t clip_height;
+    /* Kernel-only compositor mode: expand safe +/-0.65 clip geometry to the
+     * full viewport without exposing viewport state through the render ABI. */
+    uint8_t expand_safe_viewport;
     /* Default GLSL uniforms are lowered by Mesa to application UBO 0.  These
      * addresses always come from the fixed kernel-owned uniform pool, never
      * from Mesart EL0 or a signed artifact. */
@@ -60,6 +70,12 @@ int adreno_x1_85_3d_emit_sysmem_prologue(gpu_command_ring *ring);
  * CCU and caches.  It must follow the last draw and precede the completion
  * fence for that submission. */
 int adreno_x1_85_3d_emit_sysmem_fini(gpu_command_ring *ring);
+
+/* Compositor variant: graphics/cache completion remains ordered by WFI and
+ * the caller's RB_DONE fence, without the legacy PFP/ME rendezvous. */
+int adreno_x1_85_3d_emit_sysmem_fini_async(gpu_command_ring *ring,
+                                            uint64_t fence_gpu_va,
+                                            uint32_t fence_value);
 
 /* Independent fixed-function write-path diagnostic: clear a private,
  * mapped 16x16 RGBA8 surface (64-byte pitch) to opaque green. */

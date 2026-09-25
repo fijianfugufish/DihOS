@@ -30,6 +30,7 @@
 #define GPU_RENDER_CAP_UNIFORM_VEC4       (1u << 2)
 #define GPU_RENDER_CAP_TEXTURE_2D         (1u << 3)
 #define GPU_RENDER_CAP_ALPHA_BLEND        (1u << 4)
+#define GPU_RENDER_CAP_RECTANGLE_LIST     (1u << 5)
 
 typedef enum gpu_render_pixel_format
 {
@@ -52,6 +53,14 @@ typedef enum gpu_render_pipeline_kind
     GPU_RENDER_PIPELINE_COMPOSITOR_SOLID = 1,
     GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED = 2,
 } gpu_render_pipeline_kind;
+
+typedef enum gpu_render_primitive
+{
+    GPU_RENDER_PRIMITIVE_TRIANGLE_LIST = 0,
+    /* Driver-neutral blit rectangle. Backends may lower this to a native
+     * rectangle primitive or to two ordinary triangles. */
+    GPU_RENDER_PRIMITIVE_RECTANGLE_LIST = 1,
+} gpu_render_primitive;
 
 /* Opaque identity of a CPU-fallback-capable kernel render surface.  It is
  * not an address, and a stale identity is rejected by the private backend
@@ -107,8 +116,10 @@ typedef struct gpu_render_texture
 typedef struct gpu_render_submission
 {
     gpu_render_pipeline_kind pipeline;
+    gpu_render_primitive primitive;
     gpu_render_target target;
-    /* First-profile geometry is always an auto-indexed triangle. */
+    /* Triangle lists accept one triangle or one quad. Rectangle lists use
+     * two diagonal vertices; the backend owns the hardware lowering. */
     uint32_t vertex_count;
     /* Arrays contain count consecutive vec4 values (four floats each).
      * The generic layer only validates their bounds; a backend copies their

@@ -100,8 +100,13 @@ static int map_page(gpu_iommu_domain *domain, uint64_t iova, uint64_t phys,
         table = next;
     }
 
-    ((uint64_t *)table->cpu)[table_index(iova, 3u)] =
-        page_descriptor(phys, attributes);
+    uint64_t *leaf = &((uint64_t *)table->cpu)[table_index(iova, 3u)];
+    /* An IOVA is owned by one buffer. Replacing an existing leaf previously
+     * hid the desktop's first page behind GMU's fixed 0x60000000 dummy page
+     * and turned a texture fetch into an SMMU permission fault. */
+    if (*leaf & GPU_IOMMU_DESC_VALID)
+        return -5;
+    *leaf = page_descriptor(phys, attributes);
     return 0;
 }
 
@@ -172,6 +177,33 @@ void gpu_iommu_domain_prepare_for_device(const gpu_iommu_domain *domain)
         return;
     for (uint32_t i = 0u; i < domain->table_count; ++i)
         gpu_buffer_prepare_for_device(&domain->tables[i]);
+}
+
+int gpu_iommu_query_page(const gpu_iommu_domain *domain, uint64_t iova,
+                         uint64_t *out_descriptor)
+{
+    gpu_buffer *table;
+
+    if (!domain || !out_descriptor || !domain->root_phys ||
+        iova >= (1ull << domain->va_bits))
+        return -1;
+    table = find_table(domain, domain->root_phys);
+    if (!table)
+        return -2;
+    for (uint32_t level = domain->root_level; level < 3u; ++level)
+    {
+        uint64_t entry = ((const uint64_t *)table->cpu)[table_index(iova, level)];
+
+        if ((entry & (GPU_IOMMU_DESC_VALID |
+                      GPU_IOMMU_DESC_TABLE_OR_PAGE)) !=
+            (GPU_IOMMU_DESC_VALID | GPU_IOMMU_DESC_TABLE_OR_PAGE))
+            return -3;
+        table = find_table(domain, entry);
+        if (!table)
+            return -4;
+    }
+    *out_descriptor = ((const uint64_t *)table->cpu)[table_index(iova, 3u)];
+    return 0;
 }
 
 int gpu_iommu_build_attach_plan(const gpu_iommu_topology *topology,

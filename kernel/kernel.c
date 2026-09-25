@@ -37,6 +37,7 @@
 #include "hardware_probes/acpi_probe_pci_lookup.h"
 #include "gpu/adreno_x1_85.h"
 #include "gpu/gpu_core.h"
+#include "gpu/gpu_compositor.h"
 #include "pci/pci_ecam_lookup.h"
 #include "pci/pci_ecam_map_plan.h"
 #include "memory/mmio_map.h"
@@ -311,6 +312,14 @@ void kmain(boot_info *bi)
         for (;;)
             asm_wait();
     }
+    /* Surface storage is created before gpu_core_init constructs and
+     * attaches its IOMMU domain. It remains a normal CPU backbuffer until
+     * the signed compositor explicitly enables accelerated presentation. */
+    gpu_render_init();
+#if defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    (void)kgfx_gpu_backbuffer_prepare();
+    (void)gpu_compositor_prepare_target();
+#endif
     kearly_console_end();
 
     // Prefer the disk system font when mounted; otherwise keep the embedded fallback.
@@ -337,11 +346,10 @@ void kmain(boot_info *bi)
     /* Reserve a shared-RAM attribute before SMP/user address spaces start.
      * Failure leaves the GPU's PAS mapper fail-closed, not using Device RAM. */
     (void)mmio_prepare_normal_nc();
-    (void)gpu_core_init(bi);
-    if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
-        terminal_success("crash map: source locations ready");
-    else
-        terminal_warn("crash map: source locations unavailable");
+    /* Bring the device up and retain whether it is usable, but do not enable
+     * GPU presentation yet.  KGFX must keep presenting through the CPU until
+     * input and the desktop shell have produced a complete visible frame. */
+    int gpu_core_ready = (gpu_core_init(bi) == 0);
     if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
         terminal_success("crash map: source locations ready");
     else
@@ -482,6 +490,12 @@ void kmain(boot_info *bi)
 
     kgfx_render_all(black);
 
+    /* The first complete desktop frame is now visible through the ordinary
+     * CPU path.  Activating the experimental backend here means a wedged or
+     * rejected first GPU frame can fall back without hiding boot progress. */
+    if (gpu_core_ready)
+        (void)gpu_compositor_init();
+
     uint32_t frame = 0;
 
     static uint32_t dbg_tick = 0;
@@ -499,7 +513,7 @@ void kmain(boot_info *bi)
         /* GPU completion is observed from the frame loop, not by stalling a
          * shell command.  This is intentionally a bounded, non-spinning
          * poll; a future compositor owns the kick side. */
-        (void)gpu_core_mesart_3d_poll(0);
+        gpu_compositor_update();
         task_accounting_frame_begin();
 
         task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
@@ -522,12 +536,15 @@ void kmain(boot_info *bi)
         }
 
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
-        /* KGFX remains the fallback/base compositor while the GPU works.
-         * A completed shader surface is overlaid only after its fence. */
-        if (!dihos_shell_mesart_visual_frame_busy())
+        /* Direct scanout samples the live KGFX backbuffer. Do not modify it
+         * until the single asynchronous shader pass has retired. Unlike the
+         * old serial tiled path, this is one fence for the entire frame. */
+        if (!gpu_compositor_frame_busy() &&
+            !dihos_shell_mesart_visual_frame_busy())
             kgfx_render_all(black);
         dihos_shell_mesart_visual_present_after_cpu();
         dihos_shell_mesart_visual_submit_after_cpu();
+        gpu_compositor_submit_kgfx_frame();
         task_accounting_add(TASK_ACCOUNT_SACX, 1u);
         sacx_runtime_update();
         frame++;

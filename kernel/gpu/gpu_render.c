@@ -93,7 +93,11 @@ static int submission_valid(const gpu_render_submission *submission)
     if (!submission || !target_valid(&submission->target) ||
         (submission->pipeline != GPU_RENDER_PIPELINE_COMPOSITOR_SOLID &&
          submission->pipeline != GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED) ||
-        submission->vertex_count != 3u ||
+        ((submission->primitive == GPU_RENDER_PRIMITIVE_TRIANGLE_LIST &&
+          submission->vertex_count != 3u && submission->vertex_count != 6u) ||
+         (submission->primitive == GPU_RENDER_PRIMITIVE_RECTANGLE_LIST &&
+          submission->vertex_count != 2u) ||
+         submission->primitive > GPU_RENDER_PRIMITIVE_RECTANGLE_LIST) ||
         submission->vertex_uniform_count > GPU_RENDER_MAX_UNIFORM_VEC4S ||
         submission->fragment_uniform_count > GPU_RENDER_MAX_UNIFORM_VEC4S ||
         submission->texture_count > GPU_RENDER_MAX_TEXTURES ||
@@ -253,6 +257,20 @@ int gpu_render_backend_texture_backing(const gpu_render_texture *texture,
     if (!texture_valid(texture) || surface_index(texture->surface, &index) != 0)
         return -2;
     *out_buffer = &g_surfaces[index].storage;
+    return 0;
+}
+
+int gpu_render_backend_surface_slot(uint32_t slot, gpu_buffer **out_buffer)
+{
+    if (!out_buffer || slot >= GPU_RENDER_MAX_SURFACES)
+        return -1;
+    *out_buffer = 0;
+    if (!g_surfaces[slot].active)
+        return 1;
+    if (!g_surfaces[slot].storage.cpu || !g_surfaces[slot].storage.phys ||
+        !g_surfaces[slot].storage.size_bytes)
+        return -2;
+    *out_buffer = &g_surfaces[slot].storage;
     return 0;
 }
 

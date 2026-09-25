@@ -16,7 +16,9 @@
 #define MESART_RENDERER_STACK_PAGES 8ull
 #define MESART_RENDERER_STACK_TOP   0x0000007fff000000ull
 #define MESART_RENDERER_MAX_BUFFERS 16u
-#define MESART_RENDERER_MAX_SHADER_ASSETS 2u
+#define MESART_RENDERER_MAX_SHADER_ASSETS 4u
+#define MESART_RENDERER_MAX_GRAPHICS_PIPELINES 2u
+#define MESART_RENDERER_PIPELINE_NAME_BYTES 48u
 #define MESART_RENDERER_BOOTSTRAP_BUFFER_BYTES 4096ull
 #define MESART_RENDERER_BUFFER_ARENA_BASE      0x0000002000000000ull
 #define MESART_RENDERER_BUFFER_SLOT_BYTES      0x0000000001000000ull
@@ -58,6 +60,10 @@ typedef struct mesart_renderer_command_buffer
 
 typedef struct mesart_renderer_shader_asset
 {
+    /* Stable semantic name derived from the signed bundle path.  Matching a
+     * VS, FS and MPIP by name lets one admitted service own several trusted
+     * pipelines without making manifest order part of the ABI. */
+    char pipeline_name[MESART_RENDERER_PIPELINE_NAME_BYTES];
     /* The blob header remains in a kernel-owned allocation.  Its authenticated
      * IR3 binary is copied into a private 128-byte-aligned slot; only that
      * code_gpu_va may ever be used by the later A7xx pipeline builder. */
@@ -79,6 +85,13 @@ typedef struct mesart_renderer_shader_asset
     uint32_t constant_data_bytes;
     uint32_t constant_data_ubo_index;
 } mesart_renderer_shader_asset;
+
+typedef struct mesart_renderer_pipeline_asset
+{
+    char name[MESART_RENDERER_PIPELINE_NAME_BYTES];
+    mesart_pipeline_header reflection;
+    uint8_t loaded;
+} mesart_renderer_pipeline_asset;
 
 /* Kernel-only draw request.  Counts are requested by a trusted kernel
  * compositor/client, but are still bounded against compiler-certified MIR3
@@ -135,6 +148,9 @@ typedef struct mesart_renderer_service
     uint32_t resource_arena_handle;
     mesart_renderer_shader_asset shaders[MESART_RENDERER_MAX_SHADER_ASSETS];
     uint32_t shader_count;
+    mesart_renderer_pipeline_asset
+        graphics_pipelines[MESART_RENDERER_MAX_GRAPHICS_PIPELINES];
+    uint32_t graphics_pipeline_count;
     /* Authenticated Mesa-derived VS/FS reflection.  It has no GPU address,
      * PM4 packet, or EL0 mapping; a later internal A7xx broker consumes it. */
     mesart_pipeline_header graphics_pipeline_reflection;
@@ -182,5 +198,12 @@ int mesart_renderer_test_complete_queued(mesart_renderer_service *service);
  * kernel A7xx state/draw broker. */
 int mesart_renderer_prepare_graphics_pipeline(
     const mesart_renderer_service *service,
+    const mesart_renderer_graphics_request *request,
+    mesart_renderer_graphics_pipeline *out_pipeline);
+
+/* Named variant used by the boot compositor catalogue.  Names are the
+ * signed artifact stem (for example, "compositor_solid"). */
+int mesart_renderer_prepare_named_graphics_pipeline(
+    const mesart_renderer_service *service, const char *pipeline_name,
     const mesart_renderer_graphics_request *request,
     mesart_renderer_graphics_pipeline *out_pipeline);

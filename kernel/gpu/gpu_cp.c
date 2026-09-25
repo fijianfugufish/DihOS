@@ -88,6 +88,13 @@ int gpu_cp_bind(const gpu_mmio_window *regs,
         !config->ring_bytes ||
         (config->ring_bytes & (config->ring_bytes - 1u)))
         return -1;
+    /* Callers only rebind after the previous rptr reached wptr.  Stop the
+     * idle SQE before changing its ring base/control: rewriting these live
+     * while SQE_CONTROL remained enabled worked for a few submissions but
+     * eventually left X1-85's render context permanently busy. */
+    if (gpu_mmio_try_write32(regs, layout->sqe_control, 0u) != 0)
+        return -2;
+    asm_mmio_barrier();
     if ((layout->address_mode_control && config->address_mode_control &&
          gpu_mmio_try_write32(regs, layout->address_mode_control,
                               config->address_mode_control) != 0) ||
@@ -107,7 +114,7 @@ int gpu_cp_bind(const gpu_mmio_window *regs,
         gpu_mmio_try_write32(regs, layout->rb_control,
                              config->ring_control) != 0 ||
         gpu_mmio_try_write32(regs, layout->sqe_control, 1u) != 0)
-        return -2;
+        return -3;
     return 0;
 }
 
@@ -115,8 +122,8 @@ int gpu_cp_submit(const gpu_mmio_window *regs,
                   const gpu_cp_register_layout *layout,
                   const gpu_command_ring *ring)
 {
-    if (!regs || !layout || !ring || !ring->sealed || !ring->write_dwords ||
-        ring->write_dwords > ring->capacity_dwords)
+    if (!regs || !layout || !ring || !ring->sealed ||
+        !ring->emitted_dwords || ring->write_dwords >= ring->capacity_dwords)
         return -1;
     return gpu_mmio_try_write32(regs, layout->rb_wptr, ring->write_dwords) == 0
         ? 0 : -2;
@@ -131,7 +138,7 @@ int gpu_cp_submit_fenced(const gpu_mmio_window *regs,
     uint32_t status;
 
     if (!regs || !gmu || !layout || !ring || !ring->sealed ||
-        !ring->write_dwords || ring->write_dwords > ring->capacity_dwords)
+        !ring->emitted_dwords || ring->write_dwords >= ring->capacity_dwords)
         return -1;
     /* The GMU reports a dropped CP_RB_WPTR write in bit 0.  Follow the A7xx
      * fenced-write rule: post the write, observe the GMU fence, and retry a

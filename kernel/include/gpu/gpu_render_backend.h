@@ -19,3 +19,6 @@ int gpu_render_backend_surface_backing(const gpu_render_target *target,
                                        gpu_buffer **out_buffer);
 int gpu_render_backend_texture_backing(const gpu_render_texture *texture,
                                        gpu_buffer **out_buffer);
+/* Enumerate a stable surface slot while a hardware backend constructs its
+ * initial translation domain. Inactive slots return a positive result. */
+int gpu_render_backend_surface_slot(uint32_t slot, gpu_buffer **out_buffer);

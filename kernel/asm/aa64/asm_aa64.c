@@ -64,7 +64,9 @@ void asm_dma_clean_range(const void *ptr, uint64_t len)
 {
     asm_dma_clean_range_raw(ptr, len);
 
-    __asm__ __volatile__("dsb ish" ::: "memory");
+    /* External DMA masters need completion beyond the CPU's inner-shareable
+     * domain before they may consume the cleaned buffer. */
+    __asm__ __volatile__("dsb sy" ::: "memory");
     __asm__ __volatile__("isb" ::: "memory");
 }
 
@@ -80,12 +82,12 @@ void asm_dma_invalidate_range(const void *ptr, uint64_t len)
     end = ((uintptr_t)ptr + (uintptr_t)len + (uintptr_t)(ASM_DCACHE_LINE_SIZE - 1ull)) &
           ~(uintptr_t)(ASM_DCACHE_LINE_SIZE - 1ull);
 
-    __asm__ __volatile__("dsb ish" ::: "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
 
     for (uintptr_t p = start; p < end; p += ASM_DCACHE_LINE_SIZE)
         __asm__ __volatile__("dc ivac, %0" ::"r"(p) : "memory");
 
-    __asm__ __volatile__("dsb ish" ::: "memory");
+    __asm__ __volatile__("dsb sy" ::: "memory");
     __asm__ __volatile__("isb" ::: "memory");
 }
 

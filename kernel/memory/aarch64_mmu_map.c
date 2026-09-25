@@ -311,6 +311,8 @@ static uint64_t *split_existing_block_to_table(uint64_t *table, uint32_t idx, in
     int child_level = level + 1;
     uint64_t child_size;
     uint64_t old_pa;
+    uint64_t parent_pa;
+    uint64_t block_bytes;
     void *new_page;
     uint64_t *child;
 
@@ -339,11 +341,27 @@ static uint64_t *split_existing_block_to_table(uint64_t *table, uint32_t idx, in
     for (uint32_t i = 0; i < PT_ENTRIES; ++i)
         child[i] = make_child_desc_from_block(old_desc, old_pa + ((uint64_t)i * child_size), child_level);
 
-    /* Break before make when replacing a valid block with a table. */
-    table[idx] = 0;
-    tlbi_all();
-    table[idx] = make_table_desc(pmem_virt_to_phys(new_page));
-    tlbi_all();
+    parent_pa = pmem_virt_to_phys(table);
+    block_bytes = level_size(level);
+    /* Firmware identity-maps the pmem arena with large blocks. The page-table
+     * allocator can therefore place this parent table inside the very block
+     * being split. A conventional break-before-make would unmap `table`
+     * itself, and the following descriptor store would data-abort. In that
+     * self-hosting case replace the descriptor atomically before the TLBI;
+     * all other cases retain architectural break-before-make. No secondary
+     * CPU is allowed to mutate these mappings concurrently. */
+    if (parent_pa >= old_pa && parent_pa < old_pa + block_bytes)
+    {
+        table[idx] = make_table_desc(pmem_virt_to_phys(new_page));
+        tlbi_all();
+    }
+    else
+    {
+        table[idx] = 0;
+        tlbi_all();
+        table[idx] = make_table_desc(pmem_virt_to_phys(new_page));
+        tlbi_all();
+    }
 
     terminal_print("AArch64 MMU: split existing block at level ");
     terminal_print_inline_hex64((uint64_t)level);

@@ -303,6 +303,9 @@ typedef struct
 
 /* backbuffer (you already have these) */
 static uint8_t *BB_ptr = NULL;
+static gpu_render_surface_handle g_gpu_backbuffer_surface;
+static uint8_t g_gpu_present_enabled;
+static uint8_t g_gpu_frame_dirty;
 static uint32_t BB_stride = 0;
 static uint64_t BB_bytes = 0;
 static kgfx_clip_rect g_bb_clip = {0, 0, 0, 0, 0};
@@ -1502,6 +1505,11 @@ static void bb_clear_region(const kgfx_clip_rect *clip, kcolor c)
 
 static void present_full(void)
 {
+    if (g_gpu_present_enabled)
+    {
+        g_gpu_frame_dirty = 1u;
+        return;
+    }
     uint32_t row_bytes = FB.pitch;
 
     for (uint32_t y = 0; y < FB.height; ++y)
@@ -1542,6 +1550,12 @@ void kgfx_panic_present(void)
 
 static uint8_t present_region_raw(const kgfx_clip_rect *clip)
 {
+    if (g_gpu_present_enabled)
+    {
+        if (clip && clip->enabled)
+            g_gpu_frame_dirty = 1u;
+        return 0u;
+    }
     if (!clip || !clip->enabled)
         return 0u;
 
@@ -3390,6 +3404,91 @@ int kgfx_scene_init(void)
     for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
         g_prev_snapshot[i] = (kgfx_obj_snapshot){0};
     return 0;
+}
+
+int kgfx_gpu_backbuffer_prepare(void)
+{
+    gpu_render_surface_desc desc;
+    gpu_render_target target;
+    uint8_t *old_backbuffer;
+    uint32_t old_stride;
+
+    if (!BB_ptr || !FB.width || !FB.height)
+        return -1;
+    if (g_gpu_backbuffer_surface.generation)
+        return 0;
+    desc = (gpu_render_surface_desc){FB.width, FB.height,
+                                     GPU_RENDER_FORMAT_BGRX8888};
+    if (gpu_render_surface_create(&desc, &g_gpu_backbuffer_surface) != 0 ||
+        gpu_render_surface_target(g_gpu_backbuffer_surface, &target) != 0)
+        return -2;
+    /* Preserve the current CPU frame. The original pmem allocation is kept
+     * for this boot rather than risking a stale emergency-render reference. */
+    old_backbuffer = BB_ptr;
+    old_stride = BB_stride;
+    for (uint32_t y = 0u; y < FB.height; ++y)
+        kmemcpy64((uint8_t *)target.cpu_pixels + (uint64_t)y * target.stride_bytes,
+                  old_backbuffer + (uint64_t)y * old_stride,
+                  FB.width * 4u);
+    BB_ptr = (uint8_t *)target.cpu_pixels;
+    BB_stride = target.stride_bytes;
+    BB_bytes = target.cpu_bytes;
+    g_have_prev_frame = 0u;
+    return 0;
+}
+
+int kgfx_gpu_backbuffer_enable(void)
+{
+    if (!g_gpu_backbuffer_surface.generation || !BB_ptr)
+        return -1;
+    g_gpu_present_enabled = 1u;
+    g_gpu_frame_dirty = 1u;
+    return 0;
+}
+
+void kgfx_gpu_backbuffer_disable(void)
+{
+    /* A failed accelerator must not leave KGFX suppressing its ordinary
+     * framebuffer presents. Force one redraw, then keep using the existing
+     * CPU dirty-region path without retrying a dead GPU every frame. */
+    g_gpu_present_enabled = 0u;
+    g_gpu_frame_dirty = 0u;
+    g_have_prev_frame = 0u;
+}
+
+int kgfx_gpu_backbuffer_attach(void)
+{
+    if (kgfx_gpu_backbuffer_prepare() != 0)
+        return -1;
+    return kgfx_gpu_backbuffer_enable();
+}
+
+int kgfx_gpu_backbuffer_texture(gpu_render_texture *out_texture)
+{
+    if (!g_gpu_present_enabled || !out_texture)
+        return -1;
+    return gpu_render_surface_texture(g_gpu_backbuffer_surface,
+                                      GPU_RENDER_SAMPLE_NEAREST,
+                                      out_texture);
+}
+
+uint8_t kgfx_gpu_frame_dirty(void)
+{
+    return g_gpu_present_enabled && g_gpu_frame_dirty;
+}
+
+void kgfx_gpu_frame_submitted(void)
+{
+    g_gpu_frame_dirty = 0u;
+}
+
+void kgfx_present_backbuffer_cpu(void)
+{
+    uint8_t was_gpu = g_gpu_present_enabled;
+    g_gpu_present_enabled = 0u;
+    present_full();
+    g_gpu_present_enabled = was_gpu;
+    g_gpu_frame_dirty = 0u;
 }
 
 static void store_prev_snapshots(const kgfx_obj_snapshot *current, uint16_t count, kcolor clear_color)

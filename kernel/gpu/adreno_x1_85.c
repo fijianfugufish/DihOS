@@ -1228,6 +1228,13 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                               sizeof(words) / sizeof(words[0]));
 }
 
+int adreno_x1_85_emit_cp_wait_mem_writes(gpu_command_ring *ring)
+{
+    if (!ring)
+        return -1;
+    return gpu_ring_emit(ring, adreno_pkt7(0x12u, 0u));
+}
+
 int adreno_x1_85_emit_cp_memory_copy_u32(gpu_command_ring *ring,
                                          uint64_t destination_iova,
                                          uint64_t source_iova)
@@ -1255,17 +1262,36 @@ int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
                                     uint64_t destination_iova,
                                     uint32_t value)
 {
-    /* RB_DONE_TS writes this known value only after RB completes. CP's own
-     * WAIT_REG_MEM stalls this early direct-sysmem path on X1-85, so the
-     * kernel observes the timestamp with a bounded CPU-side poll after the
-     * command ring itself has drained. */
+    /* Turnip's A7xx event/fence path uses the four-word USER_32B form.  The
+     * three-word ALWAYSON form is fd6_record_ts()'s query timestamp, not a
+     * reusable submission fence; repeatedly using it exhausted the event
+     * path at the deterministic eighteenth event. */
     uint32_t words[5];
 
     if (!ring || !destination_iova || (destination_iova & 3u))
         return -1;
-
     words[0] = adreno_pkt7(0x46u, 4u); /* CP_EVENT_WRITE7 */
-    words[1] = 0x08000016u;            /* RB_DONE_TS, user-32b, RAM write */
+    words[1] = 0x08000016u;            /* RB_DONE_TS, user-32b -> RAM */
+    words[2] = (uint32_t)destination_iova;
+    words[3] = (uint32_t)(destination_iova >> 32);
+    words[4] = value;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
+int adreno_x1_85_emit_event_queue_fence(gpu_command_ring *ring,
+                                        uint64_t destination_iova,
+                                        uint32_t value)
+{
+    uint32_t words[5];
+
+    if (!ring || !destination_iova || (destination_iova & 3u))
+        return -1;
+    /* Mesa uses DUMMY_EVENT for A7xx event-pipeline bookkeeping. With the
+     * USER_32B write enabled, the value is published only after preceding
+     * CCU/cache events have retired, without requiring RB_DONE_TS. */
+    words[0] = adreno_pkt7(0x46u, 4u); /* CP_EVENT_WRITE7 */
+    words[1] = 0x08000001u;            /* DUMMY_EVENT, user-32b -> RAM */
     words[2] = (uint32_t)destination_iova;
     words[3] = (uint32_t)(destination_iova >> 32);
     words[4] = value;
@@ -1502,9 +1528,15 @@ int adreno_x1_85_emit_non_context_regs(
 
 int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring)
 {
+    return adreno_x1_85_emit_auto_triangle_list_draw(ring, 3u);
+}
+
+static int adreno_x1_85_emit_auto_triangle_list_draw_mode(
+    gpu_command_ring *ring, uint32_t vertex_count, uint32_t visibility)
+{
     uint32_t words[6];
 
-    if (!ring)
+    if (!ring || vertex_count < 3u || (vertex_count % 3u) != 0u)
         return -1;
     /* Mesa emits CP_DRAW_INDX_OFFSET with the auto-index source for an
      * input-free gl_VertexID triangle. DI_PT_TRILIST is 4 and AUTO_INDEX is
@@ -1520,10 +1552,35 @@ int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring)
     words[0] = adreno_pkt7(0x19u, 1u); /* CP_DRAW_PRED_ENABLE_GLOBAL */
     words[1] = 0u;                     /* predication disabled */
     words[2] = adreno_pkt7(0x38u, 3u); /* CP_DRAW_INDX_OFFSET */
-    words[3] = 4u | (2u << 6) | (1u << 8);
-                                           /* TRI list, auto index, use VSC */
+    words[3] = 4u | (2u << 6) | visibility;
+                                           /* TRI list, auto index, vis mode */
     words[4] = 1u;
-    words[5] = 3u;
+    words[5] = vertex_count;
+    return gpu_ring_emit_many(ring, words,
+                              sizeof(words) / sizeof(words[0]));
+}
+
+int adreno_x1_85_emit_auto_triangle_list_draw(gpu_command_ring *ring,
+                                               uint32_t vertex_count)
+{
+    return adreno_x1_85_emit_auto_triangle_list_draw_mode(
+        ring, vertex_count, 1u << 8); /* USE_VISIBILITY */
+}
+
+int adreno_x1_85_emit_auto_rectangle_draw(gpu_command_ring *ring)
+{
+    uint32_t words[6];
+
+    if (!ring)
+        return -1;
+    /* Match Turnip's A7xx r3d_run_vis blit path exactly: RECTLIST consumes
+     * two diagonal vertices and VPC synthesizes the remaining corners. */
+    words[0] = adreno_pkt7(0x19u, 1u); /* CP_DRAW_PRED_ENABLE_GLOBAL */
+    words[1] = 0u;
+    words[2] = adreno_pkt7(0x38u, 3u); /* CP_DRAW_INDX_OFFSET */
+    words[3] = 8u | (2u << 6) | (1u << 8);
+    words[4] = 1u;
+    words[5] = 2u;
     return gpu_ring_emit_many(ring, words,
                               sizeof(words) / sizeof(words[0]));
 }

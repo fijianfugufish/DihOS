@@ -3,6 +3,7 @@
 #include "bootinfo.h"
 #include "asm/aa64_user.h"
 #include "gpu/gpu_render.h"
+#include "gpu/gpu_compositor.h"
 #include "gpu/gpu_core.h"
 #include "mesart/mesart_renderer.h"
 #include "mesart/mesart_shader.h"
@@ -130,6 +131,7 @@ typedef struct dihos_mesart_visual_state
     uint8_t active;
     uint8_t submitted;
     uint8_t stop_requested;
+    uint8_t borrowed_core_pipeline;
 } dihos_mesart_visual_state;
 
 static dihos_mesart_visual_state G_mesart_visual;
@@ -4642,6 +4644,9 @@ static int dihos_cmd_gpu_render_status(dihos_shell_stage *stage)
     backend = gpu_render_backend();
     terminal_print("GPU render ABI=");
     terminal_print_inline_hex64(status.abi_version);
+    terminal_print(" core-pipelines=");
+    terminal_print(gpu_compositor_core_ready() ?
+                       "solid+textured" : "unavailable");
     terminal_print(" mode=");
     if (!status.accelerator_ready)
     {
@@ -4664,10 +4669,13 @@ static void dihos_mesart_visual_release(void)
 
     if (!G_mesart_visual.active)
         return;
-    process = G_mesart_visual.service.process;
     gpu_core_mesart_3d_discard_cached();
-    mesart_renderer_release(&G_mesart_visual.service);
-    (void)dihos_process_reap(&G_mesart_processes, process);
+    if (!G_mesart_visual.borrowed_core_pipeline)
+    {
+        process = G_mesart_visual.service.process;
+        mesart_renderer_release(&G_mesart_visual.service);
+        (void)dihos_process_reap(&G_mesart_processes, process);
+    }
     G_mesart_visual = (dihos_mesart_visual_state){0};
 }
 
@@ -4782,6 +4790,24 @@ static int dihos_cmd_mesart_triangle(dihos_shell_stage *stage)
         terminal_error("Mesart triangle must be the first renderer use after boot; reboot, then run mesart:triangle start");
         terminal_flush_log();
         return -1;
+    }
+
+    /* Normal boots already own a persistent, verified compositor catalogue.
+     * Reuse its textured pipeline instead of remapping the same fixed shader
+     * aperture for a shell visual test. */
+    {
+        const mesart_renderer_graphics_pipeline *core =
+            gpu_compositor_core_pipeline(
+                GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED);
+        if (core)
+        {
+            G_mesart_visual.pipeline = *core;
+            G_mesart_visual.active = 1u;
+            G_mesart_visual.borrowed_core_pipeline = 1u;
+            terminal_success("Mesart core textured pipeline queued asynchronously; KGFX remains live");
+            terminal_flush_log();
+            return 0;
+        }
     }
 
     /* Retain this one verified service for the visual lifetime. That avoids

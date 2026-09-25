@@ -3,6 +3,7 @@
 #include "bootinfo.h"
 #include "kwrappers/kui_types.h"
 #include "kwrappers/colors.h"
+#include "gpu/gpu_render.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -116,6 +117,16 @@ extern "C"
     } kgfx_obj_handle;
 
     int kgfx_scene_init(void);
+    /* Prepare the neutral surface before a backend attaches its translation
+     * domain, then enable GPU presentation only after backend admission. */
+    int kgfx_gpu_backbuffer_prepare(void);
+    int kgfx_gpu_backbuffer_enable(void);
+    void kgfx_gpu_backbuffer_disable(void);
+    int kgfx_gpu_backbuffer_attach(void);
+    int kgfx_gpu_backbuffer_texture(gpu_render_texture *out_texture);
+    uint8_t kgfx_gpu_frame_dirty(void);
+    void kgfx_gpu_frame_submitted(void);
+    void kgfx_present_backbuffer_cpu(void);
 
     kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h,
                                       int32_t z, kcolor fill, uint8_t visible);

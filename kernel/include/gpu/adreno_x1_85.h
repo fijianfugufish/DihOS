@@ -42,6 +42,11 @@
  * are the first preflight only; neither one changes GPU state. */
 #define ADRENO_X1_85_RBBM_HW_VERSION      0x0000u
 #define ADRENO_X1_85_RBBM_STATUS          0x0010u
+/* a6xx.xml Gen7 engine-busy snapshots (dword register indices). */
+#define ADRENO_X1_85_RBBM_STATUS_GEN7     (0x0210u * 4u)
+#define ADRENO_X1_85_RBBM_STATUS1_GEN7    (0x0211u * 4u)
+#define ADRENO_X1_85_RBBM_STATUS2_GEN7    (0x0212u * 4u)
+#define ADRENO_X1_85_RBBM_STATUS3_GEN7    (0x0213u * 4u)
 
 /* Gen7 CP offsets are recorded in Mesa/Freedreno as dword register indices;
  * DihOS MMIO accesses use bytes, hence the explicit x4 conversion here. */
@@ -196,6 +201,9 @@ int adreno_x1_85_emit_cp_memory_probe(gpu_command_ring *ring,
                                       uint64_t destination_iova,
                                       uint32_t value);
 
+/* Drains CP_MEM_WRITE packets already accepted by the ring. */
+int adreno_x1_85_emit_cp_wait_mem_writes(gpu_command_ring *ring);
+
 /* Copies one 32-bit word between two already-mapped GPU virtual addresses.
  * This is a kernel-only diagnostic primitive used to read an RT pixel back
  * into the private completion page after a completed cache flush. */
@@ -203,13 +211,16 @@ int adreno_x1_85_emit_cp_memory_copy_u32(gpu_command_ring *ring,
                                          uint64_t destination_iova,
                                          uint64_t source_iova);
 
-/* Emits an A7xx RB_DONE_TS event into the private completion allocation.
- * Unlike CP_WAIT_FOR_IDLE, this records completion of actual RB work.  The
- * kernel performs the bounded CPU-side observation after CP drains the ring;
- * CP_WAIT_REG_MEM is not usable in this early direct-sysmem configuration. */
+/* Emits an A7xx USER_32B RB_DONE_TS fence into private completion memory.
+ * The requested value becomes visible after render/cache work retires. */
 int adreno_x1_85_emit_rb_done_fence(gpu_command_ring *ring,
                                     uint64_t destination_iova,
                                     uint32_t value);
+
+/* Writes a fence from the A7xx event queue after all earlier cache events. */
+int adreno_x1_85_emit_event_queue_fence(gpu_command_ring *ring,
+                                        uint64_t destination_iova,
+                                        uint32_t value);
 
 /* Takes one A7xx VPC primitive-counter snapshot.  The destination receives
  * the first stream's two 64-bit values in Mesa's order: primitives written,
@@ -291,6 +302,9 @@ int adreno_x1_85_emit_cp_constant_ubo(gpu_command_ring *ring,
  * generated from gl_VertexID. Pipeline and render-target state must already
  * be installed by the kernel's A7xx state builder. */
 int adreno_x1_85_emit_auto_triangle_draw(gpu_command_ring *ring);
+int adreno_x1_85_emit_auto_triangle_list_draw(gpu_command_ring *ring,
+                                               uint32_t vertex_count);
+int adreno_x1_85_emit_auto_rectangle_draw(gpu_command_ring *ring);
 
 /* Programs the documented X1E CX-side, RSCC and PDC prerequisites for a Gen7
  * GMU cold boot.  It does not release reset, enable GX, or submit GPU work. */

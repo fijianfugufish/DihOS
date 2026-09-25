@@ -25,10 +25,13 @@ int gpu_ring_emit(gpu_command_ring *ring, uint32_t dword)
     uint32_t *words;
 
     if (!ring || !ring->buffer.cpu || ring->sealed ||
-        ring->write_dwords >= ring->capacity_dwords)
+        ring->emitted_dwords >= ring->capacity_dwords)
         return -1;
     words = (uint32_t *)ring->buffer.cpu;
-    words[ring->write_dwords++] = dword;
+    words[ring->write_dwords] = dword;
+    ring->write_dwords = (ring->write_dwords + 1u) %
+                         ring->capacity_dwords;
+    ++ring->emitted_dwords;
     return 0;
 }
 
@@ -36,7 +39,7 @@ int gpu_ring_emit_many(gpu_command_ring *ring, const uint32_t *dwords,
                        uint32_t count)
 {
     if (!ring || !dwords || ring->sealed ||
-        count > ring->capacity_dwords - ring->write_dwords)
+        count > ring->capacity_dwords - ring->emitted_dwords)
         return -1;
     for (uint32_t i = 0u; i < count; ++i)
         if (gpu_ring_emit(ring, dwords[i]) != 0)
@@ -55,9 +58,18 @@ int gpu_ring_seal(gpu_command_ring *ring)
 
 int gpu_ring_reset(gpu_command_ring *ring)
 {
+    return gpu_ring_reset_at(ring, 0u);
+}
+
+int gpu_ring_reset_at(gpu_command_ring *ring, uint32_t start_dwords)
+{
     if (!ring || !ring->buffer.cpu || !ring->capacity_dwords)
         return -1;
-    ring->write_dwords = 0u;
+    if (start_dwords >= ring->capacity_dwords)
+        return -2;
+    ring->start_dwords = start_dwords;
+    ring->write_dwords = start_dwords;
+    ring->emitted_dwords = 0u;
     ring->sealed = 0u;
     return 0;
 }

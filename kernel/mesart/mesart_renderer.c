@@ -50,13 +50,60 @@ static mesart_renderer_buffer *mesart_renderer_find_buffer(
     return buffer->active && buffer->handle == handle ? buffer : 0;
 }
 
-static const mesart_renderer_shader_asset *mesart_renderer_find_shader(
-    const mesart_renderer_service *service, uint32_t stage)
+static int mesart_renderer_name_equal(const char *a, const char *b)
 {
-    if (!service)
+    uint32_t i = 0u;
+    if (!a || !b)
+        return 0;
+    while (i < MESART_RENDERER_PIPELINE_NAME_BYTES)
+    {
+        if (a[i] != b[i])
+            return 0;
+        if (!a[i])
+            return 1;
+        ++i;
+    }
+    return 0;
+}
+
+static int mesart_renderer_artifact_name(
+    char out[MESART_RENDERER_PIPELINE_NAME_BYTES], const char *path,
+    const char *suffix)
+{
+    uint32_t start = 0u, end = 0u, suffix_bytes = 0u;
+
+    if (!out || !path || !suffix)
+        return -1;
+    while (path[end] && end < MESART_MANIFEST_PATH_BYTES)
+    {
+        if (path[end] == '/')
+            start = end + 1u;
+        ++end;
+    }
+    while (suffix[suffix_bytes])
+        ++suffix_bytes;
+    if (end == MESART_MANIFEST_PATH_BYTES || end < start + suffix_bytes ||
+        end - start - suffix_bytes == 0u ||
+        end - start - suffix_bytes >= MESART_RENDERER_PIPELINE_NAME_BYTES)
+        return -2;
+    for (uint32_t i = 0u; i < suffix_bytes; ++i)
+        if (path[end - suffix_bytes + i] != suffix[i])
+            return -3;
+    for (uint32_t i = 0u; i < end - start - suffix_bytes; ++i)
+        out[i] = path[start + i];
+    out[end - start - suffix_bytes] = '\0';
+    return 0;
+}
+
+static const mesart_renderer_shader_asset *mesart_renderer_find_named_shader(
+    const mesart_renderer_service *service, const char *name, uint32_t stage)
+{
+    if (!service || !name)
         return 0;
     for (uint32_t i = 0u; i < service->shader_count; ++i)
-        if (service->shaders[i].stage == stage)
+        if (service->shaders[i].stage == stage &&
+            mesart_renderer_name_equal(service->shaders[i].pipeline_name,
+                                       name))
             return &service->shaders[i];
     return 0;
 }
@@ -170,6 +217,7 @@ static int mesart_renderer_load_ir3_shader(
     const mesart_manifest_file *file)
 {
     char path[MESART_RENDERER_BUNDLE_PATH_BYTES];
+    char pipeline_name[MESART_RENDERER_PIPELINE_NAME_BYTES] = {0};
     KFile stream;
     gpu_buffer *storage;
     mesart_ir3_blob_view blob;
@@ -225,12 +273,20 @@ static int mesart_renderer_load_ir3_shader(
         ((uint8_t *)storage->cpu)[slot_offset +
             MESART_RENDERER_IR3_CODE_OFFSET + at - 1u] =
             blob.binary[at - 1u];
+    if (mesart_renderer_artifact_name(
+            pipeline_name, file->path,
+            blob.header->stage == MESART_IR3_SHADER_VERTEX ?
+                ".vert.mir3" : ".frag.mir3") != 0)
+        return -6;
     for (uint32_t i = 0u; i < service->shader_count; ++i)
-        if (service->shaders[i].stage == blob.header->stage)
-            return -6; /* One kernel-selected shader per graphics stage. */
+        if (service->shaders[i].stage == blob.header->stage &&
+            mesart_renderer_name_equal(service->shaders[i].pipeline_name,
+                                       pipeline_name))
+            return -7;
     gpu_buffer_prepare_for_device(storage);
     service->shaders[service->shader_count++] =
         (mesart_renderer_shader_asset){
+            .pipeline_name = {0},
             .buffer_handle = 0u,
             .stage = blob.header->stage,
             .code_dwords = blob.code_dwords,
@@ -249,6 +305,10 @@ static int mesart_renderer_load_ir3_shader(
             .constant_data_bytes = blob.header->constant_data_bytes,
             .constant_data_ubo_index = blob.header->constant_data_ubo_index,
         };
+    for (uint32_t i = 0u; pipeline_name[i] &&
+                            i + 1u < MESART_RENDERER_PIPELINE_NAME_BYTES; ++i)
+        service->shaders[service->shader_count - 1u].pipeline_name[i] =
+            pipeline_name[i];
     return 0;
 }
 
@@ -272,28 +332,34 @@ static int mesart_renderer_load_graphics_pipeline(
     const mesart_manifest_file *file)
 {
     char path[MESART_RENDERER_BUNDLE_PATH_BYTES];
+    char pipeline_name[MESART_RENDERER_PIPELINE_NAME_BYTES] = {0};
     KFile stream;
     const mesart_renderer_shader_asset *vertex_asset;
     const mesart_renderer_shader_asset *fragment_asset;
     mesart_pipeline_shader_info vertex;
     mesart_pipeline_shader_info fragment;
+    mesart_pipeline_header reflection;
     mesart_pipeline_header validated;
+    mesart_renderer_pipeline_asset *pipeline_asset;
     uint32_t read = 0u;
 
     if (!service || !bundle_root || !file ||
         file->role != MESART_ROLE_KERNEL_COMPOSITOR_PIPELINE ||
-        service->graphics_pipeline_reflection_loaded ||
+        service->graphics_pipeline_count >=
+            MESART_RENDERER_MAX_GRAPHICS_PIPELINES ||
         file->bytes != MESART_PIPELINE_HEADER_BYTES ||
+        mesart_renderer_artifact_name(pipeline_name, file->path, ".mpip") != 0 ||
         mesart_renderer_make_bundle_file_path(path, bundle_root, file) != 0 ||
         kfile_open(&stream, path, KFILE_READ) != 0)
         return -1;
-    vertex_asset = mesart_renderer_find_shader(service, MESART_IR3_SHADER_VERTEX);
-    fragment_asset = mesart_renderer_find_shader(service, MESART_IR3_SHADER_FRAGMENT);
+    vertex_asset = mesart_renderer_find_named_shader(
+        service, pipeline_name, MESART_IR3_SHADER_VERTEX);
+    fragment_asset = mesart_renderer_find_named_shader(
+        service, pipeline_name, MESART_IR3_SHADER_FRAGMENT);
     if (!vertex_asset || !fragment_asset ||
         kfile_size(&stream) != file->bytes ||
-        kfile_read(&stream, &service->graphics_pipeline_reflection,
-                   sizeof(service->graphics_pipeline_reflection), &read) != 0 ||
-        read != sizeof(service->graphics_pipeline_reflection))
+        kfile_read(&stream, &reflection, sizeof(reflection), &read) != 0 ||
+        read != sizeof(reflection))
     {
         kfile_close(&stream);
         return -2;
@@ -301,17 +367,29 @@ static int mesart_renderer_load_graphics_pipeline(
     kfile_close(&stream);
     vertex = mesart_renderer_pipeline_shader_info(vertex_asset);
     fragment = mesart_renderer_pipeline_shader_info(fragment_asset);
-    if (mesart_pipeline_validate(&service->graphics_pipeline_reflection,
+    if (mesart_pipeline_validate(&reflection,
                                  file->bytes,
                                  MESART_FREEDRENO_CHIP_ID_ADRENO_X1_85,
                                  &vertex, &fragment,
                                  &validated) != 0)
     {
-        service->graphics_pipeline_reflection = (mesart_pipeline_header){0};
         return -3;
     }
-    service->graphics_pipeline_reflection = validated;
-    service->graphics_pipeline_reflection_loaded = 1u;
+    pipeline_asset =
+        &service->graphics_pipelines[service->graphics_pipeline_count++];
+    *pipeline_asset = (mesart_renderer_pipeline_asset){0};
+    for (uint32_t i = 0u; pipeline_name[i] &&
+                            i + 1u < MESART_RENDERER_PIPELINE_NAME_BYTES; ++i)
+        pipeline_asset->name[i] = pipeline_name[i];
+    pipeline_asset->reflection = validated;
+    pipeline_asset->loaded = 1u;
+    /* Preserve the original single-pipeline fields for the diagnostic ABI.
+     * New compositor clients always select a named pipeline. */
+    if (!service->graphics_pipeline_reflection_loaded)
+    {
+        service->graphics_pipeline_reflection = validated;
+        service->graphics_pipeline_reflection_loaded = 1u;
+    }
     return 0;
 }
 
@@ -638,25 +716,36 @@ int mesart_renderer_test_complete_queued(mesart_renderer_service *service)
     return 0;
 }
 
-int mesart_renderer_prepare_graphics_pipeline(
-    const mesart_renderer_service *service,
+int mesart_renderer_prepare_named_graphics_pipeline(
+    const mesart_renderer_service *service, const char *pipeline_name,
     const mesart_renderer_graphics_request *request,
     mesart_renderer_graphics_pipeline *out_pipeline)
 {
     const mesart_renderer_shader_asset *vertex;
     const mesart_renderer_shader_asset *fragment;
+    const mesart_renderer_pipeline_asset *pipeline_asset = 0;
 
     if (out_pipeline)
         *out_pipeline = (mesart_renderer_graphics_pipeline){0};
-    if (!service || !request || !out_pipeline)
+    if (!service || !pipeline_name || !request || !out_pipeline)
         return -1;
     /* A MIR3 pair is not enough to safely reconstruct draw state.  The
      * matching authenticated MPIP record is the contract that supplies the
      * compiler's register-footprint and VPC-linkage facts. */
-    if (!service->graphics_pipeline_reflection_loaded)
+    for (uint32_t i = 0u; i < service->graphics_pipeline_count; ++i)
+        if (service->graphics_pipelines[i].loaded &&
+            mesart_renderer_name_equal(service->graphics_pipelines[i].name,
+                                       pipeline_name))
+        {
+            pipeline_asset = &service->graphics_pipelines[i];
+            break;
+        }
+    if (!pipeline_asset)
         return -2;
-    vertex = mesart_renderer_find_shader(service, MESART_IR3_SHADER_VERTEX);
-    fragment = mesart_renderer_find_shader(service, MESART_IR3_SHADER_FRAGMENT);
+    vertex = mesart_renderer_find_named_shader(
+        service, pipeline_name, MESART_IR3_SHADER_VERTEX);
+    fragment = mesart_renderer_find_named_shader(
+        service, pipeline_name, MESART_IR3_SHADER_FRAGMENT);
     if (!vertex || !fragment || !vertex->code_gpu_va || !fragment->code_gpu_va ||
         !vertex->code_dwords || !fragment->code_dwords ||
         !(vertex->flags & MESART_IR3_FLAG_WRITES_POSITION) ||
@@ -685,11 +774,22 @@ int mesart_renderer_prepare_graphics_pipeline(
         .fragment_uniform_vec4s = request->fragment_uniform_vec4s,
         .vertex_texture_count = request->vertex_texture_count,
         .fragment_texture_count = request->fragment_texture_count,
-        .reflection = service->graphics_pipeline_reflection,
-        .pipeline_reflection_ready = service->graphics_pipeline_reflection_loaded,
+        .reflection = pipeline_asset->reflection,
+        .pipeline_reflection_ready = pipeline_asset->loaded,
         .ready = 1u,
     };
     return 0;
+}
+
+int mesart_renderer_prepare_graphics_pipeline(
+    const mesart_renderer_service *service,
+    const mesart_renderer_graphics_request *request,
+    mesart_renderer_graphics_pipeline *out_pipeline)
+{
+    if (!service || !service->graphics_pipeline_count)
+        return -1;
+    return mesart_renderer_prepare_named_graphics_pipeline(
+        service, service->graphics_pipelines[0].name, request, out_pipeline);
 }
 
 int mesart_renderer_admit(dihos_process_table *processes,

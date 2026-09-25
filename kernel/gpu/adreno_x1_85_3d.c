@@ -114,6 +114,10 @@
 #define A7XX_SP_PS_INITIAL_TEX_LOAD_CNTL 0xa99eu
 #define A7XX_SP_PS_CNTL_1                0xa9aeu
 #define A7XX_SP_PS_WAVE_CNTL             0xa9c6u
+#define A7XX_SP_PS_CNTL_0_THREAD128       (1u << 20)
+#define A7XX_SP_PS_CNTL_0_VARYING         (1u << 22)
+#define A7XX_SP_PS_WAVE_CNTL_THREAD128    (1u << 0)
+#define A7XX_SP_PS_WAVE_CNTL_VARYINGS     (1u << 1)
 #define A7XX_SP_LB_PARAM_LIMIT           0xa9c7u
 #define A7XX_SP_REG_PROG_ID_0            0xa9c8u
 #define A7XX_SP_REG_PROG_ID_1            0xa9c9u
@@ -156,16 +160,24 @@
 #define A7XX_SP_XS_MESA_GRAPHICS        \
     (A7XX_SP_XS_ENABLED | A7XX_SP_XS_BINDLESS_TEX | A7XX_SP_XS_BINDLESS_SAMP)
 #define A7XX_SP_PS_INOUT_REG_OVERLAP    0x01000000u
-#define A7XX_SP_UPDATE_ALL_STATE         0x000000ffu
+/* Mesa's graphics-program update: VS/HS/DS/GS/FS state plus GFX UAV.
+ * SP_UPDATE_CNTL is a command register with a queue-clearing side effect;
+ * it must be emitted through a direct type-4 write, never a context bunch. */
+#define A7XX_SP_UPDATE_GRAPHICS_STATE    0x0000009fu
 #define A7XX_TPL1_MODE_GL                0x000000a2u
 #define A7XX_CONST_ENABLED               0x00000100u
 #define A7XX_RB_ALL_BUFFERS_SYSMEM      0x000003ffu
-/* X1-85 inherits a7xx_base: six 256 KiB depth caches. Mesa places colour
- * after that allocation; COLOR_OFFSET is bits 23:31 in 4 KiB units. */
-#define X1_85_CCU_DEPTH_BYTES          (6u * 256u * 1024u)
-#define X1_85_CCU_SYSMEM_CACHE_CNTL    ((X1_85_CCU_DEPTH_BYTES >> 12) << 23)
+/* X1-85 inherits a7xx_base's 256 KiB sysmem depth cache per CCU and has six
+ * CCUs. fd6_calc_gmem_cache_offsets() places the sysmem colour cache after
+ * those 1536 KiB. COLOR_OFFSET is bits 23:31 in 4 KiB units. */
+#define X1_85_CCU_COUNT                       6u
+#define X1_85_CCU_SYSMEM_DEPTH_BYTES_PER_CCU (256u * 1024u)
+#define X1_85_CCU_SYSMEM_COLOR_OFFSET         \
+    (X1_85_CCU_COUNT * X1_85_CCU_SYSMEM_DEPTH_BYTES_PER_CCU)
+#define X1_85_CCU_SYSMEM_CACHE_CNTL           \
+    ((X1_85_CCU_SYSMEM_COLOR_OFFSET >> 12) << 23)
 _Static_assert(X1_85_CCU_SYSMEM_CACHE_CNTL == 0xc0000000u,
-               "X1-85 colour CCU must begin at GMEM offset 0x180000");
+               "X1-85 colour CCU must begin at sysmem offset 0x180000");
 /* On A7xx direct sysmem routing is selected per attachment by RB_BUFFER_CNTL.
  * The older RB_CNTL.BUFFERS_LOCATION field is A6xx-only and must remain zero
  * here; writing its old bit position is ignored by A7xx hardware. */
@@ -268,21 +280,25 @@ static int a7xx_emit_event(gpu_command_ring *ring, uint32_t event)
     return 0;
 }
 
-int adreno_x1_85_3d_emit_sysmem_fini(gpu_command_ring *ring)
+static int a7xx_emit_sysmem_fini(gpu_command_ring *ring,
+                                 uint32_t wait_for_me)
 {
-    /* This is fd6_emit_sysmem_fini()'s relevant A7xx barrier sequence for
-     * a colour-only direct-sysmem pass:
+    /* This is fd6_emit_sysmem_fini()'s A7xx barrier sequence for a graphics
+     * direct-sysmem pass:
      *
-     *   CCU_CLEAN_COLOR, CCU_INVALIDATE_COLOR, CACHE_CLEAN,
+     *   CCU_CLEAN_COLOR, CCU_CLEAN_DEPTH,
+     *   CCU_INVALIDATE_COLOR, CCU_INVALIDATE_DEPTH, CACHE_CLEAN,
      *   CP_WAIT_MEM_WRITES, WFI, CP_CCHE_INVALIDATE, WFI, WFM.
      *
-     * RB_DONE only proves the render backend retired the draw; without this
-     * sequence the final colour can remain resident in CCU/UCHE rather than
-     * becoming observable through the scanout allocation. */
+     * Mesa deliberately includes the depth pair for every draw batch even
+     * without a depth attachment. LRZ is still part of the graphics pipe;
+     * omitting the pair can leave LRZ/CCU/RB busy forever at the WFI. */
     if (!ring)
         return -1;
     if (a7xx_emit_event(ring, 0x21u) != 0 || /* CCU_CLEAN_COLOR */
+        a7xx_emit_event(ring, 0x20u) != 0 || /* CCU_CLEAN_DEPTH */
         a7xx_emit_event(ring, 0x19u) != 0 || /* CCU_INVALIDATE_COLOR */
+        a7xx_emit_event(ring, 0x18u) != 0 || /* CCU_INVALIDATE_DEPTH */
         a7xx_emit_event(ring, 0x31u) != 0 || /* CACHE_CLEAN */
         /* CACHE_CLEAN starts an asynchronous writeback.  WFI only drains
          * the graphics pipes; the CP-specific wait is what guarantees the
@@ -290,13 +306,56 @@ int adreno_x1_85_3d_emit_sysmem_fini(gpu_command_ring *ring)
         gpu_ring_emit(ring, a7xx_pkt7(0x12u, 0u)) != 0 ||
         a7xx_emit_wait_for_idle(ring) != 0 ||
         gpu_ring_emit(ring, a7xx_pkt7(0x3au, 0u)) != 0 ||
+        a7xx_emit_wait_for_idle(ring) != 0)
+        return -2;
+    if (wait_for_me && gpu_ring_emit(ring, a7xx_pkt7(0x13u, 0u)) != 0)
+        return -2;
+    return 0;
+}
+
+int adreno_x1_85_3d_emit_sysmem_fini(gpu_command_ring *ring)
+{
+    /* Diagnostic/readback callers retain Mesa's WFI + WAIT_FOR_ME ordering
+     * before CP register and memory reads. */
+    return a7xx_emit_sysmem_fini(ring, 1u);
+}
+
+int adreno_x1_85_3d_emit_sysmem_fini_async(gpu_command_ring *ring,
+                                            uint64_t fence_gpu_va,
+                                            uint32_t fence_value)
+{
+    /* Match fd6_emit_sysmem_fini()/fd6_emit_flushes() for an A7xx graphics
+     * direct-sysmem pass. These A7xx cache events explicitly do
+     * not carry a seqno payload; attaching USER_32B words to CACHE_CLEAN
+     * changes the packet shape and is not Mesa's A7xx fence protocol.
+     *
+     * The waits are GPU-side packets, so submission remains asynchronous to
+     * the kernel.  Once they retire, a normal CP_MEM_WRITE publishes our
+     * private completion marker in strict ring order. */
+    if (!ring || !fence_gpu_va || (fence_gpu_va & 3u))
+        return -1;
+    if (a7xx_emit_event(ring, 0x21u) != 0 || /* CCU_CLEAN_COLOR */
+        a7xx_emit_event(ring, 0x20u) != 0 || /* CCU_CLEAN_DEPTH */
+        a7xx_emit_event(ring, 0x19u) != 0 || /* CCU_INVALIDATE_COLOR */
+        a7xx_emit_event(ring, 0x18u) != 0 || /* CCU_INVALIDATE_DEPTH */
+        a7xx_emit_event(ring, 0x31u) != 0 || /* CACHE_CLEAN */
+        /* This wait is asynchronous with respect to the CPU and drains the
+         * cache-event writes. */
+        gpu_ring_emit(ring, a7xx_pkt7(0x12u, 0u)) != 0 ||
         a7xx_emit_wait_for_idle(ring) != 0 ||
-        /* WFI drains graphics work, but does not by itself serialize SQE
-         * memory/register reads. Turnip uses WFI + WAIT_FOR_ME before CP
-         * consumes GPU results (e.g. VSC readback). Our next packets read
-         * the render target and counters, then write the CPU completion.
-         * Keep those on the far side of the completed cache flush. */
-        gpu_ring_emit(ring, a7xx_pkt7(0x13u, 0u)) != 0)
+        gpu_ring_emit(ring, a7xx_pkt7(0x3au, 0u)) != 0 ||
+        a7xx_emit_wait_for_idle(ring) != 0 ||
+        /* Do not insert CP_WAIT_FOR_ME here. X1-85 keeps sticky VPC state
+         * after a direct render and the packet then blocks permanently even
+         * though the ordered cache/idle sequence has retired. */
+        /* fd6_emit_sysmem_fini() restores global IB2 execution and flushes
+         * LRZ after the common barrier for every draw batch. */
+        gpu_ring_emit(ring, a7xx_pkt7(0x1du, 1u)) != 0 ||
+        gpu_ring_emit(ring, 0u) != 0 ||
+        a7xx_emit_event(ring, 0x26u) != 0 || /* LRZ_CACHE_FLUSH */
+        a7xx_emit_wait_for_idle(ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(ring, fence_gpu_va,
+                                           fence_value) != 0)
         return -2;
     return 0;
 }
@@ -384,8 +443,8 @@ int adreno_x1_85_3d_emit_x1e_baseline(gpu_command_ring *ring)
      * freedreno_devices.py X1-85 entry (chip 0xffff43050c01).  They are a
      * driver-owned hardware profile, never a Mesa renderer input. */
     static const adreno_x1_85_context_reg baseline[] = {
-        /* X1-85 has 256 KiB depth and 64 KiB colour cache per CCU.
-         * The dynamic colour offset is encoded separately below. */
+        /* Sysmem uses 256 KiB depth and 64 KiB colour cache per CCU. The
+         * dynamic colour offset is encoded separately below. */
         {A7XX_RB_CCU_CNTL, 0x00000001u},
         {0x0e17u, 0x00040004u}, {0xb600u, 0x11100000u},
         {0xb602u, 0x00040724u}, {0xae03u, 0x10001400u},
@@ -561,7 +620,7 @@ static uint32_t a7xx_pack_footprint(const mesart_pipeline_stage_state *stage,
          * no-kill profile. */
         value |= A7XX_SP_PS_INOUT_REG_OVERLAP;
         if (stage->flags & MESART_PIPELINE_STAGE_FLAG_DOUBLE_THREAD)
-            value |= 0x00100000u;
+            value |= A7XX_SP_PS_CNTL_0_THREAD128;
         if (stage->flags & MESART_PIPELINE_STAGE_FLAG_NEEDS_FULL_QUAD)
             value |= 0x00800000u;
         if (stage->flags & MESART_PIPELINE_STAGE_FLAG_NEEDS_PIXLOD)
@@ -694,11 +753,14 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
         reflection->vertex_attribute0_regid >= MESART_PIPELINE_INVALID_REGID ||
         !draw->vertex_buffer_gpu_va ||
         (draw->vertex_buffer_gpu_va & 7u) ||
+        (draw->rectangle_list > 1u) ||
+        (draw->rectangle_list ? draw->vertex_count != 2u :
+         (draw->vertex_count != 3u && draw->vertex_count != 6u)) ||
         (reflection->vertex_attribute0_compmask == 0x3u &&
-         (draw->vertex_buffer_bytes != 24u ||
+         (draw->vertex_buffer_bytes != draw->vertex_count * 8u ||
           draw->vertex_buffer_stride != 8u)) ||
         (reflection->vertex_attribute0_compmask == 0xfu &&
-         (draw->vertex_buffer_bytes != 48u ||
+         (draw->vertex_buffer_bytes != draw->vertex_count * 16u ||
           draw->vertex_buffer_stride != 16u)))
         return -2;
     if ((reflection->fragment_sampler_count !=
@@ -728,7 +790,11 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
         !draw->target->width || !draw->target->height ||
         draw->target->width > 0xffffu || draw->target->height > 0xffffu ||
         draw->target->stride_bytes < draw->target->width * 4u ||
-        (draw->target->stride_bytes & 63u))
+        (draw->target->stride_bytes & 63u) ||
+        draw->expand_safe_viewport > 1u ||
+        ((draw->clip_width == 0u) != (draw->clip_height == 0u)) ||
+        draw->clip_width > draw->target->width ||
+        draw->clip_height > draw->target->height)
         return -3;
     minimum_bytes = (uint64_t)draw->target->stride_bytes * draw->target->height;
     if (minimum_bytes < draw->target->stride_bytes ||
@@ -790,10 +856,6 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
      * data-type override.
      */
     REG(A7XX_TPL1_MODE_CNTL, A7XX_TPL1_MODE_GL);
-    /* SP_UPDATE_CNTL clears queued CP_LOAD_STATE6 state. Mesa clears all
-     * stage/UAV classes before replacing graphics state; clearing only the
-     * graphics-stage subset leaks firmware or prior-context CS/UAV state. */
-    REG(A7XX_SP_UPDATE_CNTL, A7XX_SP_UPDATE_ALL_STATE);
     REG(A7XX_SP_VS_CONST_CONFIG,
         a7xx_pack_const_config(reflection->vertex_const_vec4s));
     REG(A7XX_SP_HS_CONST_CONFIG, 0u);
@@ -822,7 +884,10 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
     REG(A7XX_SP_VS_TSIZE, 0u);
     REG(A7XX_SP_VS_PVT_MEM_STACK_OFFSET, 0u);
     REG(A7XX_SP_VS_VGS_CNTL, 0u);
-    REG(A7XX_SP_PS_CNTL_0, a7xx_pack_footprint(&reflection->fragment, 1u));
+    REG(A7XX_SP_PS_CNTL_0,
+        a7xx_pack_footprint(&reflection->fragment, 1u) |
+        (reflection->fragment.total_varying_components ?
+             A7XX_SP_PS_CNTL_0_VARYING : 0u));
     REG(A7XX_SP_PS_INSTR_SIZE, reflection->fragment_instruction_groups);
     REG(A7XX_SP_PS_BOOLEAN_CF_MASK, 0u);
     REG(A7XX_SP_PS_PROGRAM_COUNTER, 0u);
@@ -857,7 +922,10 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         (reflection->fragment.instance_id_regid !=
              MESART_PIPELINE_INVALID_REGID ? 2u : 0u));
     REG(A7XX_SP_PS_WAVE_CNTL,
-        reflection->fragment.total_varying_components ? 0x2u : 0u);
+        ((reflection->fragment.flags & MESART_PIPELINE_STAGE_FLAG_DOUBLE_THREAD) ?
+             A7XX_SP_PS_WAVE_CNTL_THREAD128 : 0u) |
+        (reflection->fragment.total_varying_components ?
+             A7XX_SP_PS_WAVE_CNTL_VARYINGS : 0u));
     REG(A7XX_SP_LB_PARAM_LIMIT, 0x7u);
     REG(A7XX_SP_REG_PROG_ID_0, 0xfcfcfcfcu);
     REG(A7XX_SP_REG_PROG_ID_1,
@@ -910,6 +978,11 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         ((uint32_t)0xffu << 8) |
         (reflection->fragment.total_varying_components ? 0x00010000u : 0u) |
         ((uint32_t)0xffu << 24));
+    /* RECTLIST has only two real vertices. Mesa programs replacement mode
+     * 0x9 so VPC supplies the missing corner's interpolants. Keep ordinary
+     * triangle interpolation untouched for every other draw profile. */
+    REG(0x9200u, 0u); /* VPC_VARYING_INTERP_MODE[0] */
+    REG(0x9208u, draw->rectangle_list ? 0x9u : 0u);
     REG(A7XX_VPC_VS_CLIP_CULL_CNTL, 0x00ffff00u);
     REG(A7XX_VPC_VS_CLIP_CULL_CNTL_V2, 0x00ffff00u);
     REG(A7XX_VPC_VS_SIV_CNTL, A7XX_VPC_INVALID_SIV_LOCATION);
@@ -927,10 +1000,21 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         A7XX_GRAS_CL_VP_CLIP_IGNORE);
     REG(A7XX_GRAS_MODE_CNTL, 0x2u);
     /* First profile: one GL-style full-target viewport, no depth buffer. */
+    /* The compositor uses proven safely in-clip +/-0.65 geometry and expands
+     * it in viewport space.  Put its edges at 0 and extent so top-left fill
+     * rules cover every outer pixel; mapping to the outer pixel centres left
+     * a visible one-pixel frame. a6xx.xml order is XOFFSET, XSCALE, YOFFSET,
+     * YSCALE. */
+    const float viewport_xscale = draw->expand_safe_viewport ?
+        (float)draw->target->width * 0.76923076923f :
+        (float)draw->target->width * 0.5f;
+    const float viewport_yscale = draw->expand_safe_viewport ?
+        (float)draw->target->height * 0.76923076923f :
+        (float)draw->target->height * 0.5f;
     REG(0x8010u, a7xx_float_bits((float)draw->target->width * 0.5f));
-    REG(0x8011u, a7xx_float_bits((float)draw->target->width * 0.5f));
+    REG(0x8011u, a7xx_float_bits(viewport_xscale));
     REG(0x8012u, a7xx_float_bits((float)draw->target->height * 0.5f));
-    REG(0x8013u, a7xx_float_bits((float)draw->target->height * 0.5f));
+    REG(0x8013u, a7xx_float_bits(viewport_yscale));
     REG(0x8014u, a7xx_float_bits(0.5f));
     REG(0x8015u, a7xx_float_bits(0.5f));
     REG(A7XX_GRAS_SC_SCREEN_SCISSOR, a7xx_pack_scissor(0u, 0u));
@@ -945,12 +1029,18 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
      * lets CP/RB finish a draw while rasterizing zero fragments. */
     REG(A7XX_GRAS_SC_WINDOW_SCISSOR, a7xx_pack_scissor(0u, 0u));
     REG(A7XX_GRAS_SC_WINDOW_SCISSOR + 1u,
-        a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
+        a7xx_pack_scissor((draw->clip_width ? draw->clip_width :
+                           draw->target->width) - 1u,
+                          (draw->clip_height ? draw->clip_height :
+                           draw->target->height) - 1u));
     /* Mesa's paired A7xx set_scissor() write.  It is inert for this 3D draw
      * but prevents inherited 2D/scissor state from disagreeing with GRAS. */
     REG(A7XX_GRAS_A2D_SCISSOR, a7xx_pack_scissor(0u, 0u));
     REG(A7XX_GRAS_A2D_SCISSOR + 1u,
-        a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
+        a7xx_pack_scissor((draw->clip_width ? draw->clip_width :
+                           draw->target->width) - 1u,
+                          (draw->clip_height ? draw->clip_height :
+                           draw->target->height) - 1u));
     /* Keep the first visible proof independent from the gl_VertexID
      * sideband path: Mesa reflects one vec2 position attribute and the
      * kernel supplies its fixed three-vertex buffer.  0xc6700000 is Mesa's
@@ -1072,6 +1162,13 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
         reflection->fragment.output_const_mask);
 #undef REG
     if (adreno_x1_85_emit_context_regs(ring, regs, reg_count) != 0)
+        return -3;
+    /* CP_LOAD_STATE6_FRAG records descriptor loads in an eight-entry SP
+     * pending-load queue.  Context-reg bunches do not execute the special
+     * clear semantics of this command-only register; doing that leaked two
+     * entries per compositor draw and wedged HLSQ/SP on draw nine. */
+    if (a7xx_emit_reg32(ring, A7XX_SP_UPDATE_CNTL,
+                        A7XX_SP_UPDATE_GRAPHICS_STATE) != 0)
         return -3;
     if (pipeline->fragment_texture_count &&
         a7xx_emit_fragment_texture_state(

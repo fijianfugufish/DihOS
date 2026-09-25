@@ -62,6 +62,9 @@ static uint8_t g_runtime_backend_ready;
  * the experimental runtime is usable avoids a firmware power transition
  * between CP setup and the first trusted draw. */
 static uint8_t g_runtime_gx_lease_held;
+/* Set only after SQE has been bound to g_runtime_ring.  Runtime clients may
+ * then append at CP_RB_RPTR without restarting SQE or losing its wrap phase. */
+static uint8_t g_runtime_ring_bound;
 static uint64_t g_runtime_3d_sequence;
 /* The trusted 3D encoder owns the one live runtime ring until RB has written
  * its completion markers.  A later compositor will retain its pipeline and
@@ -70,15 +73,21 @@ static uint64_t g_runtime_3d_sequence;
 typedef struct gpu_core_mesart_3d_inflight
 {
     uint64_t fence;
-    uint64_t started_tick;
+    uint64_t started_counter;
     uint32_t expected_rptr;
+    uint32_t poll_count;
     uint32_t completion_markers[9];
+    uint32_t source_first_expected;
+    uint32_t source_last_expected;
+    uint32_t descriptor_expected[5];
     /* A deliberately seeded 3x3 patch at the centre of the first trusted
      * triangle.  RB_DONE proves the backend retired, but this witness tells
      * us whether that backend actually wrote the imported display surface. */
     uint32_t scanout_probe_marker;
     uint32_t scanout_probe_after;
     uint8_t scanout_probe_changed;
+    uint8_t compositor_present;
+    uint8_t compositor_triangle_half;
     uint8_t active;
 } gpu_core_mesart_3d_inflight;
 
@@ -104,11 +113,11 @@ static uint8_t g_mesart_3d_frame_ready;
  * the maximum accepted four-megabyte binary fit in both placements. */
 #define GPU_CORE_MESART_SHADER_SLOT_BYTES \
     (MESART_IR3_BLOB_MAX_CODE_BYTES + GPU_IOMMU_PAGE_SIZE)
-#define GPU_CORE_MESART_SHADER_SLOT_COUNT 2u
+#define GPU_CORE_MESART_SHADER_SLOT_COUNT 4u
 #define GPU_CORE_MESART_SHADER_POOL_BYTES \
     ((uint64_t)GPU_CORE_MESART_SHADER_SLOT_COUNT * \
      GPU_CORE_MESART_SHADER_SLOT_BYTES)
-#define GPU_CORE_MESART_UNIFORM_POOL_IOVA 0x0000000042900000ull
+#define GPU_CORE_MESART_UNIFORM_POOL_IOVA 0x0000000043100000ull
 #define GPU_CORE_MESART_UNIFORM_POOL_BYTES GPU_IOMMU_PAGE_SIZE
 #define GPU_CORE_MESART_VERTEX_UBO_OFFSET   0u
 #define GPU_CORE_MESART_FRAGMENT_UBO_OFFSET 64u
@@ -120,6 +129,7 @@ static uint8_t g_mesart_3d_frame_ready;
 #define GPU_CORE_MESART_POSITION_BUFFER_BYTES 24u
 #define GPU_CORE_MESART_POSITION_BUFFER_STRIDE 8u
 #define GPU_CORE_MESART_TEXTURED_BUFFER_BYTES 48u
+#define GPU_CORE_MESART_TEXTURED_QUAD_BUFFER_BYTES 96u
 #define GPU_CORE_MESART_TEXTURED_BUFFER_STRIDE 16u
 #define GPU_CORE_MESART_SAMPLER_DESC_OFFSET   0x200u
 #define GPU_CORE_MESART_TEXTURE_DESC_OFFSET   0x240u
@@ -128,11 +138,44 @@ static uint8_t g_mesart_3d_frame_ready;
 #define GPU_CORE_MESART_TEXTURE_HEIGHT        16u
 #define GPU_CORE_MESART_TEXTURE_PITCH         64u
 #define GPU_CORE_MESART_TEXTURE_BYTES         1024u
-#define GPU_CORE_RENDER_SURFACE_VA_BASE 0x0000000060000000ull
+/* 0x60000000 belongs to the GMU's fixed dummy/HFI/log aperture.  Mapping
+ * render surface slot zero there let the later GMU dummy page silently
+ * replace the desktop texture's first leaf with a privileged mapping. */
+#define GPU_CORE_RENDER_SURFACE_VA_BASE 0x0000000070000000ull
 #define GPU_CORE_RENDER_SURFACE_SLOT_BYTES GPU_RENDER_MAX_SURFACE_BYTES
 #define GPU_CORE_RENDER_SURFACE_VA_END \
     (GPU_CORE_RENDER_SURFACE_VA_BASE + \
      (uint64_t)GPU_RENDER_MAX_SURFACES * GPU_CORE_RENDER_SURFACE_SLOT_BYTES)
+_Static_assert(GPU_CORE_RENDER_SURFACE_VA_BASE >=
+               GPU_GMU_DEBUG_IOVA + GPU_GMU_DEBUG_BYTES,
+               "render surfaces must not overlap GMU fixed IOVAs");
+
+/* A6xx/A7xx texture-descriptor fields from Mesa's vendored
+ * a6xx_descriptors.xml.  Keep the packers next to the one kernel-owned
+ * descriptor producer: open-coded shifts made the small 16x16 proof hide
+ * fields which become significant for a full desktop-sized layer. */
+#define A7XX_TEX_SWIZ_X(value)       (((uint32_t)(value) & 0x7u) << 4)
+#define A7XX_TEX_SWIZ_Y(value)       (((uint32_t)(value) & 0x7u) << 7)
+#define A7XX_TEX_SWIZ_Z(value)       (((uint32_t)(value) & 0x7u) << 10)
+#define A7XX_TEX_SWIZ_W(value)       (((uint32_t)(value) & 0x7u) << 13)
+#define A7XX_TEX_FORMAT(value)       (((uint32_t)(value) & 0xffu) << 22)
+#define A7XX_TEX_SWAP(value)         (((uint32_t)(value) & 0x3u) << 30)
+#define A7XX_TEX_WIDTH(value)        ((uint32_t)(value) & 0x7fffu)
+#define A7XX_TEX_HEIGHT(value)       (((uint32_t)(value) & 0x7fffu) << 15)
+#define A7XX_TEX_PITCH_ALIGN(value)  ((uint32_t)(value) & 0xfu)
+#define A7XX_TEX_PITCH(value)        (((uint32_t)(value) & 0x3fffffu) << 7)
+#define A7XX_TEX_TYPE(value)         (((uint32_t)(value) & 0x7u) << 29)
+#define A7XX_TEX_ARRAY_PITCH(bytes)  \
+    ((uint32_t)(((uint64_t)(bytes) >> 12) & 0x7fffffu))
+#define A7XX_TEX_DEPTH(value)        (((uint32_t)(value) & 0x1fffu) << 17)
+
+#define A7XX_TEX_X                    0u
+#define A7XX_TEX_Y                    1u
+#define A7XX_TEX_Z                    2u
+#define A7XX_TEX_ONE                  5u
+#define A7XX_TEX_FMT_8_8_8_8_UNORM  0x30u
+#define A7XX_TEX_SWAP_WXYZ            1u
+#define A7XX_TEX_TYPE_2D              1u
 
 /* Gen7's hardware shadow layout is rptr, fence, then BV rptr.  The fence
  * slot is CPU bookkeeping, not a second hardware rptr destination. */
@@ -144,6 +187,9 @@ static uint8_t g_mesart_3d_frame_ready;
 #define GPU_CORE_MESART_STATE_SNAPSHOT_BYTES        104u
 #define GPU_CORE_MESART_RT_STATE_SNAPSHOT_OFFSET      144u
 #define GPU_CORE_MESART_RT_STATE_SNAPSHOT_BYTES        80u
+#define GPU_CORE_COMPOSITOR_SOURCE_FIRST_OFFSET        224u
+#define GPU_CORE_COMPOSITOR_SOURCE_LAST_OFFSET         228u
+#define GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET          232u
 #define GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET    256u
 #define GPU_CORE_MESART_STAGE_COUNTER_END_OFFSET      304u
 #define GPU_CORE_MESART_STAGE_COUNTER_BYTES            48u
@@ -164,8 +210,33 @@ static uint8_t g_mesart_3d_frame_ready;
 #define GPU_CORE_MESART_SECURE_END_OFFSET              648u
 #define GPU_CORE_MESART_DIAGNOSTIC_BYTES \
     (GPU_CORE_MESART_SECURE_END_OFFSET + 4u)
-#define GPU_CORE_MESART_3D_TIMEOUT_TICKS \
-    (2u * DIHOS_TIME_TICKS_PER_SECOND)
+#define GPU_CORE_MESART_3D_TIMEOUT_SECONDS 2u
+#define GPU_CORE_COMPOSITOR_TIMEOUT_SECONDS 2u
+
+/* dihos_time_ticks() counts main-loop iterations, not elapsed wall time.
+ * In an asynchronous GPU frame that loop can run much faster than 60 Hz,
+ * causing a live draw to be power-cycled before it finishes. */
+static uint64_t gpu_core_monotonic_counter(void)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uint64_t counter;
+    __asm__ __volatile__("isb; mrs %0, cntvct_el0" : "=r"(counter));
+    return counter;
+#else
+    return dihos_time_ticks();
+#endif
+}
+
+static uint64_t gpu_core_monotonic_frequency(void)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uint64_t frequency;
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(frequency));
+    return frequency;
+#else
+    return DIHOS_TIME_TICKS_PER_SECOND;
+#endif
+}
 #define GPU_CORE_GOP_BGRX_8888       1u
 #define GPU_CORE_MESART_SCANOUT_PROBE_MARKER 0xff12c4a5u
 
@@ -612,6 +683,35 @@ static int map_staged_firmware(void)
         gpu_iommu_domain_release(&g_iommu_domain);
         return -4;
     }
+    /* Map every surface that existed before GPU discovery into the initial
+     * domain.  X1E's GPU-local SMMU is not a reliable place to grow page
+     * tables after GMU ownership changes, so the desktop surface must not be
+     * first introduced by the live compositor submission path. */
+    for (uint32_t slot = 0u; slot < GPU_RENDER_MAX_SURFACES; ++slot)
+    {
+        gpu_buffer *surface = 0;
+        int surface_rc = gpu_render_backend_surface_slot(slot, &surface);
+        uint64_t surface_iova = GPU_CORE_RENDER_SURFACE_VA_BASE +
+            (uint64_t)slot * GPU_CORE_RENDER_SURFACE_SLOT_BYTES;
+
+        if (surface_rc > 0)
+            continue;
+        if (surface_rc < 0 || !surface || surface->iova ||
+            surface->size_bytes > GPU_CORE_RENDER_SURFACE_SLOT_BYTES ||
+            gpu_iommu_map_buffer_with_attributes(&g_iommu_domain, surface,
+                                                  surface_iova, 0u) != 0)
+        {
+            gpu_ring_release(&g_submission_ring);
+            gpu_ring_release(&g_runtime_ring);
+            gpu_buffer_release(&g_cp_shadow);
+            gpu_buffer_release(&g_cp_pwrup);
+            gpu_buffer_release(&g_cp_completion);
+            gpu_buffer_release(&g_mesart_shader_pool);
+            gpu_buffer_release(&g_mesart_uniform_pool);
+            gpu_iommu_domain_release(&g_iommu_domain);
+            return -5;
+        }
+    }
     if (gpu_gmu_memory_map(&g_iommu_domain, &g_gmu_memory) != 0)
     {
         gpu_ring_release(&g_submission_ring);
@@ -622,7 +722,7 @@ static int map_staged_firmware(void)
         gpu_buffer_release(&g_mesart_shader_pool);
         gpu_buffer_release(&g_mesart_uniform_pool);
         gpu_iommu_domain_release(&g_iommu_domain);
-        return -5;
+        return -6;
     }
     gpu_iommu_domain_prepare_for_device(&g_iommu_domain);
     return 0;
@@ -635,7 +735,6 @@ int gpu_core_init(const boot_info *boot)
 
     g_primary = (gpu_device_info){0};
     gpu_scheduler_init(&g_scheduler);
-    gpu_render_init();
     g_triangle_target = (gpu_render_target){0};
     g_triangle_target_iova = 0u;
     g_colour_write_probe = (gpu_render_target){0};
@@ -651,6 +750,7 @@ int gpu_core_init(const boot_info *boot)
     g_gmu_reset_signature = 0u;
     g_runtime_backend_ready = 0u;
     g_runtime_gx_lease_held = 0u;
+    g_runtime_ring_bound = 0u;
     g_runtime_3d_sequence = 0u;
     g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
     g_mesart_3d_frame_ready = 0u;
@@ -1528,7 +1628,8 @@ int gpu_core_mesart_shader_slot(uint32_t slot, gpu_buffer **out_storage,
 
 static int gpu_core_mesart_configure_vertex_buffer(
     const mesart_renderer_graphics_pipeline *pipeline,
-    adreno_x1_85_3d_draw *draw, uint32_t write_values)
+    adreno_x1_85_3d_draw *draw, uint32_t write_values,
+    uint32_t fullscreen)
 {
     const mesart_pipeline_header *reflection;
     uint32_t *words;
@@ -1537,7 +1638,7 @@ static int gpu_core_mesart_configure_vertex_buffer(
         !g_mesart_uniform_pool.cpu ||
         g_mesart_uniform_pool.iova != GPU_CORE_MESART_UNIFORM_POOL_IOVA ||
         GPU_CORE_MESART_VERTEX_BUFFER_OFFSET +
-            GPU_CORE_MESART_TEXTURED_BUFFER_BYTES >
+            GPU_CORE_MESART_TEXTURED_QUAD_BUFFER_BYTES >
                 g_mesart_uniform_pool.size_bytes)
         return -1;
     reflection = &pipeline->reflection;
@@ -1549,12 +1650,12 @@ static int gpu_core_mesart_configure_vertex_buffer(
         return -2;
     draw->vertex_buffer_gpu_va = GPU_CORE_MESART_UNIFORM_POOL_IOVA +
                                  GPU_CORE_MESART_VERTEX_BUFFER_OFFSET;
-    draw->vertex_buffer_bytes = reflection->vertex_attribute0_compmask == 0xfu ?
-        GPU_CORE_MESART_TEXTURED_BUFFER_BYTES :
-        GPU_CORE_MESART_POSITION_BUFFER_BYTES;
     draw->vertex_buffer_stride = reflection->vertex_attribute0_compmask == 0xfu ?
         GPU_CORE_MESART_TEXTURED_BUFFER_STRIDE :
         GPU_CORE_MESART_POSITION_BUFFER_STRIDE;
+    if (!draw->vertex_count)
+        draw->vertex_count = 3u;
+    draw->vertex_buffer_bytes = draw->vertex_count * draw->vertex_buffer_stride;
     if (!write_values)
         return 0;
 
@@ -1573,8 +1674,52 @@ static int gpu_core_mesart_configure_vertex_buffer(
             0x3f266666u, 0x3f266666u, 0x3f800000u, 0x3f800000u,
             0xbf266666u, 0x3f266666u, 0x00000000u, 0x3f800000u,
         };
-        for (uint32_t i = 0u; i < 12u; ++i)
-            words[i] = textured_vertices[i];
+        if (fullscreen)
+        {
+            /* Two ordinary in-clip triangles avoid the oversized-triangle
+             * clipping path.  The latter was the last state difference from
+             * the working textured proof and left SP/RB permanently busy on
+             * X1-85 even with a small, tightly packed source and target. */
+            /* Reuse the proven +/-0.65 clip envelope. The compositor draw
+             * expands this through its kernel-owned viewport transform, so
+             * it covers the tile without touching the fragile clip planes. */
+            const uint32_t fullscreen_vertices[24] = {
+                0xbf266666u, 0xbf266666u, 0x00000000u, 0x00000000u,
+                0x3f266666u, 0xbf266666u, 0x3f800000u, 0x00000000u,
+                0xbf266666u, 0x3f266666u, 0x00000000u, 0x3f800000u,
+                0x3f266666u, 0xbf266666u, 0x3f800000u, 0x00000000u,
+                0x3f266666u, 0x3f266666u, 0x3f800000u, 0x3f800000u,
+                0xbf266666u, 0x3f266666u, 0x00000000u, 0x3f800000u,
+            };
+            if (fullscreen == 3u)
+            {
+                /* A7xx RECTLIST's two diagonal corners. VPC replacement
+                 * creates the other two corners and their UVs. */
+                const uint32_t rectangle_vertices[8] = {
+                    0xbf266666u, 0xbf266666u, 0x00000000u, 0x00000000u,
+                    0x3f266666u, 0x3f266666u, 0x3f800000u, 0x3f800000u,
+                };
+                for (uint32_t i = 0u; i < 8u; ++i)
+                    words[i] = rectangle_vertices[i];
+            }
+            else if (fullscreen == 4u)
+            {
+                /* Complete quad in one ordinary TRI_LIST submission. This
+                 * keeps VPC on its proven triangle path while avoiding a
+                 * second render/cache submission for the same tile. */
+                for (uint32_t i = 0u; i < 24u; ++i)
+                    words[i] = fullscreen_vertices[i];
+            }
+            else
+            {
+                uint32_t first = fullscreen == 2u ? 12u : 0u;
+                for (uint32_t i = 0u; i < 12u; ++i)
+                    words[i] = fullscreen_vertices[first + i];
+            }
+        }
+        else
+            for (uint32_t i = 0u; i < 12u; ++i)
+                words[i] = textured_vertices[i];
     }
     else
     {
@@ -1595,7 +1740,8 @@ static int gpu_core_mesart_configure_vertex_buffer(
  * these literals with validated kernel-side parameter blocks. */
 static int gpu_core_mesart_configure_default_uniforms(
     const mesart_renderer_graphics_pipeline *pipeline,
-    adreno_x1_85_3d_draw *draw, uint32_t write_values)
+    adreno_x1_85_3d_draw *draw, uint32_t write_values,
+    uint32_t identity_transform)
 {
     const mesart_pipeline_header *reflection;
     uint32_t *words;
@@ -1651,8 +1797,12 @@ static int gpu_core_mesart_configure_default_uniforms(
      * triangle; vec4 u_colour = unmistakable orange against the teal seed.
      * Values are exact IEEE
      * literals so the host compiler is never asked to encode test data. */
-    words[0] = 0x3e800000u;
-    words[1] = 0xbe000000u;
+    /* Full-target compositor geometry is already transformed by its
+     * viewport.  Applying the standalone test's translation as well pushes
+     * the right edge outside the render target and enters X1-85's currently
+     * unsupported clipping path. */
+    words[0] = identity_transform ? 0u : 0x3e800000u;
+    words[1] = identity_transform ? 0u : 0xbe000000u;
     words[2] = 0u;
     words[3] = 0u;
     fragment_words[0] = 0x3f800000u;
@@ -1662,9 +1812,6 @@ static int gpu_core_mesart_configure_default_uniforms(
     asm_dma_clean_range(g_mesart_uniform_pool.cpu,
                         GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
                             GPU_CORE_MESART_DEFAULT_UBO_BYTES);
-    terminal_print(pipeline->fragment_texture_count ?
-        "[K:GPU] texture tint UBO+constant promotion colour=(1,1,1,1)" :
-        "[K:GPU] tint UBO+constant promotion translation=(0.25,-0.125) colour=(1.0,0.15,0.02,1.0)");
     return 0;
 }
 
@@ -1737,6 +1884,170 @@ static int gpu_core_mesart_configure_checker_texture(
     asm_dma_clean_range(sampler, 16u);
     asm_dma_clean_range(texture, 64u);
     asm_dma_clean_range(pixels, GPU_CORE_MESART_TEXTURE_BYTES);
+    return 0;
+}
+
+static int gpu_core_render_texture_iova(const gpu_render_texture *texture,
+                                        uint64_t *out_gpu_va)
+{
+    gpu_render_target target;
+
+    if (!texture || !out_gpu_va || !texture->surface.generation)
+        return -1;
+    target = (gpu_render_target){
+        .surface = texture->surface,
+        .cpu_pixels = (void *)texture->cpu_pixels,
+        .cpu_bytes = texture->cpu_bytes,
+        .width = texture->width,
+        .height = texture->height,
+        .stride_bytes = texture->stride_bytes,
+        .format = texture->format,
+    };
+    return gpu_core_render_target_iova(&target, out_gpu_va);
+}
+
+static int gpu_core_mesart_configure_texture(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_render_texture *source, adreno_x1_85_3d_draw *draw,
+    uint32_t diagnostic_probe)
+{
+    gpu_render_target backing_target;
+    gpu_buffer *backing = 0;
+    uint32_t *sampler;
+    uint32_t *texture;
+    uint64_t pixels_iova;
+    uint64_t layer_bytes;
+    uint64_t first_leaf = 0u;
+    uint64_t last_leaf = 0u;
+    uint32_t descriptor_width;
+    uint32_t descriptor_height;
+
+    if (!pipeline || !source || !draw ||
+        pipeline->fragment_texture_count != 1u ||
+        source->format != GPU_RENDER_FORMAT_BGRX8888 ||
+        !source->width || !source->height ||
+        source->width > 0x7fffu || source->height > 0x3fffu ||
+        source->stride_bytes != source->width * 4u ||
+        (source->stride_bytes & 63u) ||
+        gpu_core_render_texture_iova(source, &pixels_iova) != 0)
+        return -1;
+    descriptor_width = diagnostic_probe ? 256u : source->width;
+    descriptor_height = diagnostic_probe ? 256u : source->height;
+    backing_target = (gpu_render_target){
+        .surface = source->surface,
+        .cpu_pixels = (void *)source->cpu_pixels,
+        .cpu_bytes = source->cpu_bytes,
+        .width = source->width,
+        .height = source->height,
+        .stride_bytes = source->stride_bytes,
+        .format = source->format,
+    };
+    if (gpu_render_backend_surface_backing(&backing_target, &backing) != 0 ||
+        !backing || gpu_iommu_query_page(&g_iommu_domain, pixels_iova,
+                                         &first_leaf) != 0 ||
+        gpu_iommu_query_page(&g_iommu_domain,
+            pixels_iova + source->cpu_bytes - 1u, &last_leaf) != 0)
+        return -1;
+    if (diagnostic_probe)
+    {
+        terminal_print("[K:GPU] compositor source PA/leaf first,last=");
+        terminal_print_inline_hex64(backing->phys);
+        terminal_print("/");
+        terminal_print_inline_hex64(first_leaf);
+        terminal_print("/");
+        terminal_print_inline_hex64(last_leaf);
+        terminal_flush_log();
+    }
+    /* No speculative shader fetch against an absent or privileged-only
+     * source leaf.  CP's earlier read probe cannot prove texture access. */
+    if ((first_leaf & 0x43u) != 0x43u ||
+        (last_leaf & 0x43u) != 0x43u ||
+        (first_leaf & 0x0000fffffffff000ull) != backing->phys ||
+        (last_leaf & 0x0000fffffffff000ull) !=
+            backing->phys + ((source->cpu_bytes - 1u) & ~0xfffull))
+        return -1;
+    if (diagnostic_probe)
+    {
+        uint64_t mapped_bytes = (source->cpu_bytes + GPU_IOMMU_PAGE_SIZE - 1u) &
+                                ~(GPU_IOMMU_PAGE_SIZE - 1u);
+        for (uint64_t offset = 0u; offset < mapped_bytes;
+             offset += GPU_IOMMU_PAGE_SIZE)
+        {
+            uint64_t leaf = 0u;
+            if (gpu_iommu_query_page(&g_iommu_domain, pixels_iova + offset,
+                                     &leaf) != 0 ||
+                (leaf & 0x43u) != 0x43u ||
+                (leaf & 0x0000fffffffff000ull) != backing->phys + offset)
+                return -1;
+        }
+        terminal_print("[K:GPU] compositor source: every IOMMU page validated");
+        terminal_flush_log();
+    }
+    layer_bytes = ((uint64_t)source->stride_bytes * source->height +
+                   GPU_IOMMU_PAGE_SIZE - 1u) &
+                  ~(GPU_IOMMU_PAGE_SIZE - 1u);
+    if (!layer_bytes || layer_bytes > source->cpu_bytes +
+            GPU_IOMMU_PAGE_SIZE - 1u ||
+        (layer_bytes >> 12) > 0x7fffffu ||
+        source->stride_bytes > 0x3fffffu || (pixels_iova & 63u))
+        return -1;
+    draw->fragment_sampler_descriptor_gpu_va =
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_SAMPLER_DESC_OFFSET;
+    draw->fragment_texture_descriptor_gpu_va =
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_TEXTURE_DESC_OFFSET;
+    draw->fragment_texture_pixels_gpu_va = pixels_iova;
+    sampler = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                           GPU_CORE_MESART_SAMPLER_DESC_OFFSET);
+    texture = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+                           GPU_CORE_MESART_TEXTURE_DESC_OFFSET);
+    for (uint32_t i = 0u; i < 4u; ++i)
+        sampler[i] = 0u;
+    for (uint32_t i = 0u; i < 16u; ++i)
+        texture[i] = 0u;
+    sampler[0] = (1u << 5) | (1u << 8) | (1u << 11);
+    sampler[1] = 1u << 6;
+    /* PIPE_FORMAT_B8G8R8X8_UNORM on a linear A7xx image. Mesa selects WXYZ
+     * byte swap and forces the absent alpha channel to one. */
+    texture[0] = A7XX_TEX_SWIZ_X(A7XX_TEX_X) |
+                 A7XX_TEX_SWIZ_Y(A7XX_TEX_Y) |
+                 A7XX_TEX_SWIZ_Z(A7XX_TEX_Z) |
+                 A7XX_TEX_SWIZ_W(A7XX_TEX_ONE) |
+                 A7XX_TEX_FORMAT(A7XX_TEX_FMT_8_8_8_8_UNORM) |
+                 A7XX_TEX_SWAP(A7XX_TEX_SWAP_WXYZ);
+    texture[1] = A7XX_TEX_WIDTH(descriptor_width) |
+                 A7XX_TEX_HEIGHT(descriptor_height);
+    /* Match fdl6_layout()/fdl6_view_init() for a linear four-byte format.
+     * Mesa aligns its pitch to 256 bytes and encodes log2(256 / 64) = 2 in
+     * PITCHALIGN even for a single-level 2D view.  Zero happened to survive
+     * the tiny 16x16 checker, but is not a valid description of desktop-size
+     * rows and can leave HLSQ/SP/VPC/RB waiting after the texture fetch. */
+    texture[2] = A7XX_TEX_PITCH_ALIGN(2u) |
+                 A7XX_TEX_PITCH(source->stride_bytes) |
+                 A7XX_TEX_TYPE(A7XX_TEX_TYPE_2D);
+    /* Mesa's fd6_view_init() always supplies the page-aligned layer size in
+     * ARRAY_PITCH, including a single-level, single-layer 2D view.  The tiny
+     * 16x16 bring-up texture happened to tolerate zero here, but leaving this
+     * field absent makes TPL1's layer address calculation undefined once the
+     * texture spans multiple pages. */
+    texture[3] = A7XX_TEX_ARRAY_PITCH(layer_bytes);
+    texture[4] = (uint32_t)pixels_iova;
+    texture[5] = ((uint32_t)(pixels_iova >> 32) & 0x1ffffu) |
+                 A7XX_TEX_DEPTH(1u);
+    asm_dma_clean_range(sampler, 16u);
+    asm_dma_clean_range(texture, 64u);
+    asm_dma_clean_range(source->cpu_pixels, source->cpu_bytes);
+    if (diagnostic_probe)
+    {
+        terminal_print("[K:GPU] compositor texture IOVA/dim/pitch=");
+        terminal_print_inline_hex64(pixels_iova);
+        terminal_print_inline_hex64(((uint64_t)descriptor_width << 32) |
+                                    descriptor_height);
+        terminal_print_inline_hex64(source->stride_bytes);
+        terminal_print("[K:GPU] compositor texture descriptor 0..5=");
+        for (uint32_t i = 0u; i < 6u; ++i)
+            terminal_print_inline_hex64(texture[i]);
+        terminal_flush_log();
+    }
     return 0;
 }
 
@@ -1838,9 +2149,9 @@ int gpu_core_mesart_3d_preflight(
         .target = &target,
         .target_gpu_va = g_scanout_target.buffer.iova,
     };
-    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 0u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 0u, 0u) != 0)
         return -2;
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u) != 0)
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u, 0u) != 0)
         return -3;
     if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 0u) != 0)
         return -4;
@@ -1947,9 +2258,9 @@ int gpu_core_mesart_3d_kick(
         .target = &target,
         .target_gpu_va = g_triangle_target_iova,
     };
-    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u, 0u) != 0)
         return -2;
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u) != 0)
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u, 0u) != 0)
         return -3;
     if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 1u) != 0)
         return -3;
@@ -2222,6 +2533,7 @@ int gpu_core_mesart_3d_kick(
         rc = -8;
         goto out;
     }
+    g_runtime_ring_bound = 1u;
     rc = gpu_cp_submit_fenced(&g_gpu_regs_window, &g_gpu_gmu_window,
                               ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
                               adreno_x1_85_cp_layout(), &g_runtime_ring);
@@ -2232,7 +2544,7 @@ int gpu_core_mesart_3d_kick(
     }
     submitted = 1u;
     g_mesart_3d_inflight.fence = g_runtime_3d_sequence;
-    g_mesart_3d_inflight.started_tick = dihos_time_ticks();
+    g_mesart_3d_inflight.started_counter = gpu_core_monotonic_counter();
     g_mesart_3d_inflight.expected_rptr = g_runtime_ring.write_dwords;
     for (uint32_t i = 0u; i < sizeof(completion_markers) /
                               sizeof(completion_markers[0]); ++i)
@@ -2252,6 +2564,300 @@ out:
          * an uncertain front-end powered for a later caller. */
         (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
         g_runtime_gx_lease_held = 0u;
+        g_runtime_ring_bound = 0u;
+        g_runtime_backend_ready = 0u;
+    }
+    return rc;
+}
+
+int gpu_core_compositor_present_kick(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_render_texture *source, const gpu_render_target *target,
+    uint32_t triangle_half, uint32_t diagnostic_probe, uint64_t *out_fence)
+{
+    adreno_x1_85_3d_draw draw;
+    const gpu_firmware_blob *sqe;
+    gpu_cp_bind_config cp_config;
+    gpu_cp_snapshot cp = {0};
+    uint32_t gx_ack = 0u;
+    uint32_t markers[9];
+    uint32_t magic;
+    uint64_t target_iova = 0u;
+    uint64_t target_first_leaf = 0u;
+    uint64_t target_last_leaf = 0u;
+    gpu_buffer *target_backing = 0;
+    uint8_t bind_runtime;
+    uint8_t submitted = 0u;
+    int rc;
+
+    if (out_fence)
+        *out_fence = 0u;
+    if (!pipeline || !source || !target || !out_fence || triangle_half > 3u ||
+        !g_runtime_backend_ready ||
+        g_mesart_3d_inflight.active || g_scheduler.job_count ||
+        !g_runtime_ring.buffer.iova || !g_cp_pwrup.iova ||
+        !g_cp_shadow.iova || !g_cp_completion.cpu || !g_cp_completion.iova ||
+        !target->cpu_pixels ||
+        (!diagnostic_probe && target->width != source->width) ||
+        (!diagnostic_probe && target->height != source->height) ||
+        target->format != GPU_RENDER_FORMAT_BGRX8888 ||
+        gpu_core_render_target_iova(target, &target_iova) != 0)
+        return -1;
+    if (target->surface.generation)
+    {
+        if (gpu_render_backend_surface_backing(target, &target_backing) != 0)
+            return -1;
+    }
+    else
+        target_backing = &g_scanout_target.buffer;
+    if (!target_backing ||
+        gpu_iommu_query_page(&g_iommu_domain, target_iova,
+                             &target_first_leaf) != 0 ||
+        gpu_iommu_query_page(&g_iommu_domain,
+            target_iova + target->cpu_bytes - 1u,
+            &target_last_leaf) != 0 ||
+        (target_first_leaf & 0x43u) != 0x43u ||
+        (target_last_leaf & 0x43u) != 0x43u ||
+        (target_first_leaf & 0x0000fffffffff000ull) !=
+            target_backing->phys ||
+        (target_last_leaf & 0x0000fffffffff000ull) !=
+            target_backing->phys +
+            ((target->cpu_bytes - 1u) & ~0xfffull))
+        return -1;
+    if (diagnostic_probe)
+    {
+        terminal_print("[K:GPU] compositor target IOVA/PA/leaf first,last=");
+        terminal_print_inline_hex64(target_iova);
+        terminal_print("/");
+        terminal_print_inline_hex64(target_backing->phys);
+        terminal_print("/");
+        terminal_print_inline_hex64(target_first_leaf);
+        terminal_print("/");
+        terminal_print_inline_hex64(target_last_leaf);
+        terminal_flush_log();
+    }
+    draw = (adreno_x1_85_3d_draw){
+        .pipeline = pipeline,
+        .target = target,
+        .target_gpu_va = target_iova,
+        .vertex_count = triangle_half == 2u ? 2u :
+                        triangle_half == 3u ? 6u : 3u,
+        .rectangle_list = triangle_half == 2u,
+        /* Keep the vertices inside the proven +/-0.65 clip envelope, then
+         * map those endpoints to the target's outer pixel centres.  Without
+         * this expansion only 0.65^2 of every tile is shaded, visibly leaving
+         * a thick black frame around it. */
+        .expand_safe_viewport = 1u,
+    };
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u,
+                                                 triangle_half == 2u ? 3u :
+                                                 triangle_half == 3u ? 4u :
+                                                 triangle_half + 1u) != 0 ||
+        gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u, 1u) != 0 ||
+        gpu_core_mesart_configure_texture(pipeline, source, &draw,
+                                          diagnostic_probe) != 0 ||
+        adreno_x1_85_3d_validate_draw(&draw) != 0)
+        return -2;
+    {
+        uint32_t trust = 0u;
+        if (gpu_mmio_try_read32(&g_gpu_regs_window,
+                ADRENO_X1_85_RBBM_SECVID_TRUST_CNTL, &trust) != 0 ||
+            trust > 1u || (trust && gpu_zap_start(&g_firmware) != 0))
+            return -3;
+    }
+    sqe = gpu_firmware_find(&g_firmware, GPU_FIRMWARE_SQE);
+    if (!sqe || !gpu_firmware_payload_iova(sqe))
+        return -4;
+    ++g_runtime_3d_sequence;
+    if (!g_runtime_3d_sequence)
+        ++g_runtime_3d_sequence;
+    magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC ^
+            (uint32_t)g_runtime_3d_sequence;
+    if (!magic)
+        magic = GPU_CORE_RUNTIME_COMPLETION_MAGIC;
+    for (uint32_t i = 0u; i < 9u; ++i)
+        markers[i] = magic ^ (0x00010101u * (i + 1u));
+    markers[8] = magic;
+    for (uint32_t i = 0u; i < GPU_CORE_MESART_DIAGNOSTIC_BYTES; ++i)
+        ((uint8_t *)g_cp_completion.cpu)[i] = 0u;
+    gpu_buffer_prepare_for_device(&g_cp_completion);
+    if (!g_runtime_gx_lease_held)
+    {
+        rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
+        if (rc != 0)
+            return -5;
+        g_runtime_gx_lease_held = 1u;
+    }
+    bind_runtime = !g_runtime_ring_bound;
+    if (gpu_cp_status_read(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                           &cp) != 0 || cp.hw_fault || cp.protect_status ||
+        (g_runtime_ring_bound && cp.rb_rptr != cp.rb_wptr) ||
+        (g_runtime_ring_bound &&
+         cp.rb_rptr >= g_runtime_ring.capacity_dwords))
+    {
+        rc = -6;
+        goto compositor_out;
+    }
+    /* CP_RB_RPTR is circular state owned by the hardware.  Rebuilding each
+     * batch at dword zero while merely rebinding the same 32 KiB allocation
+     * appeared to work for eight ~0x3db-dword submissions, then failed on
+     * the ninth as CP's hidden wrap phase crossed the 8192-dword boundary.
+     * Append at the actual idle pointer and allow PM4 packets to wrap. */
+    if (gpu_ring_reset_at(&g_runtime_ring,
+                          g_runtime_ring_bound ? cp.rb_rptr : 0u) != 0)
+    {
+        rc = -6;
+        goto compositor_out;
+    }
+    /* The boot probe executes CP_ME_INIT before the first trusted draw, but
+     * gpu_zap_start() may perform PAS AUTH_AND_RESET immediately above.  A
+     * fresh runtime-ring bind therefore has to restore CP's context after
+     * authentication.  Do this only for the first bind: appended batches
+     * retain the live context and must not repeat either CP_ME_INIT or the
+     * secure-to-nonsecure WFI/WFM handoff while graphics state is sticky. */
+    if ((bind_runtime &&
+         adreno_x1_85_emit_minimal_cp_init(&g_runtime_ring,
+                                           g_cp_pwrup.iova) != 0) ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova, markers[0]) != 0 ||
+        (bind_runtime &&
+         adreno_x1_85_emit_nonsecure_transition(&g_runtime_ring) != 0) ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 4u, markers[1]) != 0 ||
+        /* Prove that CP can translate both ends of the pre-attached desktop
+         * surface before TPL1 interprets it as a texture.  These copies are
+         * diagnostics only and never feed the draw. */
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_SOURCE_FIRST_OFFSET,
+            draw.fragment_texture_pixels_gpu_va) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_SOURCE_LAST_OFFSET,
+            draw.fragment_texture_pixels_gpu_va + source->stride_bytes *
+                (uint64_t)source->height - 4u) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET,
+            draw.fragment_texture_descriptor_gpu_va) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 4u,
+            draw.fragment_texture_descriptor_gpu_va + 8u) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 8u,
+            draw.fragment_texture_descriptor_gpu_va + 12u) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 12u,
+            draw.fragment_texture_descriptor_gpu_va + 16u) != 0 ||
+        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 16u,
+            draw.fragment_texture_descriptor_gpu_va + 20u) != 0 ||
+        adreno_x1_85_3d_emit_sysmem_prologue(&g_runtime_ring) != 0 ||
+        adreno_x1_85_3d_emit_x1e_baseline(&g_runtime_ring) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 8u, markers[2]) != 0 ||
+        adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draw) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 12u, markers[3]) != 0 ||
+        /* CP register-to-memory snapshots serialize against live graphics
+         * blocks.  They are useful for a one-shot diagnostic, but on the
+         * persistent compositor ring the next half-tile can wait forever
+         * reading TSE/RB counters from the preceding draw. */
+        (diagnostic_probe &&
+         adreno_x1_85_3d_emit_stage_counter_select(&g_runtime_ring) != 0) ||
+        /* Capture a CP-ordered baseline.  The counters are free-running, so
+         * their live absolute values cannot identify activity by themselves. */
+        (diagnostic_probe &&
+         adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0350u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET) != 0) ||
+        (diagnostic_probe &&
+         adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x0366u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET + 16u) != 0) ||
+        (diagnostic_probe &&
+         adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03d6u, 4u,
+            g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET + 32u) != 0) ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 16u, markers[4]) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 20u, markers[5]) != 0 ||
+        (draw.rectangle_list ?
+         adreno_x1_85_emit_auto_rectangle_draw(&g_runtime_ring) :
+         adreno_x1_85_emit_auto_triangle_list_draw(&g_runtime_ring,
+                                                    draw.vertex_count)) != 0 ||
+        /* The first two post-draw markers locate failures around the event
+         * fence.  They are not themselves render-completion fences. */
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 24u, markers[6]) != 0 ||
+        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 28u, markers[7]) != 0 ||
+        /* Publish marker[8] only after Mesa's complete A7xx sysmem cache
+         * epilogue has retired on the GPU command stream. */
+        adreno_x1_85_3d_emit_sysmem_fini_async(&g_runtime_ring,
+            g_cp_completion.iova + 32u, markers[8]) != 0 ||
+        gpu_ring_seal(&g_runtime_ring) != 0)
+    {
+        rc = -7;
+        goto compositor_out;
+    }
+    cp_config = (gpu_cp_bind_config){
+        gpu_firmware_payload_iova(sqe),
+        g_runtime_ring.buffer.iova,
+        g_cp_shadow.iova + GPU_CORE_CP_BR_RPTR_OFFSET,
+        g_cp_shadow.iova + GPU_CORE_CP_BV_RPTR_OFFSET,
+        (uint32_t)g_runtime_ring.buffer.size_bytes,
+        ADRENO_X1_85_CP_RB_CNTL_BOOT,
+        0u,
+        ADRENO_X1_85_CP_BR_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+        ADRENO_X1_85_CP_AUX_APRIV_MASK,
+    };
+    if (bind_runtime &&
+        gpu_cp_bind(&g_gpu_regs_window, adreno_x1_85_cp_layout(),
+                    &cp_config) != 0)
+    {
+        rc = -8;
+        goto compositor_out;
+    }
+    g_runtime_ring_bound = 1u;
+    rc = gpu_cp_submit_fenced(&g_gpu_regs_window, &g_gpu_gmu_window,
+                              ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
+                              adreno_x1_85_cp_layout(), &g_runtime_ring);
+    if (rc != 0)
+    {
+        rc = -9;
+        goto compositor_out;
+    }
+    submitted = 1u;
+    g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
+    g_mesart_3d_inflight.fence = g_runtime_3d_sequence;
+    g_mesart_3d_inflight.started_counter = gpu_core_monotonic_counter();
+    g_mesart_3d_inflight.expected_rptr = g_runtime_ring.write_dwords;
+    for (uint32_t i = 0u; i < 9u; ++i)
+        g_mesart_3d_inflight.completion_markers[i] = markers[i];
+    g_mesart_3d_inflight.source_first_expected =
+        *(const uint32_t *)source->cpu_pixels;
+    g_mesart_3d_inflight.source_last_expected =
+        *(const uint32_t *)((const uint8_t *)source->cpu_pixels +
+            (uint64_t)source->stride_bytes * source->height - 4u);
+    {
+        const uint32_t *descriptor = (const uint32_t *)
+            ((const uint8_t *)g_mesart_uniform_pool.cpu +
+             GPU_CORE_MESART_TEXTURE_DESC_OFFSET);
+        g_mesart_3d_inflight.descriptor_expected[0] = descriptor[0];
+        g_mesart_3d_inflight.descriptor_expected[1] = descriptor[2];
+        g_mesart_3d_inflight.descriptor_expected[2] = descriptor[3];
+        g_mesart_3d_inflight.descriptor_expected[3] = descriptor[4];
+        g_mesart_3d_inflight.descriptor_expected[4] = descriptor[5];
+    }
+    g_mesart_3d_inflight.compositor_present = 1u;
+    g_mesart_3d_inflight.compositor_triangle_half = (uint8_t)triangle_half;
+    g_mesart_3d_inflight.active = 1u;
+    *out_fence = g_runtime_3d_sequence;
+    return 0;
+
+compositor_out:
+    if (submitted || g_runtime_gx_lease_held)
+    {
+        (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
+        g_runtime_gx_lease_held = 0u;
+        g_runtime_ring_bound = 0u;
         g_runtime_backend_ready = 0u;
     }
     return rc;
@@ -2262,12 +2868,80 @@ static int gpu_core_mesart_3d_fail(int rc)
     gpu_cp_snapshot failure_cp = {0};
     gpu_smmuv2_context_fault render_fault = {0};
     gpu_smmuv2_global_fault global_fault = {0};
+    uint32_t engine_status[4] = {0};
+    uint64_t live_counters[6] = {0};
+    uint8_t live_counter_valid[6] = {0};
+    const uint32_t engine_offsets[4] = {
+        ADRENO_X1_85_RBBM_STATUS_GEN7,
+        ADRENO_X1_85_RBBM_STATUS1_GEN7,
+        ADRENO_X1_85_RBBM_STATUS2_GEN7,
+        ADRENO_X1_85_RBBM_STATUS3_GEN7,
+    };
 
     terminal_error("[K:GPU] Mesart 3D stall rc=");
     terminal_print_inline_hex64((uint64_t)(uint32_t)(-rc));
+    terminal_print(" elapsed counter/rate=");
+    terminal_print_inline_hex64(gpu_core_monotonic_counter() -
+                                g_mesart_3d_inflight.started_counter);
+    terminal_print("/");
+    terminal_print_inline_hex64(gpu_core_monotonic_frequency());
+    terminal_print(" RBBM status 0..3=");
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        if (gpu_mmio_try_read32(&g_gpu_regs_window, engine_offsets[i],
+                                &engine_status[i]) == 0)
+            terminal_print_inline_hex64(engine_status[i]);
+        else
+            terminal_print("unreadable");
+        terminal_print("/");
+    }
+    if (g_mesart_3d_inflight.compositor_present)
+    {
+        const uint32_t counter_offsets[6] = {
+            0x0350u, 0x0352u, 0x0366u, 0x0368u, 0x03d6u, 0x03d8u,
+        };
+        terminal_print(" live VPC/TSE/RB counters=");
+        for (uint32_t i = 0u; i < 6u; ++i)
+        {
+            uint32_t lo = 0u;
+            uint32_t hi = 0u;
+            /* Perf-counter XML addresses are GPU dword indices; the CPU
+             * MMIO accessor takes byte offsets. */
+            if (gpu_mmio_try_read32(&g_gpu_regs_window,
+                                    counter_offsets[i] * 4u, &lo) == 0 &&
+                gpu_mmio_try_read32(&g_gpu_regs_window,
+                                    (counter_offsets[i] + 1u) * 4u, &hi) == 0)
+            {
+                live_counters[i] = ((uint64_t)hi << 32) | lo;
+                live_counter_valid[i] = 1u;
+                terminal_print_inline_hex64(live_counters[i]);
+            }
+            else
+                terminal_print("unreadable");
+            terminal_print("/");
+        }
+    }
     if (g_cp_completion.cpu) {
         asm_dma_invalidate_range(g_cp_completion.cpu, GPU_CORE_MESART_DIAGNOSTIC_BYTES);
         const uint32_t *words = (const uint32_t *)g_cp_completion.cpu;
+        if (g_mesart_3d_inflight.compositor_present)
+        {
+            terminal_print(" counter baseline/delta=");
+            for (uint32_t i = 0u; i < 6u; ++i)
+            {
+                uint32_t word = GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET /
+                                4u + i * 2u;
+                uint64_t baseline = ((uint64_t)words[word + 1u] << 32) |
+                                    words[word];
+                terminal_print_inline_hex64(baseline);
+                terminal_print("/");
+                if (live_counter_valid[i])
+                    terminal_print_inline_hex64(live_counters[i] - baseline);
+                else
+                    terminal_print("unreadable");
+                terminal_print("/");
+            }
+        }
         terminal_print(" secure-transition begin/end=");
         terminal_print_inline_hex64(words[GPU_CORE_MESART_SECURE_BEGIN_OFFSET / 4u]);
         terminal_print("/");
@@ -2275,6 +2949,36 @@ static int gpu_core_mesart_3d_fail(int rc)
         if (words[GPU_CORE_MESART_SECURE_BEGIN_OFFSET / 4u] == 0x53454330u &&
             words[GPU_CORE_MESART_SECURE_END_OFFSET / 4u] != 0x53454331u)
             terminal_error("[K:GPU] Non-secure transition did not finish; platform zap support may be unavailable");
+        terminal_print(" completion stages 0..8=");
+        for (uint32_t i = 0u; i < 9u; ++i)
+            terminal_print_inline_hex64(words[i]);
+        if (g_mesart_3d_inflight.compositor_present)
+        {
+            terminal_print(" compositor triangle half=");
+            terminal_print_inline_hex64(
+                g_mesart_3d_inflight.compositor_triangle_half);
+            terminal_print(" compositor source GPU/CPU first=");
+            terminal_print_inline_hex64(
+                words[GPU_CORE_COMPOSITOR_SOURCE_FIRST_OFFSET / 4u]);
+            terminal_print("/");
+            terminal_print_inline_hex64(
+                g_mesart_3d_inflight.source_first_expected);
+            terminal_print(" last=");
+            terminal_print_inline_hex64(
+                words[GPU_CORE_COMPOSITOR_SOURCE_LAST_OFFSET / 4u]);
+            terminal_print("/");
+            terminal_print_inline_hex64(
+                g_mesart_3d_inflight.source_last_expected);
+            terminal_print(" compositor descriptor GPU/CPU 0,2,3,4,5=");
+            for (uint32_t i = 0u; i < 5u; ++i)
+            {
+                terminal_print_inline_hex64(words[
+                    GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET / 4u + i]);
+                terminal_print("/");
+                terminal_print_inline_hex64(
+                    g_mesart_3d_inflight.descriptor_expected[i]);
+            }
+        }
     }
     if (gpu_cp_status_read(&g_gpu_regs_window,
                              adreno_x1_85_cp_layout(), &failure_cp) == 0)
@@ -2287,6 +2991,23 @@ static int gpu_core_mesart_3d_fail(int rc)
         terminal_print_inline_hex64(failure_cp.rb_rptr);
         terminal_print(" wptr=");
         terminal_print_inline_hex64(failure_cp.rb_wptr);
+        if (g_runtime_ring.buffer.cpu && g_runtime_ring.write_dwords)
+        {
+            const uint32_t *ring =
+                (const uint32_t *)g_runtime_ring.buffer.cpu;
+            uint32_t begin = failure_cp.rb_rptr > 8u ?
+                failure_cp.rb_rptr - 8u : 0u;
+            uint32_t end = failure_cp.rb_rptr + 8u;
+            if (end > g_runtime_ring.write_dwords)
+                end = g_runtime_ring.write_dwords;
+            terminal_print(" ring near rptr=");
+            for (uint32_t i = begin; i < end; ++i)
+            {
+                terminal_print_inline_hex64(i);
+                terminal_print(":");
+                terminal_print_inline_hex64(ring[i]);
+            }
+        }
     }
     if (gpu_smmuv2_read_context_fault(&g_gpu_smmu_window, &g_gpu_smmu_caps,
                                       g_gpu_smmu_context_bank,
@@ -2294,10 +3015,22 @@ static int gpu_core_mesart_3d_fail(int rc)
     {
         terminal_print(" CB0-FSR=");
         terminal_print_inline_hex64(render_fault.fsr);
-        terminal_print(" FAR=");
-        terminal_print_inline_hex64(render_fault.fault_address);
-        terminal_print(" FSYNR0=");
-        terminal_print_inline_hex64(render_fault.fsynr0);
+        if (render_fault.fsr & GPU_SMMUV2_FSR_FAULT_MASK)
+        {
+            uint64_t leaf = 0u;
+            terminal_print(" active-fault FAR=");
+            terminal_print_inline_hex64(render_fault.fault_address);
+            terminal_print(" FSYNR0=");
+            terminal_print_inline_hex64(render_fault.fsynr0);
+            terminal_print(" CPU leaf=");
+            if (gpu_iommu_query_page(&g_iommu_domain,
+                    render_fault.fault_address, &leaf) == 0)
+                terminal_print_inline_hex64(leaf);
+            else
+                terminal_print("unmapped");
+        }
+        else
+            terminal_print(" (no active context fault; FAR/FSYNR stale)");
     }
     if (gpu_smmuv2_read_global_fault(&g_gpu_smmu_window, &global_fault) == 0)
     {
@@ -2308,6 +3041,7 @@ static int gpu_core_mesart_3d_fail(int rc)
     g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
     (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
     g_runtime_gx_lease_held = 0u;
+    g_runtime_ring_bound = 0u;
     g_runtime_backend_ready = 0u;
     return rc;
 }
@@ -2316,6 +3050,7 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
 {
     uint32_t rptr = 0u;
     uint64_t elapsed;
+    uint64_t timeout;
 
     if (out_fence)
         *out_fence = 0u;
@@ -2325,10 +3060,24 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
                             adreno_x1_85_cp_layout()->rb_rptr,
                             &rptr) != 0)
         return gpu_core_mesart_3d_fail(-10);
-    elapsed = dihos_time_ticks() - g_mesart_3d_inflight.started_tick;
+    elapsed = gpu_core_monotonic_counter() -
+        g_mesart_3d_inflight.started_counter;
+    timeout = gpu_core_monotonic_frequency() *
+        (g_mesart_3d_inflight.compositor_present ?
+            GPU_CORE_COMPOSITOR_TIMEOUT_SECONDS :
+            GPU_CORE_MESART_3D_TIMEOUT_SECONDS);
     if (rptr != g_mesart_3d_inflight.expected_rptr)
     {
-        if (elapsed >= GPU_CORE_MESART_3D_TIMEOUT_TICKS)
+        if ((++g_mesart_3d_inflight.poll_count & 63u) == 0u)
+        {
+            gpu_smmuv2_context_fault fault = {0};
+            if (gpu_smmuv2_read_context_fault(&g_gpu_smmu_window,
+                    &g_gpu_smmu_caps, g_gpu_smmu_context_bank,
+                    &fault) == 0 &&
+                (fault.fsr & GPU_SMMUV2_FSR_FAULT_MASK))
+                return gpu_core_mesart_3d_fail(-110);
+        }
+        if (elapsed >= timeout)
             return gpu_core_mesart_3d_fail(-10);
         return 1;
     }
@@ -2337,19 +3086,57 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
      * the render backend, rather than merely being parsed by CP. */
     asm_dma_invalidate_range(g_cp_completion.cpu,
                              GPU_CORE_MESART_DIAGNOSTIC_BYTES);
-    if (((uint32_t *)g_cp_completion.cpu)[7] !=
-        g_mesart_3d_inflight.completion_markers[7])
+    if ((g_mesart_3d_inflight.compositor_present &&
+         ((uint32_t *)g_cp_completion.cpu)[8] !=
+             g_mesart_3d_inflight.completion_markers[8]) ||
+        (!g_mesart_3d_inflight.compositor_present &&
+         ((uint32_t *)g_cp_completion.cpu)[7] == 0u))
     {
-        if (elapsed >= GPU_CORE_MESART_3D_TIMEOUT_TICKS)
+        if (elapsed >= timeout)
             return gpu_core_mesart_3d_fail(-108);
         return 1;
     }
     for (uint32_t i = 0u; i < sizeof(g_mesart_3d_inflight.completion_markers) /
                               sizeof(g_mesart_3d_inflight.completion_markers[0]); ++i)
     {
+        uint32_t rb_timestamp = !g_mesart_3d_inflight.compositor_present &&
+            (i == 4u || i == 7u);
+        if (rb_timestamp)
+        {
+            if (((uint32_t *)g_cp_completion.cpu)[i] == 0u)
+                return gpu_core_mesart_3d_fail(-101 - (int)i);
+            continue;
+        }
         if (((uint32_t *)g_cp_completion.cpu)[i] !=
             g_mesart_3d_inflight.completion_markers[i])
             return gpu_core_mesart_3d_fail(-101 - (int)i);
+    }
+    if (g_mesart_3d_inflight.compositor_present)
+    {
+        gpu_smmuv2_context_fault fault = {0};
+        gpu_smmuv2_global_fault global = {0};
+        uint32_t trust = 1u;
+        uint64_t completed = g_mesart_3d_inflight.fence;
+
+        /* RBBM_STATUS and its undocumented detail banks are diagnostics,
+         * not completion fences.  X1-85 keeps VPC_BUSY set after the very
+         * first successful draw and later retains nonzero detail values;
+         * requiring zero falsely stopped the compositor after four tiles
+         * despite final CP markers and normal RB colour-write counters.
+         * The ordered private-memory marker above is the submission fence;
+         * reject only an actual trust or SMMU fault here. */
+        if (gpu_mmio_try_read32(&g_gpu_regs_window,
+                ADRENO_X1_85_RBBM_SECVID_TRUST_CNTL, &trust) != 0 ||
+            trust != 0u ||
+            gpu_smmuv2_read_context_fault(&g_gpu_smmu_window,
+                &g_gpu_smmu_caps, g_gpu_smmu_context_bank, &fault) != 0 ||
+            gpu_smmuv2_read_global_fault(&g_gpu_smmu_window, &global) != 0 ||
+            (fault.fsr & GPU_SMMUV2_FSR_FAULT_MASK) || global.gfsr)
+            return gpu_core_mesart_3d_fail(-115);
+        if (out_fence)
+            *out_fence = completed;
+        g_mesart_3d_inflight = (gpu_core_mesart_3d_inflight){0};
+        return 0;
     }
     /* CP/SMMU status alone misses GPU-side rejection of colour writes.
      * Keep stage-specific sticky status; do not clear or alter trust state
@@ -2877,6 +3664,7 @@ int gpu_core_execute_next_scheduled(uint64_t *out_fence)
         rc = -9;
         goto out;
     }
+    g_runtime_ring_bound = 1u;
     rc = gpu_cp_submit_fenced(&g_gpu_regs_window, &g_gpu_gmu_window,
                               ADRENO_X1_85_GMU_AHB_FENCE_STATUS,
                               adreno_x1_85_cp_layout(), &g_runtime_ring);
@@ -2929,6 +3717,7 @@ out:
     {
         (void)gpu_gmu_gen7_release_gpu(&g_gpu_gmu_window);
         g_runtime_gx_lease_held = 0u;
+        g_runtime_ring_bound = 0u;
         g_runtime_backend_ready = 0u;
     }
     return rc;

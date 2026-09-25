@@ -12,7 +12,9 @@ typedef struct gpu_command_ring
 {
     gpu_buffer buffer;
     uint32_t capacity_dwords;
+    uint32_t start_dwords;
     uint32_t write_dwords;
+    uint32_t emitted_dwords;
     uint32_t sealed;
 } gpu_command_ring;
 
@@ -22,6 +24,11 @@ int gpu_ring_emit(gpu_command_ring *ring, uint32_t dword);
 int gpu_ring_emit_many(gpu_command_ring *ring, const uint32_t *dwords,
                        uint32_t count);
 int gpu_ring_seal(gpu_command_ring *ring);
+
+/* Begin a batch at the device's current circular read/write position.  PM4
+ * packets may cross the physical end of the ring; emit() wraps each dword
+ * modulo capacity while emitted_dwords prevents a batch from lapping CP. */
+int gpu_ring_reset_at(gpu_command_ring *ring, uint32_t start_dwords);
 
 /* Reopens a ring only after its prior sealed batch has completed and the
  * caller has stopped the device from fetching it.  This does not free or

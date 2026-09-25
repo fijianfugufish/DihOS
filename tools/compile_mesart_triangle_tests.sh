@@ -28,7 +28,7 @@ cp "$project_root/mesart/include/mesart_shader_blob.h" "$mesa_source/mesart_host
 cp "$project_root/mesart/include/mesart_pipeline_blob.h" "$mesa_source/mesart_host/"
 ninja -C "$mesa_build" mesart_host/mesart_glsl_to_ir3
 
-test_names=(textured_triangle)
+test_names=(compositor_solid compositor_textured textured_triangle)
 if [[ "${MESART_INCLUDE_FUTURE_TESTS:-0}" == "1" ]]; then
     test_names+=(triangle tint_triangle)
 fi
@@ -42,5 +42,5 @@ for test_name in "${test_names[@]}"; do
         "$project_root/build/mesart-shaders/$test_name.mpip"
 done
 
-echo "Built the textured-triangle MIR3/MPIP artifacts under:"
+echo "Built the solid/textured core compositor and triangle artifacts under:"
 echo "  $project_root/build/mesart-shaders"
