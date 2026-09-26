@@ -332,6 +332,7 @@ static void kwindow_apply_fullscreen_bounds(kwindow_slot *slot)
     kgfx_obj *root = 0;
     uint32_t usable_h = 0u;
     uint32_t min_h = 0u;
+    uint32_t pad = 0u;
 
     if (!slot)
         return;
@@ -349,10 +350,17 @@ static void kwindow_apply_fullscreen_bounds(kwindow_slot *slot)
     if (usable_h < min_h)
         usable_h = min_h;
 
-    root->u.rect.x = 0;
-    root->u.rect.y = 0;
-    root->u.rect.w = fb->width;
-    root->u.rect.h = usable_h;
+    /* A retained layer includes the root outline outside the rectangle.
+     * Keep that complete footprint inside the scanout-sized surface; the
+     * old bounds made a fullscreen outlined window a few pixels wider than
+     * the surface, so hit testing expanded while its cached pixels stayed at
+     * the pre-fullscreen size. */
+    pad = root->outline_width && root->outline_alpha
+        ? root->outline_width : 0u;
+    root->u.rect.x = (int32_t)pad;
+    root->u.rect.y = (int32_t)pad;
+    root->u.rect.w = fb->width > pad * 2u ? fb->width - pad * 2u : fb->width;
+    root->u.rect.h = usable_h > pad * 2u ? usable_h - pad * 2u : usable_h;
     kwindow_layout_controls(slot);
 }
 
@@ -1542,6 +1550,24 @@ kgfx_obj_handle kwindow_root(kwindow_handle h)
     if (!kwindow_handle_valid(h))
         return (kgfx_obj_handle){-1};
     return G_windows[h.idx].root;
+}
+
+uint32_t kwindow_collect_visible_roots(kgfx_obj_handle *out_roots,
+                                       uint32_t capacity)
+{
+    uint32_t count = 0u;
+
+    if (!out_roots || !capacity)
+        return 0u;
+    for (uint32_t i = 0u; i < KWINDOW_MAX && count < capacity; ++i)
+    {
+        if (!G_windows[i].used || !G_windows[i].visible ||
+            G_windows[i].root.idx < 0 ||
+            !kgfx_obj_ref(G_windows[i].root))
+            continue;
+        out_roots[count++] = G_windows[i].root;
+    }
+    return count;
 }
 
 int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y)

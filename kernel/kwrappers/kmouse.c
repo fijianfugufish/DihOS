@@ -74,6 +74,7 @@ static uint8_t kmouse_cursor_needs_bw_invert(kmouse_cursor cursor)
     case KMOUSE_CURSOR_SIZE4:
     case KMOUSE_CURSOR_BEAM:
     case KMOUSE_CURSOR_CROSS:
+    case KMOUSE_CURSOR_MOVE:
         return 1u;
     default:
         return 0u;
@@ -933,4 +934,9 @@ void kmouse_get_state(kmouse_state *out)
 {
     if (out)
         *out = G.state;
+}
+
+kgfx_obj_handle kmouse_cursor_object(void)
+{
+    return G.cursor_handle;
 }

@@ -14,6 +14,7 @@ extern "C"
 #include "kwrappers/ktext.h"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
+#include "gpu/gpu_compositor.h"
 }
 
 namespace
@@ -45,6 +46,68 @@ namespace
         }
 
         dst[i] = 0;
+    }
+
+    static uint64_t fps_counter_now(void)
+    {
+        uint64_t value;
+        __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(value));
+        return value;
+    }
+
+    static uint64_t fps_counter_frequency(void)
+    {
+        uint64_t value;
+        __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(value));
+        return value;
+    }
+
+    static uint64_t visible_presented_frame_count(void)
+    {
+        return gpu_compositor_core_ready() ?
+            gpu_compositor_presented_frame_count() :
+            kgfx_rendered_frame_count();
+    }
+
+    static void append_text(char *dst, uint32_t cap, uint32_t *pos, const char *src)
+    {
+        while (src && *src && *pos + 1u < cap)
+            dst[(*pos)++] = *src++;
+    }
+
+    static void append_decimal(char *dst, uint32_t cap, uint32_t *pos, uint64_t value)
+    {
+        char reversed[20];
+        uint32_t count = 0u;
+        do
+        {
+            reversed[count++] = (char)('0' + (value % 10u));
+            value /= 10u;
+        } while (value && count < sizeof(reversed));
+        while (count && *pos + 1u < cap)
+            dst[(*pos)++] = reversed[--count];
+    }
+
+    static void format_perf(char *dst, uint32_t cap, uint64_t fps_tenths,
+                            uint64_t cpu_us, uint64_t gpu_us)
+    {
+        uint32_t pos = 0u;
+        if (!dst || cap == 0u)
+            return;
+        append_text(dst, cap, &pos, "FPS ");
+        append_decimal(dst, cap, &pos, fps_tenths / 10u);
+        append_text(dst, cap, &pos, ".");
+        append_decimal(dst, cap, &pos, fps_tenths % 10u);
+        append_text(dst, cap, &pos, "  CPU ");
+        append_decimal(dst, cap, &pos, cpu_us / 1000u);
+        append_text(dst, cap, &pos, ".");
+        append_decimal(dst, cap, &pos, (cpu_us % 1000u) / 100u);
+        append_text(dst, cap, &pos, "ms  GPU ");
+        append_decimal(dst, cap, &pos, gpu_us / 1000u);
+        append_text(dst, cap, &pos, ".");
+        append_decimal(dst, cap, &pos, (gpu_us % 1000u) / 100u);
+        append_text(dst, cap, &pos, "ms");
+        dst[pos < cap ? pos : cap - 1u] = 0;
     }
 
     static int load_first_bmp(kimg *out, const char *a, const char *b, const char *c)
@@ -101,6 +164,10 @@ namespace
     public:
         void Init(const kfont *font);
         void Update();
+        void SetFpsVisible(uint8_t visible);
+        uint8_t FpsVisible() const { return fps_visible_; }
+        uint32_t CollectGpuForegroundRoots(kgfx_obj_handle *out_roots,
+                                           uint32_t capacity) const;
 
     private:
         struct AppButton
@@ -119,6 +186,7 @@ namespace
         void LayoutButton(AppButton &button, int32_t x, int32_t y, uint32_t w, uint32_t h,
                           const char *label_text, const char *fallback_text);
         void UpdateButtonStyles(void);
+        void UpdateFps(void);
         void SetObjectVisible(kgfx_obj_handle handle, uint8_t visible);
 
         static void TerminalClickThunk(kbutton_handle button, void *user);
@@ -136,6 +204,11 @@ namespace
         kimg wallpaper_;
         uint8_t wallpaper_loaded_;
         kgfx_obj_handle taskbar_;
+        kgfx_obj_handle fps_label_;
+        char fps_text_[64];
+        uint64_t fps_last_counter_;
+        uint64_t fps_last_frame_count_;
+        uint8_t fps_visible_;
         AppButton terminal_button_;
         AppButton explorer_button_;
         AppButton editor_button_;
@@ -192,6 +265,11 @@ namespace
         explorer_active_ = 0xFFu;
         editor_active_ = 0xFFu;
         task_manager_active_ = 0xFFu;
+        fps_label_.idx = -1;
+        copy_text(fps_text_, sizeof(fps_text_), "FPS: --");
+        fps_last_counter_ = 0u;
+        fps_last_frame_count_ = 0u;
+        fps_visible_ = 0u;
 
         button_style_ = kbutton_style_default();
         button_style_.fill = rgb(28, 33, 45);
@@ -210,6 +288,11 @@ namespace
 
         CreateWallpaper();
         CreateTaskbar();
+        if (font_)
+            fps_label_ = kgfx_obj_add_text(font_, fps_text_, 0, 0, 10000,
+                                           rgb(255, 255, 255), 255u,
+                                           kwindow_ui_text_scale(1u), 0, 0,
+                                           KTEXT_ALIGN_RIGHT, 0u);
         Layout();
         UpdateButtonStyles();
         initialized_ = 1u;
@@ -520,6 +603,17 @@ namespace
         LayoutButton(explorer_button_, button_x + (int32_t)button_w + gap, button_y, button_w, button_h, "Files", "F");
         LayoutButton(editor_button_, button_x + (int32_t)(button_w + gap) * 2, button_y, button_w, button_h, "Notes", "N");
         LayoutButton(task_manager_button_, button_x + (int32_t)(button_w + gap) * 3, button_y, button_w, button_h, "Tasks", "T");
+
+        if (fps_label_.idx >= 0)
+        {
+            kgfx_obj *fps = kgfx_obj_ref(fps_label_);
+            if (fps && fps->kind == KGFX_OBJ_TEXT)
+            {
+                fps->u.text.x = (int32_t)screen_w - kwindow_ui_scale_i32(12);
+                fps->u.text.y = kwindow_ui_scale_i32(10);
+                fps->u.text.scale = kwindow_ui_text_scale(1u);
+            }
+        }
     }
 
     void DesktopShell::UpdateButtonStyles(void)
@@ -565,6 +659,55 @@ namespace
             Layout();
 
         UpdateButtonStyles();
+        UpdateFps();
+    }
+
+    void DesktopShell::SetFpsVisible(uint8_t visible)
+    {
+        fps_visible_ = visible ? 1u : 0u;
+        fps_last_counter_ = fps_counter_now();
+        fps_last_frame_count_ = visible_presented_frame_count();
+        copy_text(fps_text_, sizeof(fps_text_), "FPS: --");
+        kgfx_text_set(fps_label_, fps_text_);
+        SetObjectVisible(fps_label_, fps_visible_);
+    }
+
+    uint32_t DesktopShell::CollectGpuForegroundRoots(
+        kgfx_obj_handle *out_roots, uint32_t capacity) const
+    {
+        uint32_t count = 0u;
+        if (!out_roots || !capacity)
+            return 0u;
+        if (taskbar_.idx >= 0 && kgfx_obj_ref(taskbar_))
+            out_roots[count++] = taskbar_;
+        if (count < capacity && fps_label_.idx >= 0 &&
+            kgfx_obj_ref(fps_label_) && kgfx_obj_ref(fps_label_)->visible)
+            out_roots[count++] = fps_label_;
+        return count;
+    }
+
+    void DesktopShell::UpdateFps(void)
+    {
+        uint64_t now;
+        uint64_t frequency;
+        uint64_t elapsed;
+        uint64_t frames;
+        uint64_t tenths;
+
+        if (!fps_visible_ || fps_label_.idx < 0)
+            return;
+        now = fps_counter_now();
+        frequency = fps_counter_frequency();
+        elapsed = now - fps_last_counter_;
+        if (!frequency || elapsed < frequency)
+            return;
+        frames = visible_presented_frame_count() - fps_last_frame_count_;
+        tenths = (frames * frequency * 10u) / elapsed;
+        format_perf(fps_text_, sizeof(fps_text_), tenths,
+                    kgfx_last_render_us(), gpu_compositor_last_frame_us());
+        kgfx_text_set(fps_label_, fps_text_);
+        fps_last_counter_ = now;
+        fps_last_frame_count_ = visible_presented_frame_count();
     }
 
     void DesktopShell::TerminalClickThunk(kbutton_handle button, void *user)
@@ -604,4 +747,20 @@ extern "C" void desktop_shell_init(const kfont *font)
 extern "C" void desktop_shell_update(void)
 {
     g_desktop_shell.Update();
+}
+
+extern "C" void desktop_shell_set_fps_visible(uint8_t visible)
+{
+    g_desktop_shell.SetFpsVisible(visible);
+}
+
+extern "C" uint8_t desktop_shell_fps_visible(void)
+{
+    return g_desktop_shell.FpsVisible();
+}
+
+extern "C" uint32_t desktop_shell_collect_gpu_foreground_roots(
+    kgfx_obj_handle *out_roots, uint32_t capacity)
+{
+    return g_desktop_shell.CollectGpuForegroundRoots(out_roots, capacity);
 }

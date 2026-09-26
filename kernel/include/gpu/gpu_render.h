@@ -19,7 +19,7 @@
 #define GPU_RENDER_ABI_VERSION 1u
 #define GPU_RENDER_MAX_UNIFORM_VEC4S 64u
 #define GPU_RENDER_MAX_TEXTURES 8u
-#define GPU_RENDER_MAX_SURFACES 8u
+#define GPU_RENDER_MAX_SURFACES 32u
 /* Matches the isolated per-surface aperture reserved by gpu_core. Keeping a
  * surface inside one fixed slot means a backend can map it once without
  * creating a general-purpose IOVA allocator. */
@@ -31,6 +31,8 @@
 #define GPU_RENDER_CAP_TEXTURE_2D         (1u << 3)
 #define GPU_RENDER_CAP_ALPHA_BLEND        (1u << 4)
 #define GPU_RENDER_CAP_RECTANGLE_LIST     (1u << 5)
+#define GPU_RENDER_CAP_BATCHED_LAYERS     (1u << 6)
+#define GPU_RENDER_MAX_BATCH_DRAWS 8u
 
 typedef enum gpu_render_pixel_format
 {
@@ -111,13 +113,30 @@ typedef struct gpu_render_texture
     uint32_t stride_bytes;
     gpu_render_pixel_format format;
     gpu_render_sample_mode sample_mode;
+    /* Trusted kernel producers set this only after publishing all CPU writes
+     * or when the surface was produced by the GPU. It avoids walking a large
+     * immutable retained surface with cache-clean instructions every time it
+     * is used in a composition batch. */
+    uint8_t device_coherent;
 } gpu_render_texture;
+
+typedef struct gpu_render_rect
+{
+    uint32_t x;
+    uint32_t y;
+    uint32_t width;
+    uint32_t height;
+} gpu_render_rect;
 
 typedef struct gpu_render_submission
 {
     gpu_render_pipeline_kind pipeline;
     gpu_render_primitive primitive;
     gpu_render_target target;
+    /* Zero rectangles mean the complete source/target.  A compositor may
+     * use matching nonzero rectangles to update only damaged pixels. */
+    gpu_render_rect source_rect;
+    gpu_render_rect destination_rect;
     /* Triangle lists accept one triangle or one quad. Rectangle lists use
      * two diagonal vertices; the backend owns the hardware lowering. */
     uint32_t vertex_count;
@@ -142,11 +161,15 @@ typedef struct gpu_render_backend_info
 
 typedef int (*gpu_render_backend_submit_fn)(
     const gpu_render_submission *submission, uint64_t *out_fence);
+typedef int (*gpu_render_backend_submit_batch_fn)(
+    const gpu_render_submission *submissions, uint32_t count,
+    uint64_t *out_fence);
 
 typedef struct gpu_render_backend_ops
 {
     gpu_render_backend_info info;
     gpu_render_backend_submit_fn submit;
+    gpu_render_backend_submit_batch_fn submit_batch;
 } gpu_render_backend_ops;
 
 typedef enum gpu_render_dispatch_result
@@ -173,6 +196,10 @@ void gpu_render_init(void);
  * caller to have waited for every fence returned for it. */
 int gpu_render_surface_create(const gpu_render_surface_desc *desc,
                               gpu_render_surface_handle *out_surface);
+/* Scanout-capable storage is physically below 4 GiB for display engines
+ * whose inherited firmware pipe exposes only a 32-bit source address. */
+int gpu_render_surface_create_scanout(const gpu_render_surface_desc *desc,
+                                      gpu_render_surface_handle *out_surface);
 int gpu_render_surface_target(gpu_render_surface_handle surface,
                               gpu_render_target *out_target);
 int gpu_render_surface_texture(gpu_render_surface_handle surface,
@@ -189,3 +216,8 @@ void gpu_render_query_status(gpu_render_status *out_status);
  * returns GPU_RENDER_DISPATCH_CPU_FALLBACK. */
 int gpu_render_submit(const gpu_render_submission *submission,
                       uint64_t *out_fence);
+/* Submits an ordered set of layers to one target under one backend fence.
+ * A backend without native batching returns CPU fallback; the generic layer
+ * never decomposes this into independently visible partial frames. */
+int gpu_render_submit_batch(const gpu_render_submission *submissions,
+                            uint32_t count, uint64_t *out_fence);

@@ -17,6 +17,7 @@ typedef struct gpu_buffer
 #define GPU_BUFFER_DATA     (1u << 1)
 #define GPU_BUFFER_ZEROED   (1u << 2)
 #define GPU_BUFFER_EXTERNAL (1u << 3)
+#define GPU_BUFFER_LOWDMA   (1u << 4)
 
 int gpu_buffer_alloc(gpu_buffer *out, uint64_t size_bytes, uint32_t flags);
 /* Registers storage owned by another subsystem (for example, UEFI scanout).

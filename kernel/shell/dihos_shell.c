@@ -1,5 +1,6 @@
 #include "shell/dihos_shell.h"
 
+#include "apps/desktop_shell_api.h"
 #include "bootinfo.h"
 #include "asm/aa64_user.h"
 #include "gpu/gpu_render.h"
@@ -183,6 +184,9 @@ static int dihos_cmd_sys_time(dihos_shell_stage *stage);
 static int dihos_cmd_sys_run(dihos_shell_stage *stage);
 static int dihos_cmd_sys_which(dihos_shell_stage *stage);
 static int dihos_cmd_sys_trace(dihos_shell_stage *stage);
+static int dihos_cmd_fps(dihos_shell_stage *stage);
+static int dihos_cmd_fps_on(dihos_shell_stage *stage);
+static int dihos_cmd_fps_off(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_networks(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_connect(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_current(dihos_shell_stage *stage);
@@ -290,6 +294,9 @@ static const dihos_shell_command G_commands[] = {
     {"which", "which [command]", "Show how a command resolves.", 0u, dihos_cmd_sys_which},
     {"type", "type [command]", "Show how a command resolves.", 0u, dihos_cmd_sys_which},
     {"trace", "trace [on|off|status]", "Toggle shell execution trace output.", 0u, dihos_cmd_sys_trace},
+    {"fps", "fps [on|off|status]", "Control the desktop FPS overlay.", 0u, dihos_cmd_fps},
+    {"fps:on", "fps:on", "Show the desktop FPS overlay.", 0u, dihos_cmd_fps_on},
+    {"fps:off", "fps:off", "Hide the desktop FPS overlay.", 0u, dihos_cmd_fps_off},
     {"pwd", "pwd", "Print the current directory.", 0u, dihos_cmd_fs_pwd},
     {"cd", "cd [path]", "Change the current directory.", 0u, dihos_cmd_fs_cd},
     {"ls", "ls [-l] [path]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -1978,6 +1985,40 @@ static int dihos_cmd_sys_trace(dihos_shell_stage *stage)
 
     terminal_print_inline("trace: ");
     terminal_print_inline(G_shell_trace ? "on\n" : "off\n");
+    return 0;
+}
+
+static int dihos_cmd_fps_on(dihos_shell_stage *stage)
+{
+    (void)stage;
+    desktop_shell_set_fps_visible(1u);
+    terminal_success("FPS overlay enabled");
+    return 0;
+}
+
+static int dihos_cmd_fps_off(dihos_shell_stage *stage)
+{
+    (void)stage;
+    desktop_shell_set_fps_visible(0u);
+    terminal_success("FPS overlay disabled");
+    return 0;
+}
+
+static int dihos_cmd_fps(dihos_shell_stage *stage)
+{
+    const char *mode = stage->positional_count > 0u ? stage->positional[0] : "status";
+
+    if (strcmp(mode, "on") == 0)
+        return dihos_cmd_fps_on(stage);
+    if (strcmp(mode, "off") == 0)
+        return dihos_cmd_fps_off(stage);
+    if (strcmp(mode, "status") != 0)
+    {
+        terminal_error("fps needs on, off, or status");
+        return -1;
+    }
+    terminal_print_inline("FPS overlay: ");
+    terminal_print_inline(desktop_shell_fps_visible() ? "on\n" : "off\n");
     return 0;
 }
 

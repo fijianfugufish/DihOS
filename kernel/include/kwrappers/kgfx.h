@@ -73,6 +73,7 @@ extern "C"
         uint32_t stride_px;
         uint32_t content_version;
         uint8_t sample_mode;
+        uint8_t opaque_hint;
     } kgfx_image_data;
 
     typedef enum
@@ -125,8 +126,36 @@ extern "C"
     int kgfx_gpu_backbuffer_attach(void);
     int kgfx_gpu_backbuffer_texture(gpu_render_texture *out_texture);
     uint8_t kgfx_gpu_frame_dirty(void);
+    int kgfx_gpu_frame_damage(gpu_render_rect *out_damage);
     void kgfx_gpu_frame_submitted(void);
     void kgfx_present_backbuffer_cpu(void);
+
+#define KGFX_MAX_COMPOSITION_LAYERS (GPU_RENDER_MAX_BATCH_DRAWS - 1u)
+    typedef struct kgfx_composition_layer
+    {
+        gpu_render_texture texture;
+        gpu_render_rect source_rect;
+        gpu_render_rect destination_rect;
+        int32_t z;
+        uint16_t root_idx;
+    } kgfx_composition_layer;
+
+    /* The window manager supplies opaque top-level roots. KGFX retains each
+     * subtree in its own neutral surface, while motion changes only the
+     * destination rectangle. Surface pixels are mutated only when the GPU
+     * has released the previous batch. */
+    void kgfx_window_layers_prepare(const kgfx_obj_handle *roots,
+                                    uint32_t count,
+                                    uint8_t surface_updates_allowed);
+    uint32_t kgfx_window_layers_snapshot(kgfx_composition_layer *out_layers,
+                                         uint32_t capacity);
+    void kgfx_window_layers_disable(void);
+#define KGFX_MAX_GPU_FOREGROUND_ROOTS 4u
+    void kgfx_gpu_foreground_set(const kgfx_obj_handle *roots,
+                                 uint32_t count);
+    void kgfx_gpu_overlay_set(kgfx_obj_handle object);
+    void kgfx_gpu_overlay_present_cpu(const gpu_render_target *target,
+                                      const gpu_render_rect *damage);
 
     kgfx_obj_handle kgfx_obj_add_rect(int32_t x, int32_t y, uint32_t w, uint32_t h,
                                       int32_t z, kcolor fill, uint8_t visible);
@@ -252,6 +281,13 @@ extern "C"
             ++o->u.image.content_version;
     }
 
+    static inline void kgfx_image_set_opaque_hint(kgfx_obj_handle h, uint8_t opaque)
+    {
+        kgfx_obj *o = kgfx_obj_ref(h);
+        if (o && o->kind == KGFX_OBJ_IMAGE)
+            o->u.image.opaque_hint = opaque ? 1u : 0u;
+    }
+
     static inline void kgfx_obj_set_parent(kgfx_obj_handle child, kgfx_obj_handle parent)
     {
         kgfx_obj *o = kgfx_obj_ref(child);
@@ -352,6 +388,8 @@ extern "C"
     int kgfx_capture_argb(uint32_t *dst, uint32_t dst_stride_px,
                           int32_t x, int32_t y, uint32_t w, uint32_t h);
     void kgfx_render_all(kcolor clear_color);
+    uint64_t kgfx_rendered_frame_count(void);
+    uint64_t kgfx_last_render_us(void);
 
 #ifdef __cplusplus
 }

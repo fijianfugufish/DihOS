@@ -155,6 +155,12 @@ static int32_t g_last_mouse_x = 0;
 static int32_t g_last_mouse_y = 0;
 static uint8_t g_previous_buttons = 0u;
 static uint32_t g_layer_row_base = 0u;
+static uint32_t g_view_preview_version = 0u;
+static uint32_t g_layout_w = 0u;
+static uint32_t g_layout_h = 0u;
+static uint32_t g_layout_modal = 0xffffffffu;
+static uint32_t g_layout_layer_count = 0xffffffffu;
+static int32_t g_layout_selected_type = -2;
 
 static sacx_color rgb(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -534,7 +540,10 @@ static void layout(void)
     const uint32_t status_h = 26u;
     uint32_t canvas_y = 96u;
     uint32_t canvas_h = 1u;
+    uint32_t old_view_w = g_view_w;
+    uint32_t old_view_h = g_view_h;
     int32_t x = 12;
+    int32_t selected_type = -1;
 
     if (g_api->gfx_obj_get_rect(g_root, &root_x, &root_y, &root_w, &root_h) != 0)
         return;
@@ -549,6 +558,25 @@ static void layout(void)
         right_w = 212u;
     if (root_w < 820u)
         left_w = 104u;
+
+    /* Window movement changes only the root's world origin; all child
+     * geometry remains relative to that root. Keep the screen-space input
+     * origin current without regenerating the large view image below. */
+    g_view_screen_x = root_x + (int32_t)left_w + 10;
+    g_view_screen_y = root_y + (int32_t)canvas_y;
+    if (g_doc.selected_layer >= 0 &&
+        (uint32_t)g_doc.selected_layer < g_doc.layer_count)
+        selected_type = (int32_t)g_doc.layers[g_doc.selected_layer].type;
+
+    /* App updates run every scheduler turn, but a window move changes only
+     * the root's world transform. Do not issue dozens of identical EL0
+     * geometry syscalls—or make the compositor reconsider every child—when
+     * size and layout state are unchanged. */
+    if (g_layout_w == root_w && g_layout_h == root_h &&
+        g_layout_modal == g_modal_mode &&
+        g_layout_layer_count == g_doc.layer_count &&
+        g_layout_selected_type == selected_type)
+        return;
 
     const uint32_t top_widths[15] = {68, 64, 72, 58, 56, 52, 36, 36, 48, 58, 60, 60, 62, 68, 56};
     uint32_t top_total = 0u;
@@ -574,8 +602,6 @@ static void layout(void)
     g_view_w = root_w > left_w + right_w + 28u ? root_w - left_w - right_w - 28u : 1u;
     g_view_h = canvas_h;
     (void)g_api->gfx_obj_set_rect(g_canvas, (int32_t)left_w + 10, (int32_t)canvas_y, g_view_w, g_view_h);
-    g_view_screen_x = root_x + (int32_t)left_w + 10;
-    g_view_screen_y = root_y + (int32_t)canvas_y;
     (void)g_api->gfx_image_set_pos(g_checker_obj, 0, 0);
     (void)g_api->gfx_image_set_size(g_checker_obj, g_view_w, g_view_h);
     (void)g_api->gfx_obj_set_visible(g_checker_obj, 1u);
@@ -624,16 +650,13 @@ static void layout(void)
     layout_button(&g_properties[6], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
     prop_y += 34;
 
-    uint32_t selected_type = 0u;
-    if (g_doc.selected_layer >= 0 && (uint32_t)g_doc.selected_layer < g_doc.layer_count)
-        selected_type = g_doc.layers[g_doc.selected_layer].type;
-    if (layer_uses_size(selected_type))
+    if (selected_type >= 0 && layer_uses_size((uint32_t)selected_type))
     {
         layout_button(&g_properties[7], panel_x, prop_y, half_w, 30u);
         layout_button(&g_properties[8], panel_x + (int32_t)half_w + 6, prop_y, half_w, 30u);
         prop_y += 34;
     }
-    if (layer_uses_color(selected_type))
+    if (selected_type >= 0 && layer_uses_color((uint32_t)selected_type))
     {
         uint32_t color_w = (control_w - 16u) / 5u;
         for (uint32_t i = 0u; i < 5u; ++i)
@@ -641,7 +664,7 @@ static void layout(void)
                           prop_y, color_w, 30u);
         prop_y += 34;
     }
-    if (selected_type == EDITOR_LAYER_ADJUSTMENT)
+    if (selected_type == (int32_t)EDITOR_LAYER_ADJUSTMENT)
     {
         for (uint32_t i = 9u; i <= 14u; i += 2u)
         {
@@ -656,7 +679,9 @@ static void layout(void)
     if (g_textbox_root && g_modal_mode != MODAL_RESIZE)
         (void)g_api->textbox_set_bounds(g_textbox, panel_x, prop_y, control_w, 30u);
     (void)g_api->gfx_text_set_pos(g_status_text, 14, (int32_t)(root_h - status_h));
-    sync_image_layout();
+    if (old_view_w != g_view_w || old_view_h != g_view_h ||
+        !g_image_obj || !g_view_image || !g_view_pixels)
+        sync_image_layout();
 
     if (g_modal_mode != MODAL_NONE)
     {
@@ -673,6 +698,11 @@ static void layout(void)
         if (g_modal_mode == MODAL_RESIZE)
             (void)g_api->textbox_set_bounds(g_textbox, modal_x + 18, modal_y + 92, modal_w - 36u, 30u);
     }
+    g_layout_w = root_w;
+    g_layout_h = root_h;
+    g_layout_modal = g_modal_mode;
+    g_layout_layer_count = g_doc.layer_count;
+    g_layout_selected_type = selected_type;
 }
 
 static int attach_preview(void)
@@ -680,6 +710,7 @@ static int attach_preview(void)
     if (!g_doc.preview || !g_doc.preview_pixels)
         return -1;
     g_fit_mode = 1u;
+    g_view_preview_version = ~g_doc.preview_version;
     sync_image_layout();
     return 0;
 }
@@ -2197,6 +2228,11 @@ static int editor_update(const sacx_api *api)
     handle_mouse();
     if (g_doc.render_pending)
         (void)document_render_step(32u);
+    if (g_doc.preview_version != g_view_preview_version)
+    {
+        redraw_view_image();
+        g_view_preview_version = g_doc.preview_version;
+    }
     update_selection_overlay();
     update_title();
     return api->app_yield();

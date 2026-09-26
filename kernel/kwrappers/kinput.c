@@ -1754,6 +1754,7 @@ void kinput_poll(void)
     uint8_t kbd_report[8];
     uint8_t mouse_report[16];
     uint32_t got = 0;
+    uint8_t i2c_keyboard_active = 0u;
 
     /* Snapshot last frame once, then rebuild current frame from all devices */
     keys_copy(g_keys_prev, g_keys_now);
@@ -1799,7 +1800,13 @@ void kinput_poll(void)
         }
     }
 
-    i2c1_hidi2c_poll();
+    for (uint32_t usage = 0u; usage < 256u; ++usage)
+        if (g_i2c_kbd_keys[usage])
+        {
+            i2c_keyboard_active = 1u;
+            break;
+        }
+    i2c1_hidi2c_poll(i2c_keyboard_active);
 
     kbd = i2c1_hidi2c_keyboard();
     tpd = i2c1_hidi2c_touchpad();

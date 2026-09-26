@@ -5124,6 +5124,7 @@ static int sacx_api_img_pixels(uint32_t image_handle, uint32_t **out_argb, uint3
 static int sacx_api_img_touch(uint32_t image_handle)
 {
     sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
+    uint8_t opaque = 1u;
     if (!slot || !slot->image.px)
         return -1;
 
@@ -5133,6 +5134,19 @@ static int sacx_api_img_touch(uint32_t image_handle)
     if (slot->image.w && slot->image.h)
         asm_dma_clean_range(slot->image.px,
                             (uint64_t)slot->image.w * (uint64_t)slot->image.h * 4ull);
+    /* Opacity is content metadata, so compute it when an app publishes new
+       pixels instead of rechecking/blending every pixel on every window
+       movement. Fully opaque retained images become a row-copy and can
+       occlude lower scene objects safely. */
+    for (uint64_t i = 0u;
+         i < (uint64_t)slot->image.w * (uint64_t)slot->image.h; ++i)
+    {
+        if ((slot->image.px[i] >> 24) != 255u)
+        {
+            opaque = 0u;
+            break;
+        }
+    }
     for (uint32_t i = 0u; i < SACX_MAX_TASK_GFX_OBJECTS; ++i)
     {
         kgfx_obj *obj = 0;
@@ -5140,7 +5154,11 @@ static int sacx_api_img_touch(uint32_t image_handle)
             continue;
         obj = kgfx_obj_ref(G_current_task->gfx_objects[i].handle);
         if (obj && obj->kind == KGFX_OBJ_IMAGE && obj->u.image.argb == slot->image.px)
+        {
             kgfx_image_touch(G_current_task->gfx_objects[i].handle);
+            kgfx_image_set_opaque_hint(G_current_task->gfx_objects[i].handle,
+                                       opaque);
+        }
     }
     return 0;
 }

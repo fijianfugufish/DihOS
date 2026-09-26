@@ -71,7 +71,7 @@ extern "C"
     int i2c1_bus_addr_only(uint8_t addr7);
 
     void i2c1_hidi2c_init(uint64_t rsdp_phys);
-    void i2c1_hidi2c_poll(void);
+    void i2c1_hidi2c_poll(uint8_t keyboard_active);
 
     const hidi2c_device *i2c1_hidi2c_keyboard(void);
     const hidi2c_device *i2c1_hidi2c_touchpad(void);

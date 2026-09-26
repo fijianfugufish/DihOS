@@ -59,6 +59,7 @@ static int texture_valid(const gpu_render_texture *texture)
 
     if (!texture || !texture->cpu_pixels || !texture->width || !texture->height ||
         !format_valid(texture->format) ||
+        texture->device_coherent > 1u ||
         (texture->sample_mode != GPU_RENDER_SAMPLE_NEAREST &&
          texture->sample_mode != GPU_RENDER_SAMPLE_BILINEAR))
         return 0;
@@ -111,6 +112,26 @@ static int submission_valid(const gpu_render_submission *submission)
     if (submission->pipeline == GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED &&
         submission->texture_count != 1u)
         return 0;
+    if ((submission->source_rect.width || submission->source_rect.height ||
+         submission->destination_rect.width || submission->destination_rect.height) &&
+        (!submission->source_rect.width || !submission->source_rect.height ||
+         !submission->destination_rect.width || !submission->destination_rect.height ||
+         submission->pipeline != GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED ||
+         submission->source_rect.x >= submission->textures[0].width ||
+         submission->source_rect.y >= submission->textures[0].height ||
+         submission->source_rect.width >
+             submission->textures[0].width - submission->source_rect.x ||
+         submission->source_rect.height >
+             submission->textures[0].height - submission->source_rect.y ||
+         submission->destination_rect.x >= submission->target.width ||
+         submission->destination_rect.y >= submission->target.height ||
+         submission->destination_rect.width >
+             submission->target.width - submission->destination_rect.x ||
+         submission->destination_rect.height >
+             submission->target.height - submission->destination_rect.y ||
+         submission->source_rect.width != submission->destination_rect.width ||
+         submission->source_rect.height != submission->destination_rect.height))
+        return 0;
     for (uint32_t i = 0u; i < submission->texture_count; ++i)
         if (!texture_valid(&submission->textures[i]))
             return 0;
@@ -127,8 +148,9 @@ void gpu_render_init(void)
     g_backend_registered = 0u;
 }
 
-int gpu_render_surface_create(const gpu_render_surface_desc *desc,
-                              gpu_render_surface_handle *out_surface)
+static int surface_create(const gpu_render_surface_desc *desc,
+                          gpu_render_surface_handle *out_surface,
+                          uint32_t storage_flags)
 {
     uint64_t stride;
     uint64_t bytes;
@@ -148,7 +170,8 @@ int gpu_render_surface_create(const gpu_render_surface_desc *desc,
         if (slot->active)
             continue;
         if (gpu_buffer_alloc(&slot->storage, bytes,
-                             GPU_BUFFER_DATA | GPU_BUFFER_ZEROED) != 0)
+                             GPU_BUFFER_DATA | GPU_BUFFER_ZEROED |
+                                 storage_flags) != 0)
             return -3;
         slot->generation = (uint16_t)(slot->generation + 1u);
         if (!slot->generation)
@@ -160,6 +183,18 @@ int gpu_render_surface_create(const gpu_render_surface_desc *desc,
         return 0;
     }
     return -4;
+}
+
+int gpu_render_surface_create(const gpu_render_surface_desc *desc,
+                              gpu_render_surface_handle *out_surface)
+{
+    return surface_create(desc, out_surface, 0u);
+}
+
+int gpu_render_surface_create_scanout(const gpu_render_surface_desc *desc,
+                                      gpu_render_surface_handle *out_surface)
+{
+    return surface_create(desc, out_surface, GPU_BUFFER_LOWDMA);
 }
 
 int gpu_render_surface_target(gpu_render_surface_handle surface,
@@ -277,7 +312,8 @@ int gpu_render_backend_surface_slot(uint32_t slot, gpu_buffer **out_buffer)
 int gpu_render_register_backend(const gpu_render_backend_ops *ops)
 {
     if (!ops || !ops->info.name || !ops->info.name[0] ||
-        ops->info.abi_version != GPU_RENDER_ABI_VERSION || !ops->submit ||
+        ops->info.abi_version != GPU_RENDER_ABI_VERSION ||
+        (!ops->submit && !ops->submit_batch) ||
         g_backend_registered)
         return -1;
     g_backend = *ops;
@@ -323,5 +359,39 @@ int gpu_render_submit(const gpu_render_submission *submission,
     if (!g_backend_registered ||
         (g_backend.info.capabilities & required) != required)
         return GPU_RENDER_DISPATCH_CPU_FALLBACK;
-    return g_backend.submit(submission, out_fence);
+    if (g_backend.submit)
+        return g_backend.submit(submission, out_fence);
+    return g_backend.submit_batch(submission, 1u, out_fence);
+}
+
+int gpu_render_submit_batch(const gpu_render_submission *submissions,
+                            uint32_t count, uint64_t *out_fence)
+{
+    uint32_t required = GPU_RENDER_CAP_COLOR_TARGET |
+                        GPU_RENDER_CAP_AUTO_TRIANGLES |
+                        GPU_RENDER_CAP_UNIFORM_VEC4 |
+                        GPU_RENDER_CAP_BATCHED_LAYERS;
+
+    if (out_fence)
+        *out_fence = 0u;
+    if (!submissions || !count || count > GPU_RENDER_MAX_BATCH_DRAWS)
+        return -1;
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        if (!submission_valid(&submissions[i]))
+            return -1;
+        if (submissions[i].pipeline == GPU_RENDER_PIPELINE_COMPOSITOR_TEXTURED)
+            required |= GPU_RENDER_CAP_TEXTURE_2D;
+        if (i && (submissions[i].target.cpu_pixels != submissions[0].target.cpu_pixels ||
+                  submissions[i].target.width != submissions[0].target.width ||
+                  submissions[i].target.height != submissions[0].target.height ||
+                  submissions[i].target.stride_bytes != submissions[0].target.stride_bytes ||
+                  submissions[i].target.surface.slot != submissions[0].target.surface.slot ||
+                  submissions[i].target.surface.generation != submissions[0].target.surface.generation))
+            return -1;
+    }
+    if (!g_backend_registered || !g_backend.submit_batch ||
+        (g_backend.info.capabilities & required) != required)
+        return GPU_RENDER_DISPATCH_CPU_FALLBACK;
+    return g_backend.submit_batch(submissions, count, out_fence);
 }

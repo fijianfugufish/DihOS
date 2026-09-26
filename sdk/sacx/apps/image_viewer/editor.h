@@ -125,6 +125,7 @@ typedef struct editor_document
     uint32_t scratch_stride;
     uint32_t render_layer;
     uint32_t render_row;
+    uint32_t preview_version;
     int32_t dirty_x0;
     int32_t dirty_y0;
     int32_t dirty_x1;

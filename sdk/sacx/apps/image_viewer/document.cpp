@@ -877,6 +877,9 @@ int document_render_step(uint32_t row_budget)
         {
             if (SACX_API_HAS(g_api, img_touch))
                 (void)g_api->img_touch(g_doc.preview);
+            ++g_doc.preview_version;
+            if (!g_doc.preview_version)
+                ++g_doc.preview_version;
             g_doc.render_pending = 0u;
             g_doc.dirty_bounds_valid = 0u;
             break;

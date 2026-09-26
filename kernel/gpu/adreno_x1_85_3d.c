@@ -794,7 +794,10 @@ int adreno_x1_85_3d_validate_draw(const adreno_x1_85_3d_draw *draw)
         draw->expand_safe_viewport > 1u ||
         ((draw->clip_width == 0u) != (draw->clip_height == 0u)) ||
         draw->clip_width > draw->target->width ||
-        draw->clip_height > draw->target->height)
+        draw->clip_height > draw->target->height ||
+        ((draw->viewport_width == 0u) != (draw->viewport_height == 0u)) ||
+        draw->viewport_x + draw->viewport_width > draw->target->width ||
+        draw->viewport_y + draw->viewport_height > draw->target->height)
         return -3;
     minimum_bytes = (uint64_t)draw->target->stride_bytes * draw->target->height;
     if (minimum_bytes < draw->target->stride_bytes ||
@@ -1005,42 +1008,45 @@ int adreno_x1_85_3d_emit_draw_state(gpu_command_ring *ring,
      * rules cover every outer pixel; mapping to the outer pixel centres left
      * a visible one-pixel frame. a6xx.xml order is XOFFSET, XSCALE, YOFFSET,
      * YSCALE. */
+    const uint32_t viewport_x = draw->viewport_width ? draw->viewport_x : 0u;
+    const uint32_t viewport_y = draw->viewport_height ? draw->viewport_y : 0u;
+    const uint32_t viewport_width = draw->viewport_width ?
+        draw->viewport_width : draw->target->width;
+    const uint32_t viewport_height = draw->viewport_height ?
+        draw->viewport_height : draw->target->height;
     const float viewport_xscale = draw->expand_safe_viewport ?
-        (float)draw->target->width * 0.76923076923f :
-        (float)draw->target->width * 0.5f;
+        (float)viewport_width * 0.76923076923f :
+        (float)viewport_width * 0.5f;
     const float viewport_yscale = draw->expand_safe_viewport ?
-        (float)draw->target->height * 0.76923076923f :
-        (float)draw->target->height * 0.5f;
-    REG(0x8010u, a7xx_float_bits((float)draw->target->width * 0.5f));
+        (float)viewport_height * 0.76923076923f :
+        (float)viewport_height * 0.5f;
+    REG(0x8010u, a7xx_float_bits((float)viewport_x + (float)viewport_width * 0.5f));
     REG(0x8011u, a7xx_float_bits(viewport_xscale));
-    REG(0x8012u, a7xx_float_bits((float)draw->target->height * 0.5f));
+    REG(0x8012u, a7xx_float_bits((float)viewport_y + (float)viewport_height * 0.5f));
     REG(0x8013u, a7xx_float_bits(viewport_yscale));
     REG(0x8014u, a7xx_float_bits(0.5f));
     REG(0x8015u, a7xx_float_bits(0.5f));
     REG(A7XX_GRAS_SC_SCREEN_SCISSOR, a7xx_pack_scissor(0u, 0u));
     REG(A7XX_GRAS_SC_SCREEN_SCISSOR + 1u,
         a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
-    REG(A7XX_GRAS_SC_VIEWPORT_SCISSOR, a7xx_pack_scissor(0u, 0u));
+    REG(A7XX_GRAS_SC_VIEWPORT_SCISSOR, a7xx_pack_scissor(viewport_x, viewport_y));
     REG(A7XX_GRAS_SC_VIEWPORT_SCISSOR + 1u,
-        a7xx_pack_scissor(draw->target->width - 1u, draw->target->height - 1u));
+        a7xx_pack_scissor(viewport_x + viewport_width - 1u,
+                          viewport_y + viewport_height - 1u));
     /* fd6_emit_sysmem_prep() calls set_scissor() for every direct-sysmem
      * pass.  Screen and viewport scissors do not replace this window clip:
      * leaving it inherited can retain a zero-area firmware scissor, which
      * lets CP/RB finish a draw while rasterizing zero fragments. */
-    REG(A7XX_GRAS_SC_WINDOW_SCISSOR, a7xx_pack_scissor(0u, 0u));
+    REG(A7XX_GRAS_SC_WINDOW_SCISSOR, a7xx_pack_scissor(viewport_x, viewport_y));
     REG(A7XX_GRAS_SC_WINDOW_SCISSOR + 1u,
-        a7xx_pack_scissor((draw->clip_width ? draw->clip_width :
-                           draw->target->width) - 1u,
-                          (draw->clip_height ? draw->clip_height :
-                           draw->target->height) - 1u));
+        a7xx_pack_scissor(viewport_x + viewport_width - 1u,
+                          viewport_y + viewport_height - 1u));
     /* Mesa's paired A7xx set_scissor() write.  It is inert for this 3D draw
      * but prevents inherited 2D/scissor state from disagreeing with GRAS. */
-    REG(A7XX_GRAS_A2D_SCISSOR, a7xx_pack_scissor(0u, 0u));
+    REG(A7XX_GRAS_A2D_SCISSOR, a7xx_pack_scissor(viewport_x, viewport_y));
     REG(A7XX_GRAS_A2D_SCISSOR + 1u,
-        a7xx_pack_scissor((draw->clip_width ? draw->clip_width :
-                           draw->target->width) - 1u,
-                          (draw->clip_height ? draw->clip_height :
-                           draw->target->height) - 1u));
+        a7xx_pack_scissor(viewport_x + viewport_width - 1u,
+                          viewport_y + viewport_height - 1u));
     /* Keep the first visible proof independent from the gl_VertexID
      * sideband path: Mesa reflects one vec2 position attribute and the
      * kernel supplies its fixed three-vertex buffer.  0xc6700000 is Mesa's

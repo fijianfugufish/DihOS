@@ -19,7 +19,9 @@ int gpu_buffer_alloc(gpu_buffer *out, uint64_t size_bytes, uint32_t flags)
         return -1;
 
     buffer.pages = (size_bytes + GPU_PAGE_SIZE - 1u) / GPU_PAGE_SIZE;
-    buffer.cpu = pmem_alloc_pages(buffer.pages);
+    buffer.cpu = (flags & GPU_BUFFER_LOWDMA)
+        ? pmem_alloc_pages_lowdma(buffer.pages)
+        : pmem_alloc_pages(buffer.pages);
     if (!buffer.cpu)
         return -2;
 

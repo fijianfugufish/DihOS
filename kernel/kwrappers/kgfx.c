@@ -236,6 +236,14 @@ const kfb *kgfx_info(void) { return &FB; }
 #define KGFX_PARALLEL_MAX_JOBS 8u
 #endif
 
+/* kwork currently has no blocking completion event or safe cancellation for
+ * a job whose context lives on the caller's stack. Never make presentation
+ * progress depend on it until that contract exists. The implementation stays
+ * here for controlled re-enablement after the work queue is hardened. */
+#ifndef KGFX_PARALLEL_BLIT
+#define KGFX_PARALLEL_BLIT 0
+#endif
+
 #define KGFX_DIRTY_TILE_MAX_COLS 64u
 #define KGFX_DIRTY_TILE_MAX_ROWS 64u
 #define KGFX_DIRTY_TILE_MAX_COUNT (KGFX_DIRTY_TILE_MAX_COLS * KGFX_DIRTY_TILE_MAX_ROWS)
@@ -267,7 +275,7 @@ static uint16_t g_obj_count = 0;
 static uint8_t g_obj_used[KGFX_MAX_OBJS];
 static uint16_t g_obj_generation[KGFX_MAX_OBJS];
 
-typedef struct
+typedef struct __attribute__((aligned(64)))
 {
     int32_t x0, y0, x1, y1;
     uint8_t enabled;
@@ -303,9 +311,16 @@ typedef struct
 
 /* backbuffer (you already have these) */
 static uint8_t *BB_ptr = NULL;
-static gpu_render_surface_handle g_gpu_backbuffer_surface;
+static gpu_render_surface_handle g_gpu_backbuffer_surfaces[2];
+static gpu_render_target g_gpu_backbuffer_targets[2];
+static uint8_t g_gpu_backbuffer_index;
 static uint8_t g_gpu_present_enabled;
 static uint8_t g_gpu_frame_dirty;
+static gpu_render_rect g_gpu_frame_damage;
+static uint8_t g_gpu_base_dirty;
+static gpu_render_rect g_gpu_base_damage;
+static uint64_t g_rendered_frame_count;
+static uint64_t g_last_render_us;
 static uint32_t BB_stride = 0;
 static uint64_t BB_bytes = 0;
 static kgfx_clip_rect g_bb_clip = {0, 0, 0, 0, 0};
@@ -314,18 +329,35 @@ static uint32_t G_argb_target_w = 0u;
 static uint32_t G_argb_target_h = 0u;
 static uint32_t G_argb_target_stride = 0u;
 
+static uint8_t g_have_prev_frame = 0;
+
+static uint64_t kgfx_counter_now(void)
+{
+    uint64_t value;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+}
+
+static uint64_t kgfx_counter_frequency(void)
+{
+    uint64_t value;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(value));
+    return value;
+}
+
 typedef struct
 {
     uint8_t in_use;
     uint8_t renderable;
+    uint8_t flat_rect;
     kgfx_clip_rect bounds;
     uint64_t visual_hash;
+    uint64_t appearance_hash;
 } kgfx_obj_snapshot;
 
 static kgfx_obj_snapshot g_prev_snapshot[KGFX_MAX_OBJS];
 static uint16_t g_prev_snapshot_count = 0;
 static kcolor g_prev_clear_color = {0, 0, 0};
-static uint8_t g_have_prev_frame = 0;
 
 typedef struct
 {
@@ -345,11 +377,59 @@ typedef struct
     uint64_t pages;
 } kgfx_image_cache;
 
+typedef struct
+{
+    uint8_t valid;
+    uint8_t alloc_failed;
+    uint64_t key;
+    int32_t local_x;
+    int32_t local_y;
+    uint32_t width;
+    uint32_t height;
+    uint32_t *pixels;
+    uint64_t pages;
+} kgfx_text_cache;
+
 static kgfx_image_cache g_image_cache[KGFX_MAX_OBJS];
+static kgfx_text_cache g_text_cache[KGFX_MAX_OBJS];
 static kgfx_resolved_obj g_render_resolved[KGFX_MAX_OBJS];
 static kgfx_render_entry g_render_entries[KGFX_MAX_OBJS];
 static kgfx_render_entry g_render_sort_tmp[KGFX_MAX_OBJS];
 static kgfx_obj_snapshot g_render_current[KGFX_MAX_OBJS];
+static uint8_t g_dirty_rendered[KGFX_DIRTY_TILE_MAX_COUNT];
+
+typedef struct
+{
+    kgfx_obj_handle root;
+    gpu_render_surface_handle surface;
+    gpu_render_target target;
+    gpu_render_texture texture;
+    gpu_render_rect destination;
+    uint32_t source_x;
+    uint32_t source_y;
+    uint64_t content_hash;
+    int32_t z;
+    uint16_t root_idx;
+    uint8_t used;
+    uint8_t compositable;
+} kgfx_window_layer_state;
+
+static kgfx_window_layer_state g_window_layers[KGFX_MAX_COMPOSITION_LAYERS];
+static kgfx_obj_handle g_window_layer_roots[KGFX_MAX_COMPOSITION_LAYERS];
+static uint32_t g_window_layer_root_count;
+static uint8_t g_window_layer_updates_allowed;
+static uint8_t g_window_layers_enabled;
+static uint8_t g_render_filter_mode; /* 0=all, 1=desktop, 2=one root */
+static uint16_t g_render_filter_root;
+static kgfx_obj_handle g_gpu_foreground_roots[KGFX_MAX_GPU_FOREGROUND_ROOTS];
+static uint32_t g_gpu_foreground_root_count;
+static kgfx_obj_handle g_gpu_overlay_object = {-1, 0u};
+static gpu_render_rect g_gpu_overlay_previous_bounds;
+static uint8_t g_gpu_overlay_previous_visible;
+static kgfx_resolved_obj g_layer_resolved[KGFX_MAX_OBJS];
+static kgfx_render_entry g_layer_entries[KGFX_MAX_OBJS];
+static kgfx_obj_snapshot g_layer_current[KGFX_MAX_OBJS];
+static uint16_t g_render_entry_count;
 
 static int kgfx_image_cache_key_matches(const kgfx_image_cache *cache,
                                         const uint32_t *argb,
@@ -412,6 +492,24 @@ static void kgfx_image_cache_invalidate_all(void)
 {
     for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
         kgfx_image_cache_invalidate(i);
+}
+
+static void kgfx_text_cache_invalidate(uint16_t idx)
+{
+    kgfx_text_cache *cache;
+
+    if (idx >= KGFX_MAX_OBJS)
+        return;
+    cache = &g_text_cache[idx];
+    if (cache->pixels && cache->pages)
+        pmem_free_pages(cache->pixels, cache->pages);
+    g_text_cache[idx] = (kgfx_text_cache){0};
+}
+
+static void kgfx_text_cache_invalidate_all(void)
+{
+    for (uint16_t i = 0u; i < KGFX_MAX_OBJS; ++i)
+        kgfx_text_cache_invalidate(i);
 }
 
 static int kgfx_alloc_slot(uint16_t *out_idx)
@@ -608,6 +706,7 @@ kgfx_obj_handle kgfx_obj_add_image(const uint32_t *argb,
     o->u.image.stride_px = stride_px;
     o->u.image.content_version = 1u;
     o->u.image.sample_mode = KGFX_IMAGE_SAMPLE_NEAREST;
+    o->u.image.opaque_hint = 0u;
 
     handle.idx = (int)idx;
     handle.generation = g_obj_generation[idx];
@@ -1418,6 +1517,7 @@ static uint64_t obj_visual_hash(const kgfx_obj *o, const kgfx_resolved_obj *r)
         hash_mix_u32(&h, o->u.image.stride_px);
         hash_mix_u32(&h, o->u.image.content_version);
         hash_mix_u8(&h, o->u.image.sample_mode);
+        hash_mix_u8(&h, o->u.image.opaque_hint);
         break;
     default:
         break;
@@ -1433,7 +1533,9 @@ static int snapshot_build(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_ob
 
     snap->in_use = 1;
     snap->renderable = 0;
+    snap->flat_rect = 0;
     snap->visual_hash = 0;
+    snap->appearance_hash = 0;
     snap->bounds = (kgfx_clip_rect){0, 0, 0, 0, 0};
 
     if (!o || !r)
@@ -1444,7 +1546,50 @@ static int snapshot_build(const kgfx_obj *o, const kgfx_resolved_obj *r, kgfx_ob
 
     snap->renderable = 1;
     snap->visual_hash = obj_visual_hash(o, r);
+    if (o->kind == KGFX_OBJ_RECT && !o->outline_width && !obj_rotation_active(o))
+    {
+        uint64_t h = 1469598103934665603ull;
+        snap->flat_rect = 1u;
+        hash_mix_i32(&h, r->z);
+        hash_mix_i32(&h, r->root_z);
+        hash_mix_u16(&h, r->root_idx);
+        hash_mix_u8(&h, o->fill.r);
+        hash_mix_u8(&h, o->fill.g);
+        hash_mix_u8(&h, o->fill.b);
+        hash_mix_u8(&h, o->alpha);
+        snap->appearance_hash = h;
+    }
     return 1;
+}
+
+static void dirty_tiles_mark_rect_difference(kgfx_dirty_tiles *dirty,
+                                             const kgfx_clip_rect *a,
+                                             const kgfx_clip_rect *b)
+{
+    kgfx_clip_rect inter;
+    kgfx_clip_rect pieces[4];
+
+    if (!a || !a->enabled)
+        return;
+    if (!b || !b->enabled)
+    {
+        dirty_tiles_mark_rect(dirty, a);
+        return;
+    }
+    inter = *a;
+    if (!clip_intersect(&inter, b))
+    {
+        dirty_tiles_mark_rect(dirty, a);
+        return;
+    }
+
+    pieces[0] = (kgfx_clip_rect){a->x0, a->y0, a->x1, inter.y0, 1};
+    pieces[1] = (kgfx_clip_rect){a->x0, inter.y1, a->x1, a->y1, 1};
+    pieces[2] = (kgfx_clip_rect){a->x0, inter.y0, inter.x0, inter.y1, 1};
+    pieces[3] = (kgfx_clip_rect){inter.x1, inter.y0, a->x1, inter.y1, 1};
+    for (uint32_t i = 0u; i < 4u; ++i)
+        if (pieces[i].x0 < pieces[i].x1 && pieces[i].y0 < pieces[i].y1)
+            dirty_tiles_mark_rect(dirty, &pieces[i]);
 }
 
 static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgfx_obj_snapshot *curr, kgfx_dirty_tiles *dirty)
@@ -1483,6 +1628,13 @@ static int dirty_compare_and_accumulate(const kgfx_obj_snapshot *prev, const kgf
 
     if (prev->visual_hash != curr->visual_hash || !clip_equal(&prev->bounds, &curr->bounds))
     {
+        if (prev->flat_rect && curr->flat_rect &&
+            prev->appearance_hash == curr->appearance_hash)
+        {
+            dirty_tiles_mark_rect_difference(dirty, &prev->bounds, &curr->bounds);
+            dirty_tiles_mark_rect_difference(dirty, &curr->bounds, &prev->bounds);
+            return 1;
+        }
         dirty_tiles_mark_rect(dirty, &prev->bounds);
         dirty_tiles_mark_rect(dirty, &curr->bounds);
         return 1;
@@ -1503,11 +1655,97 @@ static void bb_clear_region(const kgfx_clip_rect *clip, kcolor c)
                  c, 255);
 }
 
+static void gpu_damage_add(gpu_render_rect *damage, uint8_t *dirty,
+                           gpu_render_rect rect)
+{
+    uint32_t x1;
+    uint32_t y1;
+    uint32_t old_x1;
+    uint32_t old_y1;
+
+    if (!damage || !dirty || !rect.width || !rect.height ||
+        rect.x >= FB.width || rect.y >= FB.height)
+        return;
+    if (rect.width > FB.width - rect.x)
+        rect.width = FB.width - rect.x;
+    if (rect.height > FB.height - rect.y)
+        rect.height = FB.height - rect.y;
+    if (!*dirty)
+    {
+        *damage = rect;
+        *dirty = 1u;
+        return;
+    }
+    x1 = rect.x + rect.width;
+    y1 = rect.y + rect.height;
+    old_x1 = damage->x + damage->width;
+    old_y1 = damage->y + damage->height;
+    if (rect.x > damage->x)
+        rect.x = damage->x;
+    if (rect.y > damage->y)
+        rect.y = damage->y;
+    if (x1 < old_x1)
+        x1 = old_x1;
+    if (y1 < old_y1)
+        y1 = old_y1;
+    *damage = (gpu_render_rect){rect.x, rect.y, x1 - rect.x, y1 - rect.y};
+}
+
+static void gpu_composition_damage_add(gpu_render_rect rect)
+{
+    const uint32_t cleanup_pad = 2u;
+
+    if (!g_gpu_present_enabled)
+        return;
+    /* Composition primitives use an inclusive hardware scissor and raster
+     * top-left rules.  Retire a tiny guard band around moved layers so the
+     * old bottom/right outline cannot survive a boundary-rounding pixel. */
+    if (rect.x > cleanup_pad)
+    {
+        rect.x -= cleanup_pad;
+        rect.width += cleanup_pad;
+    }
+    else
+    {
+        rect.width += rect.x;
+        rect.x = 0u;
+    }
+    if (rect.y > cleanup_pad)
+    {
+        rect.y -= cleanup_pad;
+        rect.height += cleanup_pad;
+    }
+    else
+    {
+        rect.height += rect.y;
+        rect.y = 0u;
+    }
+    if (rect.x < FB.width && rect.width < FB.width - rect.x)
+    {
+        uint32_t room = FB.width - rect.x - rect.width;
+        rect.width += room < cleanup_pad ? room : cleanup_pad;
+    }
+    if (rect.y < FB.height && rect.height < FB.height - rect.y)
+    {
+        uint32_t room = FB.height - rect.y - rect.height;
+        rect.height += room < cleanup_pad ? room : cleanup_pad;
+    }
+    gpu_damage_add(&g_gpu_frame_damage, &g_gpu_frame_dirty, rect);
+}
+
+static void gpu_base_damage_add(gpu_render_rect rect)
+{
+    if (!g_gpu_present_enabled)
+        return;
+    gpu_damage_add(&g_gpu_frame_damage, &g_gpu_frame_dirty, rect);
+    gpu_damage_add(&g_gpu_base_damage, &g_gpu_base_dirty, rect);
+}
+
 static void present_full(void)
 {
     if (g_gpu_present_enabled)
     {
-        g_gpu_frame_dirty = 1u;
+        gpu_base_damage_add((gpu_render_rect){0u, 0u, FB.width, FB.height});
         return;
     }
     uint32_t row_bytes = FB.pitch;
@@ -1553,7 +1791,12 @@ static uint8_t present_region_raw(const kgfx_clip_rect *clip)
     if (g_gpu_present_enabled)
     {
         if (clip && clip->enabled)
-            g_gpu_frame_dirty = 1u;
+        {
+            gpu_base_damage_add((gpu_render_rect){
+                (uint32_t)clip->x0, (uint32_t)clip->y0,
+                (uint32_t)(clip->x1 - clip->x0),
+                (uint32_t)(clip->y1 - clip->y0)});
+        }
         return 0u;
     }
     if (!clip || !clip->enabled)
@@ -1915,6 +2158,155 @@ static uint32_t bb_blit_argb32_opaque_neon(uint32_t *drow, const uint32_t *srow,
 }
 #endif
 
+typedef struct
+{
+    const uint8_t *src;
+    uint8_t *dst;
+    uint32_t src_stride_bytes;
+    uint32_t dst_stride_bytes;
+    uint32_t copy_w;
+    uint32_t y0;
+    uint32_t y1;
+    uint8_t global_alpha;
+    uint8_t opaque_source;
+} kgfx_blit_job_ctx;
+
+static void kgfx_blit_rows(kgfx_blit_job_ctx *ctx)
+{
+    if (!ctx || !ctx->src || !ctx->dst || !ctx->copy_w || ctx->y0 >= ctx->y1)
+        return;
+
+    for (uint32_t iy = ctx->y0; iy < ctx->y1; ++iy)
+    {
+        const uint8_t *src8 = ctx->src + (uint64_t)iy * ctx->src_stride_bytes;
+        uint8_t *dst8 = ctx->dst + (uint64_t)iy * ctx->dst_stride_bytes;
+
+        if (ctx->opaque_source)
+        {
+            kmemcpy64(dst8, src8, ctx->copy_w * 4u);
+            continue;
+        }
+
+        {
+            const uint32_t *srow = (const uint32_t *)src8;
+            uint32_t *drow = (uint32_t *)dst8;
+            uint32_t ix = 0u;
+#if KGFX_USE_AA64_NEON
+            if (ctx->global_alpha == 255u)
+                ix = bb_blit_argb32_opaque_neon(drow, srow, ctx->copy_w);
+#endif
+            for (; ix < ctx->copy_w; ++ix)
+                bb_blit_argb32_pixel(drow + ix, srow[ix], ctx->global_alpha);
+        }
+    }
+    asm_dma_clean_range(ctx->dst + (uint64_t)ctx->y0 * ctx->dst_stride_bytes,
+                        (uint64_t)(ctx->y1 - ctx->y0 - 1u) *
+                            ctx->dst_stride_bytes +
+                            (uint64_t)ctx->copy_w * 4u);
+}
+
+static void kgfx_blit_job_worker(void *arg)
+{
+    kgfx_blit_job_ctx *ctx = (kgfx_blit_job_ctx *)arg;
+    asm_dma_invalidate_range(ctx, sizeof(*ctx));
+    kgfx_blit_rows(ctx);
+}
+
+/* A large retained image is the common case while moving Image Editor,
+ * Terminal visual mode, and screenshot overlays.  Rows are independent, so
+ * use the SMP work queue while preserving strict object/z ordering by joining
+ * before the caller advances to the next scene object. */
+static void kgfx_blit_rows_parallel(const uint8_t *src, uint32_t src_stride_bytes,
+                                    uint8_t *dst, uint32_t dst_stride_bytes,
+                                    uint32_t copy_w, uint32_t copy_h,
+                                    uint8_t global_alpha, uint8_t opaque_source)
+{
+    smp_snapshot smp;
+    kgfx_blit_job_ctx ctxs[KGFX_PARALLEL_MAX_JOBS];
+    uint32_t jobs[KGFX_PARALLEL_MAX_JOBS] = {0};
+    uint32_t worker_jobs;
+    uint32_t main_rows;
+
+    smp_get_snapshot(&smp);
+    /* Keep the two large boot-time redraws deterministic. They happen while
+     * the desktop and input stacks are still being constructed and provide
+     * no interactive latency benefit from fan-out. */
+    if (!KGFX_PARALLEL_BLIT || !smp.worker_count ||
+        g_rendered_frame_count < 2u ||
+        (uint64_t)copy_w * copy_h < KGFX_PARALLEL_MIN_PIXELS)
+    {
+        ctxs[0] = (kgfx_blit_job_ctx){src, dst, src_stride_bytes, dst_stride_bytes,
+                                      copy_w, 0u, copy_h, global_alpha, opaque_source};
+        kgfx_blit_rows(&ctxs[0]);
+        return;
+    }
+
+    worker_jobs = smp.worker_count;
+    if (worker_jobs > KGFX_PARALLEL_MAX_JOBS - 1u)
+        worker_jobs = KGFX_PARALLEL_MAX_JOBS - 1u;
+    if (worker_jobs > copy_h / 32u)
+        worker_jobs = copy_h / 32u;
+    if (!worker_jobs)
+        worker_jobs = 1u;
+    main_rows = (copy_h + worker_jobs) / (worker_jobs + 1u);
+    if (main_rows < 8u)
+        main_rows = 8u;
+    if (main_rows > copy_h)
+        main_rows = copy_h;
+
+    ctxs[0] = (kgfx_blit_job_ctx){src, dst, src_stride_bytes, dst_stride_bytes,
+                                  copy_w, 0u, main_rows, global_alpha, opaque_source};
+    for (uint32_t i = 0u; i < worker_jobs; ++i)
+    {
+        uint32_t y0 = main_rows +
+            (uint32_t)(((uint64_t)(copy_h - main_rows) * i) / worker_jobs);
+        uint32_t y1 = main_rows +
+            (uint32_t)(((uint64_t)(copy_h - main_rows) * (i + 1u)) / worker_jobs);
+        ctxs[i + 1u] = (kgfx_blit_job_ctx){src, dst, src_stride_bytes, dst_stride_bytes,
+                                           copy_w, y0, y1, global_alpha, opaque_source};
+        if (y1 <= y0)
+            continue;
+        asm_dma_clean_range(&ctxs[i + 1u], sizeof(ctxs[i + 1u]));
+        if (kwork_submit(kgfx_blit_job_worker, &ctxs[i + 1u],
+                         KWORK_SUBMIT_REQUIRE_REMOTE | KWORK_SUBMIT_QUIET,
+                         &jobs[i]) != 0)
+        {
+            jobs[i] = 0u;
+            kgfx_blit_rows(&ctxs[i + 1u]);
+        }
+    }
+    kgfx_blit_rows(&ctxs[0]);
+
+    for (uint32_t polls = 0u;; ++polls)
+    {
+        uint32_t pending = 0u;
+        for (uint32_t i = 0u; i < worker_jobs; ++i)
+        {
+            uint32_t status = jobs[i] ? kwork_status(jobs[i]) : KWORK_STATUS_DONE;
+            if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+                ++pending;
+        }
+        if (!pending)
+            break;
+        /* kwork_status() invalidates the complete shared queue. Polling it
+         * continuously can monopolize the cache fabric while remote cores
+         * are cleaning multi-megabyte outputs. Give workers a meaningful
+         * execution window and only re-send SEV occasionally. */
+        if ((polls & 63u) == 0u)
+            smp_signal_workers();
+        for (uint32_t spin = 0u; spin < 2048u; ++spin)
+            asm_relax();
+    }
+    for (uint32_t i = 0u; i < worker_jobs; ++i)
+    {
+        uint32_t status = jobs[i] ? kwork_status(jobs[i]) : KWORK_STATUS_DONE;
+        if (jobs[i] && status != KWORK_STATUS_DONE)
+            kgfx_blit_rows(&ctxs[i + 1u]);
+    }
+    asm_dma_invalidate_range(dst, (uint64_t)(copy_h - 1u) * dst_stride_bytes +
+                                  (uint64_t)copy_w * 4u);
+}
+
 static void bb_blit_argb32_clip(int32_t x, int32_t y,
                                 uint32_t w, uint32_t h,
                                 const uint32_t *src_argb, uint32_t src_stride_px,
@@ -1963,23 +2355,11 @@ static void bb_blit_argb32_clip(int32_t x, int32_t y,
     uint32_t sx0 = (uint32_t)(cx0 - x0);
     uint32_t sy0 = (uint32_t)(cy0 - y0);
 
-    for (uint32_t iy = 0; iy < copy_h; ++iy)
-    {
-        const uint32_t *srow = src_argb + (uint64_t)(sy0 + iy) * src_stride_px + sx0;
-        uint8_t *drow8 = BB_ptr + (uint32_t)(cy0 + (int32_t)iy) * BB_stride + (uint32_t)cx0 * 4u;
-        uint32_t *drow = (uint32_t *)drow8;
-        uint32_t ix = 0;
-
-#if KGFX_USE_AA64_NEON
-        if (global_alpha == 255)
-            ix = bb_blit_argb32_opaque_neon(drow, srow, copy_w);
-#endif
-
-        for (; ix < copy_w; ++ix)
-        {
-            bb_blit_argb32_pixel(drow + ix, srow[ix], global_alpha);
-        }
-    }
+    kgfx_blit_rows_parallel(
+        (const uint8_t *)(src_argb + (uint64_t)sy0 * src_stride_px + sx0),
+        src_stride_px * 4u,
+        BB_ptr + (uint32_t)cy0 * BB_stride + (uint32_t)cx0 * 4u,
+        BB_stride, copy_w, copy_h, global_alpha, 0u);
 }
 
 static void bb_blit_argb32_opaque_source_clip(int32_t x, int32_t y,
@@ -2030,12 +2410,12 @@ static void bb_blit_argb32_opaque_source_clip(int32_t x, int32_t y,
     uint32_t sy0 = (uint32_t)(cy0 - y0);
     uint32_t copy_bytes = copy_w * 4u;
 
-    for (uint32_t iy = 0; iy < copy_h; ++iy)
-    {
-        const void *src = (const void *)(src_argb + (uint64_t)(sy0 + iy) * src_stride_px + sx0);
-        void *dst = (void *)(BB_ptr + (uint32_t)(cy0 + (int32_t)iy) * BB_stride + (uint32_t)cx0 * 4u);
-        kmemcpy64(dst, src, copy_bytes);
-    }
+    (void)copy_bytes;
+    kgfx_blit_rows_parallel(
+        (const uint8_t *)(src_argb + (uint64_t)sy0 * src_stride_px + sx0),
+        src_stride_px * 4u,
+        BB_ptr + (uint32_t)cy0 * BB_stride + (uint32_t)cx0 * 4u,
+        BB_stride, copy_w, copy_h, 255u, 1u);
 }
 
 static inline uint8_t lerp_u8(uint8_t a, uint8_t b, uint32_t t256)
@@ -2193,7 +2573,13 @@ static uint8_t kgfx_scale_rows_parallel(const uint32_t *src_argb,
     uint8_t opaque = 1u;
 
     smp_get_snapshot(&smp);
-    if (!smp.worker_count || (uint64_t)dst_w * dst_h < KGFX_PARALLEL_MIN_PIXELS)
+    /* The work queue cannot currently cancel or safely join jobs whose
+     * contexts live on this stack.  Keep scaled-cache construction on the
+     * caller for the same reason as ordinary image blits: a delayed worker
+     * during the boot wallpaper render can otherwise hold the kernel before
+     * it ever reaches the desktop loop (or race the fallback copy). */
+    if (!KGFX_PARALLEL_BLIT || !smp.worker_count ||
+        (uint64_t)dst_w * dst_h < KGFX_PARALLEL_MIN_PIXELS)
     {
         ctxs[0] = (kgfx_scale_job_ctx){src_argb, src_w, src_h, src_stride_px,
                                        dst_argb, dst_w, dst_h, step_x, step_y,
@@ -2979,6 +3365,97 @@ static void sort_render_entries(kgfx_render_entry *entries, uint16_t n,
     }
 }
 
+static uint64_t kgfx_text_cache_key(const kgfx_obj *o)
+{
+    const kgfx_text_data *t;
+    uint64_t h = 1469598103934665603ull;
+
+    if (!o || o->kind != KGFX_OBJ_TEXT)
+        return 0u;
+    t = &o->u.text;
+    hash_mix_u64(&h, (uint64_t)(uintptr_t)t->font);
+    hash_mix_u64(&h, (uint64_t)(uintptr_t)t->text);
+    hash_mix_u64(&h, hash_cstr(t->text));
+    hash_mix_u32(&h, t->scale);
+    hash_mix_i32(&h, t->char_spacing);
+    hash_mix_i32(&h, t->line_spacing);
+    hash_mix_u32(&h, (uint32_t)t->align);
+    hash_mix_u8(&h, o->fill.r);
+    hash_mix_u8(&h, o->fill.g);
+    hash_mix_u8(&h, o->fill.b);
+    hash_mix_u8(&h, o->alpha);
+    hash_mix_u16(&h, o->outline_width);
+    hash_mix_u8(&h, o->outline.r);
+    hash_mix_u8(&h, o->outline.g);
+    hash_mix_u8(&h, o->outline.b);
+    hash_mix_u8(&h, o->outline_alpha);
+    return h;
+}
+
+static kgfx_text_cache *kgfx_text_cache_ensure(uint16_t idx,
+                                                const kgfx_obj *o)
+{
+    const kgfx_text_data *t;
+    kgfx_text_cache *cache;
+    uint64_t key;
+    int32_t x0, y0, x1, y1;
+    uint64_t bytes;
+    uint64_t pages;
+
+    if (idx >= KGFX_MAX_OBJS || !o || o->kind != KGFX_OBJ_TEXT ||
+        obj_rotation_active(o))
+        return 0;
+    t = &o->u.text;
+    if (!text_world_bounds(t, o->outline_width, &x0, &y0, &x1, &y1))
+        return 0;
+    key = kgfx_text_cache_key(o);
+    cache = &g_text_cache[idx];
+    if (cache->valid && cache->key == key)
+        return cache;
+    if (cache->alloc_failed && cache->key == key)
+        return 0;
+
+    kgfx_text_cache_invalidate(idx);
+    cache = &g_text_cache[idx];
+    cache->key = key;
+    cache->local_x = x0 - t->x;
+    cache->local_y = y0 - t->y;
+    cache->width = (uint32_t)(x1 - x0);
+    cache->height = (uint32_t)(y1 - y0);
+    bytes = (uint64_t)cache->width * cache->height * 4ull;
+    if (!bytes || bytes > 8ull * 1024ull * 1024ull)
+    {
+        cache->alloc_failed = 1u;
+        return 0;
+    }
+    pages = (bytes + 4095ull) >> 12;
+    cache->pixels = (uint32_t *)pmem_alloc_pages(pages);
+    if (!cache->pixels)
+    {
+        cache->alloc_failed = 1u;
+        return 0;
+    }
+    cache->pages = pages;
+    for (uint64_t i = 0u; i < (uint64_t)cache->width * cache->height; ++i)
+        cache->pixels[i] = 0u;
+    if (kgfx_target_argb_begin(cache->pixels, cache->width, cache->height,
+                               cache->width) != 0)
+    {
+        kgfx_text_cache_invalidate(idx);
+        return 0;
+    }
+    ktext_draw_str_align_outline(t->font,
+                                 t->x - x0, t->y - y0, t->text,
+                                 o->fill, o->alpha, t->scale,
+                                 t->char_spacing, t->line_spacing, t->align,
+                                 o->outline_width, o->outline,
+                                 o->outline_alpha);
+    kgfx_target_argb_end();
+    asm_dma_clean_range(cache->pixels, bytes);
+    cache->valid = 1u;
+    return cache;
+}
+
 int kgfx_obj_destroy(kgfx_obj_handle h)
 {
     if (h.idx < 0 || (uint16_t)h.idx >= g_obj_count)
@@ -2990,6 +3467,7 @@ int kgfx_obj_destroy(kgfx_obj_handle h)
 
     uint16_t idx = (uint16_t)h.idx;
     kgfx_image_cache_invalidate(idx);
+    kgfx_text_cache_invalidate(idx);
     g_obj_used[idx] = 0u;
 
     for (uint16_t i = 0; i < g_obj_count; ++i)
@@ -3056,15 +3534,26 @@ static void kgfx_draw_entry_obj(uint16_t obj_idx, const kgfx_obj *o, const kgfx_
         }
         else if (t->font && t->text && t->scale)
         {
-            ktext_draw_str_align_outline(
-                t->font,
-                r->origin_x, r->origin_y,
-                t->text,
-                o->fill, o->alpha,
-                t->scale,
-                t->char_spacing, t->line_spacing,
-                t->align,
-                o->outline_width, o->outline, o->outline_alpha);
+            kgfx_text_cache *cache = kgfx_text_cache_ensure(obj_idx, o);
+            if (cache && cache->valid && cache->pixels)
+            {
+                bb_blit_argb32_clip(r->origin_x + cache->local_x,
+                                     r->origin_y + cache->local_y,
+                                     cache->width, cache->height,
+                                     cache->pixels, cache->width, 255u);
+            }
+            else
+            {
+                ktext_draw_str_align_outline(
+                    t->font,
+                    r->origin_x, r->origin_y,
+                    t->text,
+                    o->fill, o->alpha,
+                    t->scale,
+                    t->char_spacing, t->line_spacing,
+                    t->align,
+                    o->outline_width, o->outline, o->outline_alpha);
+            }
         }
         break;
     }
@@ -3090,9 +3579,14 @@ static void kgfx_draw_entry_obj(uint16_t obj_idx, const kgfx_obj *o, const kgfx_
         {
             if (im->src_w == im->w && im->src_h == im->h)
             {
-                bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
-                                    im->argb, im->stride_px,
-                                    o->alpha);
+                if (im->opaque_hint && o->alpha == 255u)
+                    bb_blit_argb32_opaque_source_clip(r->origin_x, r->origin_y,
+                                                      im->w, im->h,
+                                                      im->argb, im->stride_px);
+                else
+                    bb_blit_argb32_clip(r->origin_x, r->origin_y, im->w, im->h,
+                                        im->argb, im->stride_px,
+                                        o->alpha);
             }
             else
             {
@@ -3225,7 +3719,8 @@ static int kgfx_opaque_occluder_bounds(uint16_t idx,
     }
     else if (o->kind == KGFX_OBJ_IMAGE)
     {
-        if (!o->u.image.w || !o->u.image.h || !kgfx_image_cache_is_opaque_for_obj(idx, o))
+        if (!o->u.image.w || !o->u.image.h ||
+            (!o->u.image.opaque_hint && !kgfx_image_cache_is_opaque_for_obj(idx, o)))
             return 0;
     }
     else
@@ -3240,6 +3735,40 @@ static int kgfx_opaque_occluder_bounds(uint16_t idx,
     if (!clip_intersect(out, &screen))
         return 0;
     return clip_valid(out);
+}
+
+static int kgfx_root_has_compositable_layer(uint16_t root_idx)
+{
+    if (!g_window_layers_enabled)
+        return 0;
+    for (uint32_t i = 0u; i < KGFX_MAX_COMPOSITION_LAYERS; ++i)
+        if (g_window_layers[i].used && g_window_layers[i].compositable &&
+            g_window_layers[i].root_idx == root_idx)
+            return 1;
+    return 0;
+}
+
+static int kgfx_root_is_gpu_foreground(uint16_t root_idx)
+{
+    if (!g_window_layers_enabled)
+        return 0;
+    for (uint32_t i = 0u; i < g_gpu_foreground_root_count; ++i)
+        if (g_gpu_foreground_roots[i].idx >= 0 &&
+            (uint16_t)g_gpu_foreground_roots[i].idx == root_idx)
+            return 1;
+    return 0;
+}
+
+static int kgfx_entry_selected(uint16_t root_idx)
+{
+    if (g_render_filter_mode == 2u)
+        return root_idx == g_render_filter_root;
+    if (g_render_filter_mode == 1u)
+        return !kgfx_root_has_compositable_layer(root_idx) &&
+               !kgfx_root_is_gpu_foreground(root_idx) &&
+               (!g_window_layers_enabled || g_gpu_overlay_object.idx < 0 ||
+                root_idx != (uint16_t)g_gpu_overlay_object.idx);
+    return 1;
 }
 
 static int render_entry_region_fully_occluded(const kgfx_render_entry *entries,
@@ -3265,6 +3794,8 @@ static int render_entry_region_fully_occluded(const kgfx_render_entry *entries,
         uint16_t next_count = 0u;
 
         if (upper_idx >= KGFX_MAX_OBJS || !current[upper_idx].renderable)
+            continue;
+        if (!kgfx_entry_selected(resolved[upper_idx].root_idx))
             continue;
         if (!kgfx_opaque_occluder_bounds(upper_idx, resolved, &cover))
             continue;
@@ -3309,6 +3840,9 @@ static void render_entries_in_region(const kgfx_render_entry *entries,
         const kgfx_obj *o = &g_objs[idx];
         const kgfx_resolved_obj *r = &resolved[idx];
 
+        if (!kgfx_entry_selected(r->root_idx))
+            continue;
+
         draw_region = current[idx].bounds;
         if (!clip_intersect(&draw_region, region))
             continue;
@@ -3332,6 +3866,493 @@ static void render_entries_in_region(const kgfx_render_entry *entries,
     g_bb_clip = saved_clip;
 }
 
+void kgfx_window_layers_prepare(const kgfx_obj_handle *roots,
+                                uint32_t count,
+                                uint8_t surface_updates_allowed)
+{
+    if (count > KGFX_MAX_COMPOSITION_LAYERS)
+        count = KGFX_MAX_COMPOSITION_LAYERS;
+    g_window_layer_root_count = 0u;
+    if (roots)
+        for (uint32_t i = 0u; i < count; ++i)
+            if (roots[i].idx >= 0 && kgfx_obj_ref(roots[i]))
+                g_window_layer_roots[g_window_layer_root_count++] = roots[i];
+    g_window_layer_updates_allowed = surface_updates_allowed ? 1u : 0u;
+    g_window_layers_enabled = 1u;
+}
+
+void kgfx_window_layers_disable(void)
+{
+    g_window_layers_enabled = 0u;
+    g_window_layer_root_count = 0u;
+    g_window_layer_updates_allowed = 0u;
+    g_gpu_foreground_root_count = 0u;
+    /* The surfaces may still be referenced by the last GPU batch. They are
+     * reclaimed on the next update-safe prepare or at reboot. */
+    for (uint32_t i = 0u; i < KGFX_MAX_COMPOSITION_LAYERS; ++i)
+        g_window_layers[i].compositable = 0u;
+    g_gpu_overlay_previous_bounds = (gpu_render_rect){0};
+    g_gpu_overlay_previous_visible = 0u;
+    g_have_prev_frame = 0u;
+}
+
+void kgfx_gpu_foreground_set(const kgfx_obj_handle *roots, uint32_t count)
+{
+    g_gpu_foreground_root_count = 0u;
+    if (!roots)
+        return;
+    if (count > KGFX_MAX_GPU_FOREGROUND_ROOTS)
+        count = KGFX_MAX_GPU_FOREGROUND_ROOTS;
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        if (roots[i].idx < 0 || !kgfx_obj_ref(roots[i]))
+            continue;
+        g_gpu_foreground_roots[g_gpu_foreground_root_count++] = roots[i];
+    }
+}
+
+void kgfx_gpu_overlay_set(kgfx_obj_handle object)
+{
+    g_gpu_overlay_object = object;
+}
+
+void kgfx_gpu_overlay_present_cpu(const gpu_render_target *target,
+                                  const gpu_render_rect *damage_rect)
+{
+    uint8_t *saved_bb;
+    uint32_t saved_stride;
+    uint64_t saved_bytes;
+    kgfx_clip_rect saved_clip;
+    kgfx_clip_rect damage_clip;
+
+    if (!g_window_layers_enabled || !target || !target->cpu_pixels ||
+        target->width != FB.width || target->height != FB.height ||
+        target->stride_bytes < FB.width * 4u || !BB_ptr || !damage_rect ||
+        !damage_rect->width || !damage_rect->height)
+        return;
+    saved_bb = BB_ptr;
+    saved_stride = BB_stride;
+    saved_bytes = BB_bytes;
+    saved_clip = g_bb_clip;
+    BB_ptr = (uint8_t *)target->cpu_pixels;
+    BB_stride = target->stride_bytes;
+    BB_bytes = target->cpu_bytes;
+    damage_clip = (kgfx_clip_rect){
+        (int32_t)damage_rect->x,
+        (int32_t)damage_rect->y,
+        (int32_t)(damage_rect->x + damage_rect->width),
+        (int32_t)(damage_rect->y + damage_rect->height), 1u};
+    if (!clip_intersect(&damage_clip, &saved_clip))
+        goto restore;
+    g_bb_clip = damage_clip;
+
+    /* Windows are already in scanout. Draw non-window desktop foreground in
+     * strict order, then the cursor. This keeps translucent taskbar and the
+     * frozen screenshot selector above every retained window. */
+    for (uint32_t root_pos = 0u;
+         root_pos < g_gpu_foreground_root_count + 1u; ++root_pos)
+    {
+        kgfx_obj_handle root = root_pos < g_gpu_foreground_root_count
+            ? g_gpu_foreground_roots[root_pos] : g_gpu_overlay_object;
+        kgfx_clip_rect damage = {0, 0, 0, 0, 0};
+
+        if (root.idx < 0 || (uint16_t)root.idx >= g_obj_count ||
+            !g_obj_used[(uint16_t)root.idx] ||
+            g_obj_generation[(uint16_t)root.idx] != root.generation)
+            continue;
+        for (uint16_t pos = 0u; pos < g_render_entry_count; ++pos)
+        {
+            uint16_t idx = g_render_entries[pos].idx;
+            kgfx_clip_rect object_bounds;
+            if (idx >= g_obj_count || !g_obj_used[idx] ||
+                !g_render_resolved[idx].ready ||
+                g_render_resolved[idx].root_idx != (uint16_t)root.idx ||
+                !g_render_current[idx].renderable)
+                continue;
+            object_bounds = g_render_current[idx].bounds;
+            g_bb_clip = g_render_resolved[idx].clip;
+            if (!clip_intersect(&g_bb_clip, &damage_clip))
+                continue;
+            if (!clip_intersect(&object_bounds, &damage_clip))
+                continue;
+            kgfx_draw_entry_obj(idx, &g_objs[idx], &g_render_resolved[idx],
+                                &g_render_current[idx]);
+            if (!damage.enabled)
+                damage = object_bounds;
+            else
+            {
+                if (object_bounds.x0 < damage.x0) damage.x0 = object_bounds.x0;
+                if (object_bounds.y0 < damage.y0) damage.y0 = object_bounds.y0;
+                if (object_bounds.x1 > damage.x1) damage.x1 = object_bounds.x1;
+                if (object_bounds.y1 > damage.y1) damage.y1 = object_bounds.y1;
+            }
+        }
+        if (damage.enabled)
+            for (int32_t y = damage.y0; y < damage.y1; ++y)
+                kgfx_flush_range_raw((uintptr_t)target->cpu_pixels +
+                                         (uint64_t)y * target->stride_bytes +
+                                         (uint64_t)damage.x0 * 4u,
+                                     (uintptr_t)target->cpu_pixels +
+                                         (uint64_t)y * target->stride_bytes +
+                                         (uint64_t)damage.x1 * 4u);
+    }
+    kgfx_flush_commit();
+restore:
+    BB_ptr = saved_bb;
+    BB_stride = saved_stride;
+    BB_bytes = saved_bytes;
+    g_bb_clip = saved_clip;
+}
+
+static void kgfx_window_layer_release(kgfx_window_layer_state *layer)
+{
+    if (!layer)
+        return;
+    if (layer->surface.generation)
+        (void)gpu_render_surface_release(layer->surface);
+    *layer = (kgfx_window_layer_state){0};
+}
+
+static void kgfx_window_layer_forget(kgfx_window_layer_state *layer)
+{
+    gpu_render_surface_handle surface;
+    gpu_render_target target;
+    gpu_render_texture texture;
+
+    if (!layer)
+        return;
+    surface = layer->surface;
+    target = layer->target;
+    texture = layer->texture;
+    *layer = (kgfx_window_layer_state){0};
+    layer->surface = surface;
+    layer->target = target;
+    layer->texture = texture;
+}
+
+static uint64_t kgfx_window_layer_hash(uint16_t root_idx,
+                                       const kgfx_resolved_obj *resolved,
+                                       const kgfx_obj_snapshot *current)
+{
+    uint64_t h = 1469598103934665603ull;
+
+    for (uint16_t i = 0u; i < g_obj_count; ++i)
+    {
+        if (!g_obj_used[i] || !resolved[i].ready ||
+            resolved[i].root_idx != root_idx)
+            continue;
+        hash_mix_u16(&h, i);
+        hash_mix_u16(&h, g_obj_generation[i]);
+        hash_mix_u64(&h, current[i].visual_hash);
+    }
+    return h;
+}
+
+static int kgfx_window_layer_build(kgfx_window_layer_state *layer,
+                                   kgfx_obj_handle root_handle,
+                                   const kgfx_resolved_obj *desktop_resolved,
+                                   kcolor clear_color)
+{
+    kgfx_obj *root;
+    gpu_render_surface_desc desc;
+    kgfx_clip_rect full;
+    uint8_t *saved_bb = BB_ptr;
+    uint32_t saved_stride = BB_stride;
+    uint64_t saved_bytes = BB_bytes;
+    uint32_t saved_width = FB.width;
+    uint32_t saved_height = FB.height;
+    uint32_t saved_pitch = FB.pitch;
+    kgfx_clip_rect saved_clip = g_bb_clip;
+    int32_t saved_x, saved_y, saved_z;
+    uint32_t pad, actual_width, actual_height, surface_width, surface_height;
+    int32_t global_x, global_y;
+    uint64_t hash;
+    uint16_t n = 0u;
+    gpu_render_rect old_destination;
+    uint8_t old_visible;
+    uint8_t surface_changed = 0u;
+
+    if (!layer || root_handle.idx < 0 ||
+        (uint16_t)root_handle.idx >= g_obj_count ||
+        !desktop_resolved[root_handle.idx].ready)
+        return -1;
+    root = kgfx_obj_ref(root_handle);
+    if (!root || root->kind != KGFX_OBJ_RECT || !root->u.rect.w || !root->u.rect.h)
+        return -1;
+    pad = root->outline_width && root->outline_alpha ? root->outline_width : 0u;
+    actual_width = root->u.rect.w + pad * 2u;
+    actual_height = root->u.rect.h + pad * 2u;
+    /* The A7xx linear descriptor advertises Mesa's 256-byte pitch
+     * alignment. Four-byte BGRX pixels therefore require 64-pixel rows. */
+    surface_width = (saved_width + 63u) & ~63u;
+    surface_height = saved_height;
+    if (!surface_width || !surface_height || actual_width > surface_width ||
+        actual_height > surface_height)
+        return -1;
+    global_x = desktop_resolved[root_handle.idx].origin_x - (int32_t)pad;
+    global_y = desktop_resolved[root_handle.idx].origin_y - (int32_t)pad;
+    old_destination = layer->destination;
+    old_visible = layer->used && layer->compositable &&
+                  old_destination.width && old_destination.height;
+
+    if (!layer->surface.generation && !g_window_layer_updates_allowed)
+        return 1;
+    if (!layer->surface.generation)
+    {
+        desc = (gpu_render_surface_desc){surface_width, surface_height,
+                                         GPU_RENDER_FORMAT_BGRX8888};
+        if (gpu_render_surface_create(&desc, &layer->surface) != 0 ||
+            gpu_render_surface_target(layer->surface, &layer->target) != 0 ||
+            gpu_render_surface_texture(layer->surface, GPU_RENDER_SAMPLE_NEAREST,
+                                       &layer->texture) != 0)
+        {
+            kgfx_window_layer_release(layer);
+            return -2;
+        }
+        layer->content_hash = 0u;
+    }
+
+    saved_x = root->u.rect.x;
+    saved_y = root->u.rect.y;
+    saved_z = root->z;
+    root->u.rect.x = (int32_t)pad;
+    root->u.rect.y = (int32_t)pad;
+    root->z = 0;
+    BB_ptr = (uint8_t *)layer->target.cpu_pixels;
+    BB_stride = layer->target.stride_bytes;
+    BB_bytes = layer->target.cpu_bytes;
+    FB.width = actual_width;
+    FB.height = actual_height;
+    FB.pitch = layer->target.stride_bytes;
+    g_bb_clip = fb_clip_rect();
+    for (uint16_t i = 0u; i < g_obj_count; ++i)
+    {
+        g_layer_resolved[i] = (kgfx_resolved_obj){0};
+        g_layer_current[i] = (kgfx_obj_snapshot){0};
+    }
+    for (uint16_t i = 0u; i < g_obj_count; ++i)
+    {
+        if (!g_obj_used[i] || !g_objs[i].visible ||
+            !resolve_obj(i, g_layer_resolved) ||
+            g_layer_resolved[i].root_idx != (uint16_t)root_handle.idx)
+            continue;
+        if (snapshot_build(&g_objs[i], &g_layer_resolved[i], &g_layer_current[i]))
+        {
+            g_layer_entries[n].idx = i;
+            g_layer_entries[n].z = g_layer_resolved[i].z;
+            ++n;
+        }
+    }
+    sort_render_entries(g_layer_entries, n, g_layer_resolved);
+    hash = kgfx_window_layer_hash((uint16_t)root_handle.idx,
+                                  g_layer_resolved, g_layer_current);
+    if (!layer->compositable || layer->content_hash != hash)
+    {
+        if (g_window_layer_updates_allowed)
+        {
+            uint8_t became_compositable = !layer->compositable;
+            full = fb_clip_rect();
+            g_render_filter_mode = 2u;
+            g_render_filter_root = (uint16_t)root_handle.idx;
+            render_entries_in_region(g_layer_entries, n, g_layer_resolved,
+                                     g_layer_current, &full, clear_color);
+            g_render_filter_mode = 0u;
+            asm_dma_clean_range(layer->target.cpu_pixels,
+                                (uint64_t)layer->target.stride_bytes *
+                                    actual_height);
+            layer->texture.device_coherent = 1u;
+            layer->content_hash = hash;
+            layer->compositable = 1u;
+            surface_changed = 1u;
+            if (became_compositable)
+                g_have_prev_frame = 0u;
+        }
+    }
+    root->u.rect.x = saved_x;
+    root->u.rect.y = saved_y;
+    root->z = saved_z;
+    BB_ptr = saved_bb;
+    BB_stride = saved_stride;
+    BB_bytes = saved_bytes;
+    FB.width = saved_width;
+    FB.height = saved_height;
+    FB.pitch = saved_pitch;
+    g_bb_clip = saved_clip;
+
+    layer->root = root_handle;
+    layer->root_idx = (uint16_t)root_handle.idx;
+    layer->z = desktop_resolved[root_handle.idx].root_z;
+    layer->used = 1u;
+    layer->destination = (gpu_render_rect){
+        global_x < 0 ? 0u : (uint32_t)global_x,
+        global_y < 0 ? 0u : (uint32_t)global_y,
+        actual_width, actual_height,
+    };
+    layer->source_x = global_x < 0 ? (uint32_t)(-global_x) : 0u;
+    layer->source_y = global_y < 0 ? (uint32_t)(-global_y) : 0u;
+    if (global_x >= (int32_t)saved_width ||
+        global_y >= (int32_t)saved_height ||
+        global_x + (int32_t)actual_width <= 0 ||
+        global_y + (int32_t)actual_height <= 0)
+    {
+        layer->destination.width = 0u;
+        layer->destination.height = 0u;
+        if (old_visible)
+            gpu_composition_damage_add(old_destination);
+        return 0;
+    }
+    if (global_x < 0)
+        layer->destination.width -= (uint32_t)(-global_x);
+    if (global_y < 0)
+        layer->destination.height -= (uint32_t)(-global_y);
+    if (layer->destination.x + layer->destination.width > saved_width)
+        layer->destination.width = saved_width - layer->destination.x;
+    if (layer->destination.y + layer->destination.height > saved_height)
+        layer->destination.height = saved_height - layer->destination.y;
+    if (old_visible &&
+        (old_destination.x != layer->destination.x ||
+         old_destination.y != layer->destination.y ||
+         old_destination.width != layer->destination.width ||
+         old_destination.height != layer->destination.height))
+        gpu_composition_damage_add(old_destination);
+    if (surface_changed || !old_visible ||
+        old_destination.x != layer->destination.x ||
+        old_destination.y != layer->destination.y ||
+        old_destination.width != layer->destination.width ||
+        old_destination.height != layer->destination.height)
+        gpu_composition_damage_add(layer->destination);
+    return 0;
+}
+
+static void kgfx_window_layers_sync(const kgfx_resolved_obj *resolved,
+                                    kcolor clear_color)
+{
+    if (!g_window_layers_enabled)
+        return;
+    for (uint32_t i = 0u; i < KGFX_MAX_COMPOSITION_LAYERS; ++i)
+    {
+        kgfx_window_layer_state *layer = &g_window_layers[i];
+        if (i >= g_window_layer_root_count)
+        {
+            if (layer->used && layer->compositable)
+                gpu_composition_damage_add(layer->destination);
+            layer->compositable = 0u;
+            if (g_window_layer_updates_allowed)
+                kgfx_window_layer_forget(layer);
+            continue;
+        }
+        if (layer->used &&
+            (layer->root.idx != g_window_layer_roots[i].idx ||
+             layer->root.generation != g_window_layer_roots[i].generation))
+        {
+            if (layer->compositable)
+                gpu_composition_damage_add(layer->destination);
+            layer->compositable = 0u;
+            if (!g_window_layer_updates_allowed)
+                continue;
+            kgfx_window_layer_forget(layer);
+        }
+        (void)kgfx_window_layer_build(layer, g_window_layer_roots[i],
+                                      resolved, clear_color);
+    }
+}
+
+static void kgfx_window_layers_filter_desktop_snapshots(
+    const kgfx_resolved_obj *resolved, kgfx_obj_snapshot *current)
+{
+    gpu_render_rect overlay_bounds = {0};
+    uint8_t overlay_visible = 0u;
+
+    if (!g_window_layers_enabled || !resolved || !current)
+        return;
+    if (g_gpu_overlay_object.idx >= 0 &&
+        (uint16_t)g_gpu_overlay_object.idx < g_obj_count &&
+        g_obj_used[(uint16_t)g_gpu_overlay_object.idx] &&
+        g_obj_generation[(uint16_t)g_gpu_overlay_object.idx] ==
+            g_gpu_overlay_object.generation &&
+        current[(uint16_t)g_gpu_overlay_object.idx].renderable)
+    {
+        const kgfx_clip_rect *bounds =
+            &current[(uint16_t)g_gpu_overlay_object.idx].bounds;
+        overlay_bounds = (gpu_render_rect){
+            (uint32_t)bounds->x0, (uint32_t)bounds->y0,
+            (uint32_t)(bounds->x1 - bounds->x0),
+            (uint32_t)(bounds->y1 - bounds->y0),
+        };
+        overlay_visible = overlay_bounds.width && overlay_bounds.height;
+    }
+    if (g_gpu_overlay_previous_visible != overlay_visible ||
+        (overlay_visible &&
+         (g_gpu_overlay_previous_bounds.x != overlay_bounds.x ||
+          g_gpu_overlay_previous_bounds.y != overlay_bounds.y ||
+          g_gpu_overlay_previous_bounds.width != overlay_bounds.width ||
+          g_gpu_overlay_previous_bounds.height != overlay_bounds.height)))
+    {
+        /* The cursor is drawn into GOP only after the GPU fence.  Explicitly
+         * republish its old rectangle from the cursor-free composition
+         * surface before placing it at the new position.  Without this, a
+         * few cursor pixels survive as short horizontal marks in wallpaper. */
+        if (g_gpu_overlay_previous_visible)
+            gpu_composition_damage_add(g_gpu_overlay_previous_bounds);
+        if (overlay_visible)
+            gpu_composition_damage_add(overlay_bounds);
+        g_gpu_overlay_previous_bounds = overlay_bounds;
+        g_gpu_overlay_previous_visible = overlay_visible;
+    }
+    for (uint16_t i = 0u; i < g_obj_count; ++i)
+    {
+        if (!current[i].in_use || !resolved[i].ready ||
+            !kgfx_root_has_compositable_layer(resolved[i].root_idx))
+            continue;
+        /* This subtree lives in a retained GPU layer. Its position/content
+         * affects composition damage, never the immutable desktop base. */
+        current[i].renderable = 0u;
+        current[i].flat_rect = 0u;
+        current[i].visual_hash = 0u;
+        current[i].appearance_hash = 0u;
+        current[i].bounds = (kgfx_clip_rect){0, 0, 0, 0, 0};
+    }
+}
+
+uint32_t kgfx_window_layers_snapshot(kgfx_composition_layer *out_layers,
+                                     uint32_t capacity)
+{
+    uint32_t count = 0u;
+
+    if (!out_layers || !capacity || !g_window_layers_enabled)
+        return 0u;
+    for (uint32_t i = 0u; i < KGFX_MAX_COMPOSITION_LAYERS && count < capacity; ++i)
+    {
+        const kgfx_window_layer_state *layer = &g_window_layers[i];
+        if (!layer->used || !layer->compositable ||
+            !layer->destination.width || !layer->destination.height)
+            continue;
+        out_layers[count++] = (kgfx_composition_layer){
+            .texture = layer->texture,
+            .source_rect = {layer->source_x, layer->source_y,
+                            layer->destination.width,
+                            layer->destination.height},
+            .destination_rect = layer->destination,
+            .z = layer->z,
+            .root_idx = layer->root_idx,
+        };
+    }
+    for (uint32_t i = 1u; i < count; ++i)
+    {
+        kgfx_composition_layer v = out_layers[i];
+        uint32_t k = i;
+        while (k && (out_layers[k - 1u].z > v.z ||
+               (out_layers[k - 1u].z == v.z &&
+                out_layers[k - 1u].root_idx > v.root_idx)))
+        {
+            out_layers[k] = out_layers[k - 1u];
+            --k;
+        }
+        out_layers[k] = v;
+    }
+    return count;
+}
+
 static void render_dirty_tile_runs(const kgfx_dirty_tiles *tiles,
                                    const kgfx_render_entry *entries,
                                    uint16_t n,
@@ -3340,9 +4361,14 @@ static void render_dirty_tile_runs(const kgfx_dirty_tiles *tiles,
                                    kcolor clear_color)
 {
     uint8_t flushed = 0u;
+    uint32_t tile_count;
 
     if (!tiles || !tiles->valid)
         return;
+
+    tile_count = (uint32_t)tiles->cols * tiles->rows;
+    for (uint32_t i = 0u; i < tile_count; ++i)
+        g_dirty_rendered[i] = 0u;
 
     for (uint32_t ty = 0; ty < tiles->rows; ++ty)
     {
@@ -3350,18 +4376,53 @@ static void render_dirty_tile_runs(const kgfx_dirty_tiles *tiles,
         while (tx < tiles->cols)
         {
             uint32_t run_start = 0;
+            uint32_t run_end = 0;
+            uint32_t run_y_end = ty + 1u;
             kgfx_clip_rect region;
 
-            while (tx < tiles->cols && !dirty_tiles_bit(tiles, tx, ty))
+            while (tx < tiles->cols &&
+                   (!dirty_tiles_bit(tiles, tx, ty) ||
+                    g_dirty_rendered[ty * tiles->cols + tx]))
                 ++tx;
             if (tx >= tiles->cols)
                 break;
 
             run_start = tx;
-            while (tx < tiles->cols && dirty_tiles_bit(tiles, tx, ty))
+            while (tx < tiles->cols && dirty_tiles_bit(tiles, tx, ty) &&
+                   !g_dirty_rendered[ty * tiles->cols + tx])
                 ++tx;
+            run_end = tx;
 
-            region = dirty_tile_run_clip(tiles, ty, run_start, tx);
+            /* Coalesce the same horizontal span through following rows.
+             * Moving a large window usually dirties tens of identical tile
+             * runs; rendering each row separately repeated scene traversal,
+             * clipping, and occlusion work for no visual benefit. */
+            while (run_y_end < tiles->rows)
+            {
+                uint8_t can_extend = 1u;
+                for (uint32_t cx = run_start; cx < run_end; ++cx)
+                {
+                    uint32_t index = run_y_end * tiles->cols + cx;
+                    if (!dirty_tiles_bit(tiles, cx, run_y_end) ||
+                        g_dirty_rendered[index])
+                    {
+                        can_extend = 0u;
+                        break;
+                    }
+                }
+                if (!can_extend)
+                    break;
+                ++run_y_end;
+            }
+
+            for (uint32_t cy = ty; cy < run_y_end; ++cy)
+                for (uint32_t cx = run_start; cx < run_end; ++cx)
+                    g_dirty_rendered[cy * tiles->cols + cx] = 1u;
+
+            region = dirty_tile_run_clip(tiles, ty, run_start, run_end);
+            region.y1 = (int32_t)(run_y_end * KGFX_DIRTY_TILE_SIZE);
+            if (region.y1 > (int32_t)FB.height)
+                region.y1 = (int32_t)FB.height;
             if (!region.enabled)
                 continue;
 
@@ -3390,6 +4451,7 @@ int kgfx_scene_init(void)
     BB_stride = FB.pitch;
     BB_bytes = pages * 4096ull;
     kgfx_image_cache_invalidate_all();
+    kgfx_text_cache_invalidate_all();
     g_obj_count = 0;
     for (uint16_t i = 0; i < KGFX_MAX_OBJS; ++i)
     {
@@ -3398,6 +4460,8 @@ int kgfx_scene_init(void)
         kgfx_clear_slot(i);
     }
     g_prev_snapshot_count = 0;
+    g_rendered_frame_count = 0u;
+    g_last_render_us = 0u;
     g_prev_clear_color = (kcolor){0, 0, 0};
     g_have_prev_frame = 0;
     g_bb_clip = (kgfx_clip_rect){0, 0, 0, 0, 0};
@@ -3409,40 +4473,60 @@ int kgfx_scene_init(void)
 int kgfx_gpu_backbuffer_prepare(void)
 {
     gpu_render_surface_desc desc;
-    gpu_render_target target;
     uint8_t *old_backbuffer;
     uint32_t old_stride;
 
     if (!BB_ptr || !FB.width || !FB.height)
         return -1;
-    if (g_gpu_backbuffer_surface.generation)
+    if (g_gpu_backbuffer_surfaces[0].generation &&
+        g_gpu_backbuffer_surfaces[1].generation)
         return 0;
     desc = (gpu_render_surface_desc){FB.width, FB.height,
                                      GPU_RENDER_FORMAT_BGRX8888};
-    if (gpu_render_surface_create(&desc, &g_gpu_backbuffer_surface) != 0 ||
-        gpu_render_surface_target(g_gpu_backbuffer_surface, &target) != 0)
-        return -2;
+    for (uint32_t i = 0u; i < 2u; ++i)
+    {
+        if (gpu_render_surface_create(&desc, &g_gpu_backbuffer_surfaces[i]) != 0 ||
+            gpu_render_surface_target(g_gpu_backbuffer_surfaces[i],
+                                      &g_gpu_backbuffer_targets[i]) != 0)
+        {
+            for (uint32_t k = 0u; k <= i; ++k)
+                if (g_gpu_backbuffer_surfaces[k].generation)
+                    (void)gpu_render_surface_release(g_gpu_backbuffer_surfaces[k]);
+            g_gpu_backbuffer_surfaces[0] = GPU_RENDER_EXTERNAL_SURFACE;
+            g_gpu_backbuffer_surfaces[1] = GPU_RENDER_EXTERNAL_SURFACE;
+            g_gpu_backbuffer_targets[0] = (gpu_render_target){0};
+            g_gpu_backbuffer_targets[1] = (gpu_render_target){0};
+            return -2;
+        }
+    }
     /* Preserve the current CPU frame. The original pmem allocation is kept
      * for this boot rather than risking a stale emergency-render reference. */
     old_backbuffer = BB_ptr;
     old_stride = BB_stride;
-    for (uint32_t y = 0u; y < FB.height; ++y)
-        kmemcpy64((uint8_t *)target.cpu_pixels + (uint64_t)y * target.stride_bytes,
-                  old_backbuffer + (uint64_t)y * old_stride,
-                  FB.width * 4u);
-    BB_ptr = (uint8_t *)target.cpu_pixels;
-    BB_stride = target.stride_bytes;
-    BB_bytes = target.cpu_bytes;
+    for (uint32_t i = 0u; i < 2u; ++i)
+        for (uint32_t y = 0u; y < FB.height; ++y)
+            kmemcpy64((uint8_t *)g_gpu_backbuffer_targets[i].cpu_pixels +
+                          (uint64_t)y * g_gpu_backbuffer_targets[i].stride_bytes,
+                      old_backbuffer + (uint64_t)y * old_stride,
+                      FB.width * 4u);
+    g_gpu_backbuffer_index = 0u;
+    BB_ptr = (uint8_t *)g_gpu_backbuffer_targets[0].cpu_pixels;
+    BB_stride = g_gpu_backbuffer_targets[0].stride_bytes;
+    BB_bytes = g_gpu_backbuffer_targets[0].cpu_bytes;
     g_have_prev_frame = 0u;
     return 0;
 }
 
 int kgfx_gpu_backbuffer_enable(void)
 {
-    if (!g_gpu_backbuffer_surface.generation || !BB_ptr)
+    if (!g_gpu_backbuffer_surfaces[0].generation ||
+        !g_gpu_backbuffer_surfaces[1].generation || !BB_ptr)
         return -1;
     g_gpu_present_enabled = 1u;
     g_gpu_frame_dirty = 1u;
+    g_gpu_frame_damage = (gpu_render_rect){0u, 0u, FB.width, FB.height};
+    g_gpu_base_dirty = 1u;
+    g_gpu_base_damage = g_gpu_frame_damage;
     return 0;
 }
 
@@ -3453,6 +4537,9 @@ void kgfx_gpu_backbuffer_disable(void)
      * CPU dirty-region path without retrying a dead GPU every frame. */
     g_gpu_present_enabled = 0u;
     g_gpu_frame_dirty = 0u;
+    g_gpu_frame_damage = (gpu_render_rect){0};
+    g_gpu_base_dirty = 0u;
+    g_gpu_base_damage = (gpu_render_rect){0};
     g_have_prev_frame = 0u;
 }
 
@@ -3467,7 +4554,7 @@ int kgfx_gpu_backbuffer_texture(gpu_render_texture *out_texture)
 {
     if (!g_gpu_present_enabled || !out_texture)
         return -1;
-    return gpu_render_surface_texture(g_gpu_backbuffer_surface,
+    return gpu_render_surface_texture(g_gpu_backbuffer_surfaces[g_gpu_backbuffer_index],
                                       GPU_RENDER_SAMPLE_NEAREST,
                                       out_texture);
 }
@@ -3477,9 +4564,49 @@ uint8_t kgfx_gpu_frame_dirty(void)
     return g_gpu_present_enabled && g_gpu_frame_dirty;
 }
 
+int kgfx_gpu_frame_damage(gpu_render_rect *out_damage)
+{
+    if (!out_damage || !g_gpu_present_enabled || !g_gpu_frame_dirty ||
+        !g_gpu_frame_damage.width || !g_gpu_frame_damage.height)
+        return -1;
+    *out_damage = g_gpu_frame_damage;
+    return 0;
+}
+
 void kgfx_gpu_frame_submitted(void)
 {
+    uint8_t next;
+    gpu_render_rect damage;
+
+    if (!g_gpu_present_enabled)
+        return;
+    damage = g_gpu_base_damage;
+    next = (uint8_t)(g_gpu_backbuffer_index ^ 1u);
+    /* Keep both retained frames coherent by copying only the pixels changed
+     * in the just-submitted frame.  The GPU reads the current surface while
+     * KGFX immediately starts the next frame in the other one. */
+    if (g_gpu_base_dirty && damage.width && damage.height)
+    {
+        const gpu_render_target *src = &g_gpu_backbuffer_targets[g_gpu_backbuffer_index];
+        const gpu_render_target *dst = &g_gpu_backbuffer_targets[next];
+        kgfx_blit_rows_parallel(
+            (const uint8_t *)src->cpu_pixels +
+                (uint64_t)damage.y * src->stride_bytes +
+                (uint64_t)damage.x * 4u,
+            src->stride_bytes,
+            (uint8_t *)dst->cpu_pixels +
+                (uint64_t)damage.y * dst->stride_bytes +
+                (uint64_t)damage.x * 4u,
+            dst->stride_bytes, damage.width, damage.height, 255u, 1u);
+    }
+    g_gpu_backbuffer_index = next;
+    BB_ptr = (uint8_t *)g_gpu_backbuffer_targets[next].cpu_pixels;
+    BB_stride = g_gpu_backbuffer_targets[next].stride_bytes;
+    BB_bytes = g_gpu_backbuffer_targets[next].cpu_bytes;
     g_gpu_frame_dirty = 0u;
+    g_gpu_frame_damage = (gpu_render_rect){0};
+    g_gpu_base_dirty = 0u;
+    g_gpu_base_damage = (gpu_render_rect){0};
 }
 
 void kgfx_present_backbuffer_cpu(void)
@@ -3489,6 +4616,9 @@ void kgfx_present_backbuffer_cpu(void)
     present_full();
     g_gpu_present_enabled = was_gpu;
     g_gpu_frame_dirty = 0u;
+    g_gpu_frame_damage = (gpu_render_rect){0};
+    g_gpu_base_dirty = 0u;
+    g_gpu_base_damage = (gpu_render_rect){0};
 }
 
 static void store_prev_snapshots(const kgfx_obj_snapshot *current, uint16_t count, kcolor clear_color)
@@ -3510,9 +4640,12 @@ void kgfx_render_all(kcolor clear_color)
     kgfx_dirty_tiles dirty_tiles;
     kgfx_clip_rect full = fb_clip_rect();
     uint8_t full_redraw = 0;
+    uint64_t render_started;
 
     if (!BB_ptr)
         return;
+
+    render_started = kgfx_counter_now();
 
     for (uint16_t i = 0; i < g_obj_count; ++i)
     {
@@ -3546,6 +4679,9 @@ void kgfx_render_all(kcolor clear_color)
 
     // 2) stable z-sort
     sort_render_entries(entries, n, resolved);
+    g_render_entry_count = n;
+    kgfx_window_layers_sync(resolved, clear_color);
+    kgfx_window_layers_filter_desktop_snapshots(resolved, current);
 
     // 3) decide which pixels need to be refreshed
     if (!g_have_prev_frame || !color_equal(g_prev_clear_color, clear_color))
@@ -3576,14 +4712,35 @@ void kgfx_render_all(kcolor clear_color)
     if (full_redraw)
     {
         KGFX_PERF_INC(full_redraws, 1);
+        g_render_filter_mode = g_window_layers_enabled ? 1u : 0u;
         render_entries_in_region(entries, n, resolved, current, &full, clear_color);
+        g_render_filter_mode = 0u;
         present_full();
     }
     else
     {
         KGFX_PERF_INC(dirty_tiles, dirty_tiles.count);
+        g_render_filter_mode = g_window_layers_enabled ? 1u : 0u;
         render_dirty_tile_runs(&dirty_tiles, entries, n, resolved, current, clear_color);
+        g_render_filter_mode = 0u;
     }
 
     store_prev_snapshots(current, g_obj_count, clear_color);
+    ++g_rendered_frame_count;
+    {
+        uint64_t frequency = kgfx_counter_frequency();
+        uint64_t elapsed = kgfx_counter_now() - render_started;
+        if (frequency)
+            g_last_render_us = (elapsed * 1000000u) / frequency;
+    }
+}
+
+uint64_t kgfx_rendered_frame_count(void)
+{
+    return g_rendered_frame_count;
+}
+
+uint64_t kgfx_last_render_us(void)
+{
+    return g_last_render_us;
 }

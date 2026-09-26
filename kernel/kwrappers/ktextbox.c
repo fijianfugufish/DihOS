@@ -1149,6 +1149,8 @@ void ktextbox_update_all(void)
     ktextbox_resolved_rect resolved[KTEXTBOX_MAX];
 
     kmouse_get_state(&mouse);
+    if (G_repeat_usage && kinput_key_released(G_repeat_usage))
+        ktextbox_clear_repeat_state();
     G_caret_blink_tick++;
     if (G_focused_idx >= 0)
         needs_blink_refresh = (G_caret_blink_tick % KTEXTBOX_CARET_BLINK_FRAMES) == 0u;

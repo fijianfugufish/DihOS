@@ -31,6 +31,10 @@ typedef struct adreno_x1_85_3d_draw
     /* Optional top-left raster clip. Zero means the full render target. */
     uint32_t clip_width;
     uint32_t clip_height;
+    uint32_t viewport_x;
+    uint32_t viewport_y;
+    uint32_t viewport_width;
+    uint32_t viewport_height;
     /* Kernel-only compositor mode: expand safe +/-0.65 clip geometry to the
      * full viewport without exposing viewport state through the render ABI. */
     uint8_t expand_safe_viewport;

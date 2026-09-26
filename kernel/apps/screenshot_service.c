@@ -67,6 +67,10 @@ static int capture_desktop(kimg *out)
     out->h = fb->height;
 
     kmouse_set_visible(0u);
+    /* Capture is a CPU-readable snapshot, so temporarily flatten retained
+     * GPU window layers back into KGFX's backbuffer. The next compositor
+     * frame re-enables them without discarding their retained surfaces. */
+    kgfx_window_layers_disable();
     kgfx_render_all(black);
     if (kgfx_capture_argb(out->px, out->w, 0, 0, out->w, out->h) != 0)
     {
@@ -249,17 +253,24 @@ static int begin_region(void)
         return -1;
     }
     kgfx_obj_ref(G.background)->z = 900;
+    /* capture_desktop always emits fully opaque ARGB.  Let KGFX memcpy this
+       frozen layer and use it to cull the live desktop below the overlay. */
+    kgfx_image_set_opaque_hint(G.background, 1u);
 
     for (uint32_t i = 0u; i < 4u; ++i)
     {
         G.dim[i] = kgfx_obj_add_rect(0, 0, fb->width, fb->height, 901, black, 1u);
         G.border[i] = kgfx_obj_add_rect(0, 0, 2u, 2u, 903, cyan, 1u);
+        kgfx_obj_set_parent(G.dim[i], G.background);
+        kgfx_obj_set_parent(G.border[i], G.background);
         if (G.dim[i].idx >= 0)
             kgfx_obj_ref(G.dim[i])->alpha = 150u;
     }
     if (G.font)
         G.size_text = kgfx_obj_add_text(G.font, G.size_label, 8, 8, 904,
                                         white, 255u, 2u, 0, 0, KTEXT_ALIGN_LEFT, 1u);
+    if (G.size_text.idx >= 0)
+        kgfx_obj_set_parent(G.size_text, G.background);
 
     G.old_cursor = kmouse_current_cursor();
     (void)kmouse_set_cursor(KMOUSE_CURSOR_CROSS);
@@ -344,4 +355,14 @@ int screenshot_service_update(void)
     }
 
     return 1;
+}
+
+uint32_t screenshot_service_collect_gpu_foreground_roots(
+    kgfx_obj_handle *out_roots, uint32_t capacity)
+{
+    if (!out_roots || !capacity || !G.active || G.background.idx < 0 ||
+        !kgfx_obj_ref(G.background))
+        return 0u;
+    out_roots[0] = G.background;
+    return 1u;
 }

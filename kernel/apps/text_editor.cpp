@@ -2926,6 +2926,9 @@ namespace
         if (!focused_)
             return;
 
+        if (repeat_usage_ && kinput_key_released(repeat_usage_))
+            ResetRepeat();
+
         if (kinput_key_pressed(KEY_CAPSLOCK))
             caps_lock_ = caps_lock_ ? 0u : 1u;
 

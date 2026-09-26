@@ -14,5 +14,8 @@ uint8_t gpu_compositor_core_ready(void);
 const mesart_renderer_graphics_pipeline *gpu_compositor_core_pipeline(
     gpu_render_pipeline_kind kind);
 void gpu_compositor_update(void);
+void gpu_compositor_prepare_scene(void);
 uint8_t gpu_compositor_frame_busy(void);
 void gpu_compositor_submit_kgfx_frame(void);
+uint64_t gpu_compositor_last_frame_us(void);
+uint64_t gpu_compositor_presented_frame_count(void);

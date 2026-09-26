@@ -461,11 +461,17 @@ void kmain(boot_info *bi)
     terminal_print("^^ i sure hope this log is good ^^");
     terminal_flush_log();
 
+    terminal_print("boot-ui: clearing diagnostic scene");
+    terminal_flush_log();
     terminal_clear();
     kgfx_render_all(black);
+    terminal_print("boot-ui: diagnostic scene retired");
+    terminal_flush_log();
 
     if (mounted && font)
     {
+        terminal_print("boot-ui: initializing desktop applications");
+        terminal_flush_log();
         file_explorer_init(font);
         terminal_success("file explorer online");
         text_editor_init(font);
@@ -480,6 +486,7 @@ void kmain(boot_info *bi)
 
     desktop_shell_init(font);
     terminal_success("desktop shell online");
+    terminal_flush_log();
 
     if (kmouse_init() != 0)
     {
@@ -488,13 +495,20 @@ void kmain(boot_info *bi)
     kmouse_set_sensitivity_pct(500);
     screenshot_service_init(font);
 
+    terminal_print("boot-ui: rendering first complete desktop frame");
+    terminal_flush_log();
     kgfx_render_all(black);
+    terminal_success("boot-ui: first complete desktop frame visible");
+    terminal_flush_log();
 
     /* The first complete desktop frame is now visible through the ordinary
      * CPU path.  Activating the experimental backend here means a wedged or
      * rejected first GPU frame can fall back without hiding boot progress. */
     if (gpu_core_ready)
         (void)gpu_compositor_init();
+
+    terminal_success("boot-ui: entering main loop");
+    terminal_flush_log();
 
     uint32_t frame = 0;
 
@@ -536,12 +550,19 @@ void kmain(boot_info *bi)
         }
 
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
-        /* Direct scanout samples the live KGFX backbuffer. Do not modify it
-         * until the single asynchronous shader pass has retired. Unlike the
-         * old serial tiled path, this is one fence for the entire frame. */
+        /* Completion may have happened while input and UI code were running.
+         * Observe it again here so the just-built scene can be submitted in
+         * this iteration instead of losing an entire main-loop period. */
+        gpu_compositor_update();
+        /* KGFX ping-pongs two coherent retained surfaces: CP samples one
+         * while the CPU prepares the other. Mesart's explicit visual test is
+         * the only path which still monopolizes the shared 3D runtime. */
         if (!gpu_compositor_frame_busy() &&
             !dihos_shell_mesart_visual_frame_busy())
+        {
+            gpu_compositor_prepare_scene();
             kgfx_render_all(black);
+        }
         dihos_shell_mesart_visual_present_after_cpu();
         dihos_shell_mesart_visual_submit_after_cpu();
         gpu_compositor_submit_kgfx_frame();

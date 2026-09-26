@@ -4,6 +4,7 @@
 #define KMOUSE_H
 
 #include <stdint.h>
+#include "kwrappers/kgfx.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -55,6 +56,7 @@ extern "C"
     uint8_t kmouse_buttons(void);
     uint8_t kmouse_visible(void);
     void kmouse_get_state(kmouse_state *out);
+    kgfx_obj_handle kmouse_cursor_object(void);
 
 #ifdef __cplusplus
 }

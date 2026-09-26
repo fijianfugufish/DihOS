@@ -106,7 +106,21 @@ int gpu_core_mesart_3d_kick(
 int gpu_core_compositor_present_kick(
     const mesart_renderer_graphics_pipeline *pipeline,
     const gpu_render_texture *source, const gpu_render_target *target,
+    const gpu_render_rect *source_rect,
+    const gpu_render_rect *destination_rect,
     uint32_t triangle_half, uint32_t diagnostic_probe, uint64_t *out_fence);
+
+typedef struct gpu_core_compositor_layer
+{
+    const gpu_render_texture *source;
+    gpu_render_rect source_rect;
+    gpu_render_rect destination_rect;
+} gpu_core_compositor_layer;
+
+int gpu_core_compositor_present_batch_kick(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_core_compositor_layer *layers, uint32_t layer_count,
+    const gpu_render_target *target, uint64_t *out_fence);
 
 /* Checks the one trusted 3D fence without spinning. Returns 0 when a fence
  * completed, 1 while no work is pending or the live fence is still running,

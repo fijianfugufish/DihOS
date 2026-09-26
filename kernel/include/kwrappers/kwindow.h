@@ -97,6 +97,10 @@ extern "C"
     void kwindow_set_title(kwindow_handle h, const char *title);
     void kwindow_set_work_area_bottom_inset(uint32_t px);
     kgfx_obj_handle kwindow_root(kwindow_handle h);
+    /* Returns visible top-level window roots. The compositor resolves their
+     * final z/order from KGFX; no driver detail crosses this boundary. */
+    uint32_t kwindow_collect_visible_roots(kgfx_obj_handle *out_roots,
+                                           uint32_t capacity);
     int kwindow_point_can_receive_input(kwindow_handle h, int32_t x, int32_t y);
     int kwindow_obj_can_receive_input(kgfx_obj_handle h, int32_t x, int32_t y);
     int kwindow_set_modal_child(kwindow_handle parent, kwindow_handle child);

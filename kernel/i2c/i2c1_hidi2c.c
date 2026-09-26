@@ -31,6 +31,9 @@ static char g_tpd_name[5] = "TCPD";
 static char g_probe_name[5] = "HID?";
 static uint8_t g_bus_ready = 0;
 static uint32_t g_aml_gpio_pin = 0u;
+static uint64_t g_tpd_poll_counter = 0u;
+static uint64_t g_kbd_poll_counter = 0u;
+static uint8_t g_hid_poll_turn = 0u;
 
 static uint8_t g_hidi2c_debug = 0;
 static uint16_t g_tcpd_desc_reg_hint = 0u;
@@ -127,6 +130,28 @@ extern int i2c1_bus_addr_only(uint8_t addr7);
 static uint16_t rd16(const uint8_t *p)
 {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint64_t hidi2c_counter_now(void)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uint64_t value = 0u;
+    __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+#else
+    return 0u;
+#endif
+}
+
+static uint64_t hidi2c_counter_frequency(void)
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    uint64_t value = 0u;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(value));
+    return value;
+#else
+    return 0u;
+#endif
 }
 
 static void wr16(uint8_t *p, uint16_t v)
@@ -3796,15 +3821,68 @@ void i2c1_hidi2c_init(uint64_t rsdp_phys)
     }
 }
 
-void i2c1_hidi2c_poll(void)
+void i2c1_hidi2c_poll(uint8_t keyboard_active)
 {
+    uint64_t now;
+    uint64_t frequency;
+    uint64_t tpd_period;
+    uint64_t kbd_period;
+    uint8_t tpd_due;
+    uint8_t kbd_due;
+
     if (!g_bus_ready)
         return;
 
-    if (g_tpd.online)
+    /*
+     * The recovered ACPI GPIO resource is not a dependable live interrupt
+     * input on this machine, so keep polling -- but do it at explicit HID
+     * rates rather than launching two synchronous GENI transactions on every
+     * compositor loop.  At most one transfer is started per pass, preventing
+     * keyboard and touchpad reads from forming a long serial stall.
+     */
+    now = hidi2c_counter_now();
+    frequency = hidi2c_counter_frequency();
+    tpd_period = frequency ? frequency / 120u : 0u;
+    /* Idle keyboard traffic does not need pointer cadence. While a key is
+     * held, poll at 120 Hz and allow the keyboard and touchpad transfers in
+     * the same pass so a release cannot sit behind alternating HID polls
+     * while software repeat keeps emitting characters. */
+    kbd_period = frequency ? frequency / (keyboard_active ? 120u : 60u) : 0u;
+    if (!tpd_period)
+        tpd_period = 1u;
+    if (!kbd_period)
+        kbd_period = 1u;
+
+    tpd_due = g_tpd.online &&
+        (!g_tpd_poll_counter || now - g_tpd_poll_counter >= tpd_period);
+    kbd_due = g_kbd.online &&
+        (!g_kbd_poll_counter || now - g_kbd_poll_counter >= kbd_period);
+
+    /* Pointer reports describe deltas/contacts and must never be replayed on
+     * an idle frame. Keyboard state, on the other hand, intentionally stays
+     * latched until a newer report describes a release. */
+    g_tpd.last_report.available = 0u;
+    g_tpd.last_report.len = 0u;
+
+    if (tpd_due && kbd_due && !keyboard_active)
+    {
+        if (g_hid_poll_turn)
+            tpd_due = 0u;
+        else
+            kbd_due = 0u;
+        g_hid_poll_turn ^= 1u;
+    }
+
+    if (tpd_due)
+    {
+        g_tpd_poll_counter = now;
         (void)hidi2c_read_input(&g_tpd);
-    if (g_kbd.online)
+    }
+    if (kbd_due)
+    {
+        g_kbd_poll_counter = now;
         (void)hidi2c_read_input(&g_kbd);
+    }
 }
 
 const hidi2c_device *i2c1_hidi2c_keyboard(void)

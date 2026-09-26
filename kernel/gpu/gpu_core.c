@@ -118,7 +118,10 @@ static uint8_t g_mesart_3d_frame_ready;
     ((uint64_t)GPU_CORE_MESART_SHADER_SLOT_COUNT * \
      GPU_CORE_MESART_SHADER_SLOT_BYTES)
 #define GPU_CORE_MESART_UNIFORM_POOL_IOVA 0x0000000043100000ull
-#define GPU_CORE_MESART_UNIFORM_POOL_BYTES GPU_IOMMU_PAGE_SIZE
+#define GPU_CORE_MESART_RESOURCE_STRIDE     0x400u
+#define GPU_CORE_MESART_RESOURCE_SLOTS      GPU_RENDER_MAX_BATCH_DRAWS
+#define GPU_CORE_MESART_UNIFORM_POOL_BYTES \
+    ((uint64_t)GPU_CORE_MESART_RESOURCE_STRIDE * GPU_CORE_MESART_RESOURCE_SLOTS)
 #define GPU_CORE_MESART_VERTEX_UBO_OFFSET   0u
 #define GPU_CORE_MESART_FRAGMENT_UBO_OFFSET 64u
 #define GPU_CORE_MESART_DEFAULT_UBO_BYTES   64u
@@ -1629,15 +1632,19 @@ int gpu_core_mesart_shader_slot(uint32_t slot, gpu_buffer **out_storage,
 static int gpu_core_mesart_configure_vertex_buffer(
     const mesart_renderer_graphics_pipeline *pipeline,
     adreno_x1_85_3d_draw *draw, uint32_t write_values,
-    uint32_t fullscreen)
+    uint32_t fullscreen, const gpu_render_rect *source_rect,
+    uint32_t source_width, uint32_t source_height, uint32_t resource_slot)
 {
     const mesart_pipeline_header *reflection;
     uint32_t *words;
+    uint64_t resource_offset = (uint64_t)resource_slot *
+                               GPU_CORE_MESART_RESOURCE_STRIDE;
 
     if (!pipeline || !draw || !pipeline->pipeline_reflection_ready ||
         !g_mesart_uniform_pool.cpu ||
         g_mesart_uniform_pool.iova != GPU_CORE_MESART_UNIFORM_POOL_IOVA ||
-        GPU_CORE_MESART_VERTEX_BUFFER_OFFSET +
+        resource_slot >= GPU_CORE_MESART_RESOURCE_SLOTS ||
+        resource_offset + GPU_CORE_MESART_VERTEX_BUFFER_OFFSET +
             GPU_CORE_MESART_TEXTURED_QUAD_BUFFER_BYTES >
                 g_mesart_uniform_pool.size_bytes)
         return -1;
@@ -1648,7 +1655,7 @@ static int gpu_core_mesart_configure_vertex_buffer(
         (reflection->vertex_attribute0_compmask != 0x3u &&
          reflection->vertex_attribute0_compmask != 0xfu))
         return -2;
-    draw->vertex_buffer_gpu_va = GPU_CORE_MESART_UNIFORM_POOL_IOVA +
+    draw->vertex_buffer_gpu_va = GPU_CORE_MESART_UNIFORM_POOL_IOVA + resource_offset +
                                  GPU_CORE_MESART_VERTEX_BUFFER_OFFSET;
     draw->vertex_buffer_stride = reflection->vertex_attribute0_compmask == 0xfu ?
         GPU_CORE_MESART_TEXTURED_BUFFER_STRIDE :
@@ -1662,7 +1669,7 @@ static int gpu_core_mesart_configure_vertex_buffer(
     /* A centred, ordinary triangle. The tint profile adds a kernel-owned
      * translation through default UBO 0, independently proving vertex fetch
      * and live uniform consumption without accepting host GPU addresses. */
-    words = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+    words = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                          GPU_CORE_MESART_VERTEX_BUFFER_OFFSET);
     /* GOP memory is top-down, so invert Y in the test geometry while
      * retaining counter-clockwise clip-space winding.  A negative hardware
@@ -1707,8 +1714,33 @@ static int gpu_core_mesart_configure_vertex_buffer(
                 /* Complete quad in one ordinary TRI_LIST submission. This
                  * keeps VPC on its proven triangle path while avoiding a
                  * second render/cache submission for the same tile. */
-                for (uint32_t i = 0u; i < 24u; ++i)
-                    words[i] = fullscreen_vertices[i];
+                if (source_rect && source_rect->width && source_rect->height)
+                {
+                    union { float value; uint32_t bits; } u0, v0, u1, v1;
+                    if (!source_width)
+                        source_width = draw->target->width;
+                    if (!source_height)
+                        source_height = draw->target->height;
+                    u0.value = (float)source_rect->x / (float)source_width;
+                    v0.value = (float)source_rect->y / (float)source_height;
+                    u1.value = (float)(source_rect->x + source_rect->width) /
+                               (float)source_width;
+                    v1.value = (float)(source_rect->y + source_rect->height) /
+                               (float)source_height;
+                    const uint32_t damaged_vertices[24] = {
+                        0xbf266666u, 0xbf266666u, u0.bits, v0.bits,
+                        0x3f266666u, 0xbf266666u, u1.bits, v0.bits,
+                        0xbf266666u, 0x3f266666u, u0.bits, v1.bits,
+                        0x3f266666u, 0xbf266666u, u1.bits, v0.bits,
+                        0x3f266666u, 0x3f266666u, u1.bits, v1.bits,
+                        0xbf266666u, 0x3f266666u, u0.bits, v1.bits,
+                    };
+                    for (uint32_t i = 0u; i < 24u; ++i)
+                        words[i] = damaged_vertices[i];
+                }
+                else
+                    for (uint32_t i = 0u; i < 24u; ++i)
+                        words[i] = fullscreen_vertices[i];
             }
             else
             {
@@ -1741,10 +1773,12 @@ static int gpu_core_mesart_configure_vertex_buffer(
 static int gpu_core_mesart_configure_default_uniforms(
     const mesart_renderer_graphics_pipeline *pipeline,
     adreno_x1_85_3d_draw *draw, uint32_t write_values,
-    uint32_t identity_transform)
+    uint32_t identity_transform, uint32_t resource_slot)
 {
     const mesart_pipeline_header *reflection;
     uint32_t *words;
+    uint64_t resource_offset = (uint64_t)resource_slot *
+                               GPU_CORE_MESART_RESOURCE_STRIDE;
 
     if (!pipeline || !draw)
         return -1;
@@ -1758,38 +1792,39 @@ static int gpu_core_mesart_configure_default_uniforms(
     if (!g_mesart_uniform_pool.cpu ||
         g_mesart_uniform_pool.iova != GPU_CORE_MESART_UNIFORM_POOL_IOVA ||
         g_mesart_uniform_pool.size_bytes != GPU_CORE_MESART_UNIFORM_POOL_BYTES ||
-        GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
+        resource_slot >= GPU_CORE_MESART_RESOURCE_SLOTS ||
+        resource_offset + GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
             GPU_CORE_MESART_DEFAULT_UBO_BYTES >
                 g_mesart_uniform_pool.size_bytes)
         return -3;
     if (reflection->vertex_app_ubo_count)
     {
         draw->vertex_default_ubo_gpu_va =
-            GPU_CORE_MESART_UNIFORM_POOL_IOVA +
+            GPU_CORE_MESART_UNIFORM_POOL_IOVA + resource_offset +
             GPU_CORE_MESART_VERTEX_UBO_OFFSET;
         draw->vertex_default_ubo_bytes = GPU_CORE_MESART_DEFAULT_UBO_BYTES;
         draw->vertex_default_ubo_values =
-            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu +
+            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                                GPU_CORE_MESART_VERTEX_UBO_OFFSET);
     }
     if (reflection->fragment_app_ubo_count)
     {
         draw->fragment_default_ubo_gpu_va =
-            GPU_CORE_MESART_UNIFORM_POOL_IOVA +
+            GPU_CORE_MESART_UNIFORM_POOL_IOVA + resource_offset +
             GPU_CORE_MESART_FRAGMENT_UBO_OFFSET;
         draw->fragment_default_ubo_bytes = GPU_CORE_MESART_DEFAULT_UBO_BYTES;
         draw->fragment_default_ubo_values =
-            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu +
+            (const uint32_t *)((const uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                                GPU_CORE_MESART_FRAGMENT_UBO_OFFSET);
     }
     if (!write_values)
         return 0;
 
-    words = (uint32_t *)g_mesart_uniform_pool.cpu;
+    words = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset);
     for (uint32_t i = 0u; i < GPU_CORE_MESART_DEFAULT_UBO_BYTES / 4u; ++i)
         words[i] = 0u;
     uint32_t *fragment_words =
-        (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+        (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                      GPU_CORE_MESART_FRAGMENT_UBO_OFFSET);
     for (uint32_t i = 0u; i < GPU_CORE_MESART_DEFAULT_UBO_BYTES / 4u; ++i)
         fragment_words[i] = 0u;
@@ -1809,7 +1844,7 @@ static int gpu_core_mesart_configure_default_uniforms(
     fragment_words[1] = pipeline->fragment_texture_count ? 0x3f800000u : 0x3e19999au;
     fragment_words[2] = pipeline->fragment_texture_count ? 0x3f800000u : 0x3ca3d70au;
     fragment_words[3] = 0x3f800000u;
-    asm_dma_clean_range(g_mesart_uniform_pool.cpu,
+    asm_dma_clean_range((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset,
                         GPU_CORE_MESART_FRAGMENT_UBO_OFFSET +
                             GPU_CORE_MESART_DEFAULT_UBO_BYTES);
     return 0;
@@ -1909,7 +1944,8 @@ static int gpu_core_render_texture_iova(const gpu_render_texture *texture,
 static int gpu_core_mesart_configure_texture(
     const mesart_renderer_graphics_pipeline *pipeline,
     const gpu_render_texture *source, adreno_x1_85_3d_draw *draw,
-    uint32_t diagnostic_probe)
+    uint32_t diagnostic_probe, const gpu_render_rect *source_rect,
+    uint32_t resource_slot)
 {
     gpu_render_target backing_target;
     gpu_buffer *backing = 0;
@@ -1921,14 +1957,19 @@ static int gpu_core_mesart_configure_texture(
     uint64_t last_leaf = 0u;
     uint32_t descriptor_width;
     uint32_t descriptor_height;
+    uint64_t resource_offset = (uint64_t)resource_slot *
+                               GPU_CORE_MESART_RESOURCE_STRIDE;
 
     if (!pipeline || !source || !draw ||
         pipeline->fragment_texture_count != 1u ||
         source->format != GPU_RENDER_FORMAT_BGRX8888 ||
+        resource_slot >= GPU_CORE_MESART_RESOURCE_SLOTS ||
+        resource_offset + GPU_CORE_MESART_TEXTURE_DESC_OFFSET + 64u >
+            g_mesart_uniform_pool.size_bytes ||
         !source->width || !source->height ||
         source->width > 0x7fffu || source->height > 0x3fffu ||
         source->stride_bytes != source->width * 4u ||
-        (source->stride_bytes & 63u) ||
+        (source->stride_bytes & 255u) ||
         gpu_core_render_texture_iova(source, &pixels_iova) != 0)
         return -1;
     descriptor_width = diagnostic_probe ? 256u : source->width;
@@ -1992,13 +2033,13 @@ static int gpu_core_mesart_configure_texture(
         source->stride_bytes > 0x3fffffu || (pixels_iova & 63u))
         return -1;
     draw->fragment_sampler_descriptor_gpu_va =
-        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_SAMPLER_DESC_OFFSET;
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + resource_offset + GPU_CORE_MESART_SAMPLER_DESC_OFFSET;
     draw->fragment_texture_descriptor_gpu_va =
-        GPU_CORE_MESART_UNIFORM_POOL_IOVA + GPU_CORE_MESART_TEXTURE_DESC_OFFSET;
+        GPU_CORE_MESART_UNIFORM_POOL_IOVA + resource_offset + GPU_CORE_MESART_TEXTURE_DESC_OFFSET;
     draw->fragment_texture_pixels_gpu_va = pixels_iova;
-    sampler = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+    sampler = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                            GPU_CORE_MESART_SAMPLER_DESC_OFFSET);
-    texture = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu +
+    texture = (uint32_t *)((uint8_t *)g_mesart_uniform_pool.cpu + resource_offset +
                            GPU_CORE_MESART_TEXTURE_DESC_OFFSET);
     for (uint32_t i = 0u; i < 4u; ++i)
         sampler[i] = 0u;
@@ -2035,7 +2076,18 @@ static int gpu_core_mesart_configure_texture(
                  A7XX_TEX_DEPTH(1u);
     asm_dma_clean_range(sampler, 16u);
     asm_dma_clean_range(texture, 64u);
-    asm_dma_clean_range(source->cpu_pixels, source->cpu_bytes);
+    if (!source->device_coherent && source_rect && source_rect->width &&
+        source_rect->height)
+    {
+        for (uint32_t y = source_rect->y;
+             y < source_rect->y + source_rect->height; ++y)
+            asm_dma_clean_range((const uint8_t *)source->cpu_pixels +
+                                    (uint64_t)y * source->stride_bytes +
+                                    (uint64_t)source_rect->x * 4u,
+                                (uint64_t)source_rect->width * 4u);
+    }
+    else if (!source->device_coherent)
+        asm_dma_clean_range(source->cpu_pixels, source->cpu_bytes);
     if (diagnostic_probe)
     {
         terminal_print("[K:GPU] compositor texture IOVA/dim/pitch=");
@@ -2149,9 +2201,10 @@ int gpu_core_mesart_3d_preflight(
         .target = &target,
         .target_gpu_va = g_scanout_target.buffer.iova,
     };
-    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 0u, 0u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 0u, 0u, 0,
+                                                 0u, 0u, 0u) != 0)
         return -2;
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u, 0u) != 0)
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 0u, 0u, 0u) != 0)
         return -3;
     if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 0u) != 0)
         return -4;
@@ -2258,9 +2311,10 @@ int gpu_core_mesart_3d_kick(
         .target = &target,
         .target_gpu_va = g_triangle_target_iova,
     };
-    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u, 0u) != 0)
+    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u, 0u, 0,
+                                                 0u, 0u, 0u) != 0)
         return -2;
-    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u, 0u) != 0)
+    if (gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u, 0u, 0u) != 0)
         return -3;
     if (gpu_core_mesart_configure_checker_texture(pipeline, &draw, 1u) != 0)
         return -3;
@@ -2570,12 +2624,27 @@ out:
     return rc;
 }
 
-int gpu_core_compositor_present_kick(
-    const mesart_renderer_graphics_pipeline *pipeline,
-    const gpu_render_texture *source, const gpu_render_target *target,
-    uint32_t triangle_half, uint32_t diagnostic_probe, uint64_t *out_fence)
+static int gpu_core_compositor_emit_remaining_draws(
+    const adreno_x1_85_3d_draw *draws, uint32_t count)
 {
-    adreno_x1_85_3d_draw draw;
+    if (!draws || !count)
+        return 0;
+    for (uint32_t i = 1u; i < count; ++i)
+        if (adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draws[i]) != 0 ||
+            adreno_x1_85_emit_auto_triangle_list_draw(
+                &g_runtime_ring, draws[i].vertex_count) != 0)
+            return -1;
+    return 0;
+}
+
+static int gpu_core_compositor_present_layers_kick(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_core_compositor_layer *layers, uint32_t layer_count,
+    const gpu_render_target *target, uint32_t diagnostic_probe,
+    uint64_t *out_fence)
+{
+    adreno_x1_85_3d_draw draws[GPU_RENDER_MAX_BATCH_DRAWS];
+    const gpu_render_texture *source;
     const gpu_firmware_blob *sqe;
     gpu_cp_bind_config cp_config;
     gpu_cp_snapshot cp = {0};
@@ -2592,17 +2661,37 @@ int gpu_core_compositor_present_kick(
 
     if (out_fence)
         *out_fence = 0u;
-    if (!pipeline || !source || !target || !out_fence || triangle_half > 3u ||
+    if (!pipeline || !layers || !layer_count ||
+        layer_count > GPU_RENDER_MAX_BATCH_DRAWS || !target ||
+        (diagnostic_probe && layer_count != 1u) ||
         !g_runtime_backend_ready ||
         g_mesart_3d_inflight.active || g_scheduler.job_count ||
         !g_runtime_ring.buffer.iova || !g_cp_pwrup.iova ||
         !g_cp_shadow.iova || !g_cp_completion.cpu || !g_cp_completion.iova ||
         !target->cpu_pixels ||
-        (!diagnostic_probe && target->width != source->width) ||
-        (!diagnostic_probe && target->height != source->height) ||
         target->format != GPU_RENDER_FORMAT_BGRX8888 ||
         gpu_core_render_target_iova(target, &target_iova) != 0)
         return -1;
+    source = layers[0].source;
+    for (uint32_t i = 0u; i < layer_count; ++i)
+    {
+        const gpu_render_texture *layer_source = layers[i].source;
+        const gpu_render_rect *source_rect = &layers[i].source_rect;
+        const gpu_render_rect *destination_rect = &layers[i].destination_rect;
+        if (!layer_source || !source_rect->width || !source_rect->height ||
+            !destination_rect->width || !destination_rect->height ||
+            source_rect->x >= layer_source->width ||
+            source_rect->y >= layer_source->height ||
+            source_rect->width > layer_source->width - source_rect->x ||
+            source_rect->height > layer_source->height - source_rect->y ||
+            destination_rect->x >= target->width ||
+            destination_rect->y >= target->height ||
+            destination_rect->width > target->width - destination_rect->x ||
+            destination_rect->height > target->height - destination_rect->y ||
+            source_rect->width != destination_rect->width ||
+            source_rect->height != destination_rect->height)
+            return -1;
+    }
     if (target->surface.generation)
     {
         if (gpu_render_backend_surface_backing(target, &target_backing) != 0)
@@ -2636,28 +2725,31 @@ int gpu_core_compositor_present_kick(
         terminal_print_inline_hex64(target_last_leaf);
         terminal_flush_log();
     }
-    draw = (adreno_x1_85_3d_draw){
-        .pipeline = pipeline,
-        .target = target,
-        .target_gpu_va = target_iova,
-        .vertex_count = triangle_half == 2u ? 2u :
-                        triangle_half == 3u ? 6u : 3u,
-        .rectangle_list = triangle_half == 2u,
-        /* Keep the vertices inside the proven +/-0.65 clip envelope, then
-         * map those endpoints to the target's outer pixel centres.  Without
-         * this expansion only 0.65^2 of every tile is shaded, visibly leaving
-         * a thick black frame around it. */
-        .expand_safe_viewport = 1u,
-    };
-    if (gpu_core_mesart_configure_vertex_buffer(pipeline, &draw, 1u,
-                                                 triangle_half == 2u ? 3u :
-                                                 triangle_half == 3u ? 4u :
-                                                 triangle_half + 1u) != 0 ||
-        gpu_core_mesart_configure_default_uniforms(pipeline, &draw, 1u, 1u) != 0 ||
-        gpu_core_mesart_configure_texture(pipeline, source, &draw,
-                                          diagnostic_probe) != 0 ||
-        adreno_x1_85_3d_validate_draw(&draw) != 0)
-        return -2;
+    for (uint32_t i = 0u; i < layer_count; ++i)
+    {
+        const gpu_render_texture *layer_source = layers[i].source;
+        draws[i] = (adreno_x1_85_3d_draw){
+            .pipeline = pipeline,
+            .target = target,
+            .target_gpu_va = target_iova,
+            .vertex_count = 6u,
+            .viewport_x = layers[i].destination_rect.x,
+            .viewport_y = layers[i].destination_rect.y,
+            .viewport_width = layers[i].destination_rect.width,
+            .viewport_height = layers[i].destination_rect.height,
+            .expand_safe_viewport = 1u,
+        };
+        if (gpu_core_mesart_configure_vertex_buffer(
+                pipeline, &draws[i], 1u, 4u, &layers[i].source_rect,
+                layer_source->width, layer_source->height, i) != 0 ||
+            gpu_core_mesart_configure_default_uniforms(
+                pipeline, &draws[i], 1u, 1u, i) != 0 ||
+            gpu_core_mesart_configure_texture(
+                pipeline, layer_source, &draws[i], diagnostic_probe,
+                &layers[i].source_rect, i) != 0 ||
+            adreno_x1_85_3d_validate_draw(&draws[i]) != 0)
+            return -2;
+    }
     {
         uint32_t trust = 0u;
         if (gpu_mmio_try_read32(&g_gpu_regs_window,
@@ -2678,9 +2770,15 @@ int gpu_core_compositor_present_kick(
     for (uint32_t i = 0u; i < 9u; ++i)
         markers[i] = magic ^ (0x00010101u * (i + 1u));
     markers[8] = magic;
-    for (uint32_t i = 0u; i < GPU_CORE_MESART_DIAGNOSTIC_BYTES; ++i)
-        ((uint8_t *)g_cp_completion.cpu)[i] = 0u;
-    gpu_buffer_prepare_for_device(&g_cp_completion);
+    /* Normal compositor frames use the unique ordered marker at word 8 as
+     * their completion fence. Clearing and cleaning the whole diagnostic
+     * page every frame was bring-up scaffolding. */
+    if (diagnostic_probe)
+    {
+        for (uint32_t i = 0u; i < GPU_CORE_MESART_DIAGNOSTIC_BYTES; ++i)
+            ((uint8_t *)g_cp_completion.cpu)[i] = 0u;
+        gpu_buffer_prepare_for_device(&g_cp_completion);
+    }
     if (!g_runtime_gx_lease_held)
     {
         rc = gpu_gmu_gen7_acquire_gpu(&g_gpu_gmu_window, &gx_ack);
@@ -2718,44 +2816,44 @@ int gpu_core_compositor_present_kick(
     if ((bind_runtime &&
          adreno_x1_85_emit_minimal_cp_init(&g_runtime_ring,
                                            g_cp_pwrup.iova) != 0) ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova, markers[0]) != 0 ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova, markers[0]) != 0) ||
         (bind_runtime &&
          adreno_x1_85_emit_nonsecure_transition(&g_runtime_ring) != 0) ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 4u, markers[1]) != 0 ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 4u, markers[1]) != 0) ||
         /* Prove that CP can translate both ends of the pre-attached desktop
          * surface before TPL1 interprets it as a texture.  These copies are
          * diagnostics only and never feed the draw. */
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_SOURCE_FIRST_OFFSET,
-            draw.fragment_texture_pixels_gpu_va) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_pixels_gpu_va) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_SOURCE_LAST_OFFSET,
-            draw.fragment_texture_pixels_gpu_va + source->stride_bytes *
-                (uint64_t)source->height - 4u) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_pixels_gpu_va + source->stride_bytes *
+                (uint64_t)source->height - 4u) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET,
-            draw.fragment_texture_descriptor_gpu_va) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_descriptor_gpu_va) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 4u,
-            draw.fragment_texture_descriptor_gpu_va + 8u) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_descriptor_gpu_va + 8u) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 8u,
-            draw.fragment_texture_descriptor_gpu_va + 12u) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_descriptor_gpu_va + 12u) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 12u,
-            draw.fragment_texture_descriptor_gpu_va + 16u) != 0 ||
-        adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
+            draws[0].fragment_texture_descriptor_gpu_va + 16u) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_copy_u32(&g_runtime_ring,
             g_cp_completion.iova + GPU_CORE_COMPOSITOR_DESCRIPTOR_OFFSET + 16u,
-            draw.fragment_texture_descriptor_gpu_va + 20u) != 0 ||
+            draws[0].fragment_texture_descriptor_gpu_va + 20u) != 0) ||
         adreno_x1_85_3d_emit_sysmem_prologue(&g_runtime_ring) != 0 ||
-        adreno_x1_85_3d_emit_x1e_baseline(&g_runtime_ring) != 0 ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 8u, markers[2]) != 0 ||
-        adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draw) != 0 ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 12u, markers[3]) != 0 ||
+        (bind_runtime && adreno_x1_85_3d_emit_x1e_baseline(&g_runtime_ring) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 8u, markers[2]) != 0) ||
+        adreno_x1_85_3d_emit_draw_state(&g_runtime_ring, &draws[0]) != 0 ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 12u, markers[3]) != 0) ||
         /* CP register-to-memory snapshots serialize against live graphics
          * blocks.  They are useful for a one-shot diagnostic, but on the
          * persistent compositor ring the next half-tile can wait forever
@@ -2773,20 +2871,21 @@ int gpu_core_compositor_present_kick(
         (diagnostic_probe &&
          adreno_x1_85_emit_register_snapshot(&g_runtime_ring, 0x03d6u, 4u,
             g_cp_completion.iova + GPU_CORE_MESART_STAGE_COUNTER_START_OFFSET + 32u) != 0) ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 16u, markers[4]) != 0 ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 20u, markers[5]) != 0 ||
-        (draw.rectangle_list ?
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 16u, markers[4]) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 20u, markers[5]) != 0) ||
+        (draws[0].rectangle_list ?
          adreno_x1_85_emit_auto_rectangle_draw(&g_runtime_ring) :
          adreno_x1_85_emit_auto_triangle_list_draw(&g_runtime_ring,
-                                                    draw.vertex_count)) != 0 ||
+                                                    draws[0].vertex_count)) != 0 ||
+        gpu_core_compositor_emit_remaining_draws(draws, layer_count) != 0 ||
         /* The first two post-draw markers locate failures around the event
          * fence.  They are not themselves render-completion fences. */
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 24u, markers[6]) != 0 ||
-        adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
-            g_cp_completion.iova + 28u, markers[7]) != 0 ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 24u, markers[6]) != 0) ||
+        (diagnostic_probe && adreno_x1_85_emit_cp_memory_probe(&g_runtime_ring,
+            g_cp_completion.iova + 28u, markers[7]) != 0) ||
         /* Publish marker[8] only after Mesa's complete A7xx sysmem cache
          * epilogue has retired on the GPU command stream. */
         adreno_x1_85_3d_emit_sysmem_fini_async(&g_runtime_ring,
@@ -2847,7 +2946,7 @@ int gpu_core_compositor_present_kick(
         g_mesart_3d_inflight.descriptor_expected[4] = descriptor[5];
     }
     g_mesart_3d_inflight.compositor_present = 1u;
-    g_mesart_3d_inflight.compositor_triangle_half = (uint8_t)triangle_half;
+    g_mesart_3d_inflight.compositor_triangle_half = 3u;
     g_mesart_3d_inflight.active = 1u;
     *out_fence = g_runtime_3d_sequence;
     return 0;
@@ -2861,6 +2960,31 @@ compositor_out:
         g_runtime_backend_ready = 0u;
     }
     return rc;
+}
+
+int gpu_core_compositor_present_kick(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_render_texture *source, const gpu_render_target *target,
+    const gpu_render_rect *source_rect,
+    const gpu_render_rect *destination_rect,
+    uint32_t triangle_half, uint32_t diagnostic_probe, uint64_t *out_fence)
+{
+    gpu_core_compositor_layer layer;
+
+    if (!source || !source_rect || !destination_rect || triangle_half > 3u)
+        return -1;
+    layer = (gpu_core_compositor_layer){source, *source_rect, *destination_rect};
+    return gpu_core_compositor_present_layers_kick(
+        pipeline, &layer, 1u, target, diagnostic_probe, out_fence);
+}
+
+int gpu_core_compositor_present_batch_kick(
+    const mesart_renderer_graphics_pipeline *pipeline,
+    const gpu_core_compositor_layer *layers, uint32_t layer_count,
+    const gpu_render_target *target, uint64_t *out_fence)
+{
+    return gpu_core_compositor_present_layers_kick(
+        pipeline, layers, layer_count, target, 0u, out_fence);
 }
 
 static int gpu_core_mesart_3d_fail(int rc)
@@ -3099,6 +3223,8 @@ int gpu_core_mesart_3d_poll(uint64_t *out_fence)
     for (uint32_t i = 0u; i < sizeof(g_mesart_3d_inflight.completion_markers) /
                               sizeof(g_mesart_3d_inflight.completion_markers[0]); ++i)
     {
+        if (g_mesart_3d_inflight.compositor_present && i != 8u)
+            continue;
         uint32_t rb_timestamp = !g_mesart_3d_inflight.compositor_present &&
             (i == 4u || i == 7u);
         if (rb_timestamp)
