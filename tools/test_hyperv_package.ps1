@@ -23,11 +23,16 @@ foreach ($library in @('netsurf','libparserutils','libwapcaplet','libhubbub','li
 Set-Content (Join-Path $assets 'OS\System\Images\bgpaper.jpg') 'fixture wallpaper'
 Set-Content (Join-Path $assets 'OS\System\Images\Mouse\arrow.cur') 'fixture cursor'
 Set-Content (Join-Path $assets 'OS\System\Fonts\Solarize.psf') 'fixture font'
+foreach($treeRoot in @($source,$assets,$target)){New-Item -ItemType Directory -Force (Join-Path $treeRoot 'OS\System\Logs') | Out-Null}
+Set-Content (Join-Path $source 'OS\System\Logs\terminal.txt') 'stale source log'
+Set-Content (Join-Path $assets 'OS\System\Logs\asset.log') 'stale recovered log'
+Set-Content (Join-Path $target 'OS\System\Logs\terminal.txt') 'guest runtime log'
 New-Item -ItemType Directory -Force (Join-Path $target 'Documents') | Out-Null
 Set-Content (Join-Path $target 'Documents\keep.txt') 'preserve me'
 & (Join-Path $root 'tools\hyperv.ps1') -Action Package -ProjectRoot $source -AssetSource $assets -PackagePath $package -IncludeDihscover
 $manifest = Get-Content (Join-Path $package 'manifest.json') -Raw | ConvertFrom-Json
 if (!$manifest.files.Count -or !$manifest.build) { throw 'Package manifest absent' }
+if($manifest.files | Where-Object path -like 'OS/System/Logs/*'){throw 'Runtime logs entered the update manifest'}
 if (!($manifest.files | Where-Object path -eq 'OS/System/Programs/Dihscover/Dihscover.sacx')) { throw 'Browser absent from manifest' }
 if (@($manifest.files | Where-Object path -like 'OS/System/Programs/Dihscover/Licenses/*').Count -ne 9) { throw 'Browser licenses absent' }
 
@@ -43,6 +48,7 @@ function Get-Partition { param([Parameter(ValueFromPipeline)]$InputObject) proce
 function Get-Volume { param([Parameter(ValueFromPipeline)]$InputObject) process { [pscustomobject]@{FileSystem='FAT32';Path=$target+'\'} } }
 & (Join-Path $root 'tools\hyperv.ps1') -Action Update -ProjectRoot $source -VhdPath 'fixture.vhdx' -PackagePath $package
 if ((Get-Content (Join-Path $target 'Documents\keep.txt')) -ne 'preserve me') { throw 'User file changed' }
+if((Get-Content (Join-Path $target 'OS\System\Logs\terminal.txt')) -ne 'guest runtime log'){throw 'Guest runtime log changed'}
 foreach ($file in $manifest.files) {
   if ((Get-FileHash (Join-Path $target $file.path)).Hash -ne $file.sha256) { throw "Mismatch: $($file.path)" }
 }

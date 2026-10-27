@@ -62,6 +62,9 @@ function Copy-Tree([string]$From, [string]$To) {
   if (!(Test-Path -LiteralPath $From)) { return }
   Assert-AssetEntry (Get-Item -LiteralPath $From -Force)
   foreach ($file in Get-ChildItem -LiteralPath $From) {
+    # Runtime logs are guest-owned, even when an old checkout or recovered
+    # bundle contains copies. Never place them in the update manifest.
+    if($file.PSIsContainer -and $file.FullName -match '[\\/]OS[\\/]System[\\/]Logs$'){continue}
     Assert-AssetEntry $file
     $dest = Safe-Path $To $file.Name
     if ($file.PSIsContainer) {
