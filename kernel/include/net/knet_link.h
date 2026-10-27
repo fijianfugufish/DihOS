@@ -13,3 +13,7 @@ void knet_link_discard_pending_frames(void);
 int knet_link_is_hyperv(void);
 
 void knet_link_diag_print(void);
+
+/* Core-0 continuation checkpoint, invoked outside USB controller locks. */
+void knet_link_set_checkpoint(void (*checkpoint)(void));
+void knet_link_checkpoint(void);

@@ -8,6 +8,7 @@
 #include "system/dihos_time.h"
 #include "terminal/terminal_api.h"
 #include "memory/pmem.h"
+#include "apps/sacx_runtime.h"
 typedef struct trace_event { const char *name; uint64_t time; int32_t values[4]; } trace_event;
 static trace_event events[256];
 static uint32_t trace_on, next, count;
@@ -76,6 +77,10 @@ void hyperv_diag_print(void)
         terminal_print_hex32(timing_slow[i]);
     }
     hyperv_net_diag_print();
+    sacx_network_stats requests;sacx_runtime_get_network_stats(&requests);
+    terminal_print_inline("HTTP service slices/active ms/max slice ms/active/queued: ");
+    terminal_print_inline_hex64(requests.slices);terminal_print_inline_hex64(requests.elapsed_ms);terminal_print_inline_hex64(requests.max_slice_ms);
+    terminal_print_inline_hex32(requests.active);terminal_print_hex32(requests.queued);
     knet_usb_status net; knet_usb_get_status(&net);
     terminal_print(net.detail); terminal_print_inline("IPv4/mask/router/DNS: ");
     terminal_print_inline_hex32(net.ip); terminal_print_inline_hex32(net.mask);

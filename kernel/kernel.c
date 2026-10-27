@@ -575,7 +575,7 @@ void kmain(boot_info *bi)
 
         task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
         uint64_t ui_stage_started=hyperv_present ? dihos_time_monotonic_ms() : 0;
-        knet_usb_background_poll();
+        sacx_runtime_network_poll();
         kinput_poll();
         kmouse_update();
         if (hyperv_present) { hyperv_timing_record(0,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
@@ -597,6 +597,7 @@ void kmain(boot_info *bi)
             if (hyperv_present) { hyperv_timing_record(2,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
         }
 
+        sacx_runtime_update_cursor();
         kmouse_commit_cursor();
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
         /* Completion may have happened while input and UI code were running.

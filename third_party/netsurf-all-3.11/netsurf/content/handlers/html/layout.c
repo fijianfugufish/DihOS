@@ -1,3 +1,6 @@
+#ifdef DIHSCOVER_FREESTANDING
+#include "dihscover_profile.h"
+#endif
 /*
  * Copyright 2005 Richard Wilson <info@tinct.net>
  * Copyright 2006 James Bursa <bursa@users.sourceforge.net>
@@ -1177,6 +1180,16 @@ layout_next_margin_block(const css_unit_ctx *unit_len_ctx,
 						NULL, NULL, box->margin,
 						box->padding, box->border);
 
+				/* CSS 2.1 10.6.3: vertical auto margins resolve to zero
+				 * before collapsing. AUTO is INT_MIN; negating it below
+				 * otherwise invokes signed overflow and moves content out
+				 * of the viewport in optimized builds. Horizontal auto
+				 * margins remain unresolved for width calculation. */
+				if (box->margin[TOP] == AUTO)
+					box->margin[TOP] = 0;
+				if (box->margin[BOTTOM] == AUTO)
+					box->margin[BOTTOM] = 0;
+
 				/* Apply top margin */
 				if (*max_pos_margin < box->margin[TOP])
 					*max_pos_margin = box->margin[TOP];
@@ -1251,6 +1264,16 @@ layout_next_margin_block(const css_unit_ctx *unit_len_ctx,
 						NULL, NULL, NULL, NULL,
 						NULL, NULL, box->margin,
 						box->padding, box->border);
+
+				/* CSS 2.1 10.6.3: vertical auto margins resolve to zero
+				 * before collapsing. AUTO is INT_MIN; negating it below
+				 * otherwise invokes signed overflow and moves content out
+				 * of the viewport in optimized builds. Horizontal auto
+				 * margins remain unresolved for width calculation. */
+				if (box->margin[TOP] == AUTO)
+					box->margin[TOP] = 0;
+				if (box->margin[BOTTOM] == AUTO)
+					box->margin[BOTTOM] = 0;
 			}
 		}
 	}
@@ -5418,6 +5441,10 @@ static void layout_calculate_descendant_bboxes(
 /* exported function documented in html/layout.h */
 bool layout_document(html_content *content, int width, int height)
 {
+#ifdef DIHSCOVER_FREESTANDING
+    DIHSCOVER_PROFILE_SCOPE(DIHSCOVER_LAYOUT);
+#endif
+
 	bool ret;
 	struct box *doc = content->layout;
 	const struct gui_layout_table *font_func = content->font_func;

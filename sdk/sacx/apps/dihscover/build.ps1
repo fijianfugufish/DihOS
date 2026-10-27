@@ -43,17 +43,27 @@ $netsurfCore = $netsurfCore | Where-Object {
 
 $sources = @(
   "sdk\sacx\apps\dihscover\main.cpp",
+  "sdk\sacx\apps\dihscover\web_font.cpp",
+  "sdk\sacx\apps\dihscover\preferences.cpp",
+  "sdk\sacx\apps\dihscover\profiling.cpp",
+  "sdk\sacx\apps\dihscover\port\setjmp.c",
+  "third_party\harfbuzz\src\harfbuzz.cc",
   "sdk\sacx\apps\dihscover\netsurf_backend.cpp",
   "sdk\sacx\apps\dihscover\netsurf_fetch.cpp",
   "sdk\sacx\apps\dihscover\netsurf_dihos_image.c",
   "sdk\sacx\apps\dihscover\netsurf_libc.cpp",
   "sdk\sacx\apps\dihscover\netsurf_optional_stubs.c",
   "sdk\sacx\apps\dihscover\runtime.cpp",
+  "sdk\sacx\apps\dihscover\scheduling.cpp",
   "sdk\sacx\apps\dihscover\heap.cpp",
   "third_party\tlsf\tlsf.c"
 ) + @(
   "third_party\netsurf-all-3.11\netsurf\content\handlers\javascript\none\none.c"
 ) + $netsurfLibraries + $netsurfCore
+
+$ftSources=@('base/ftbitmap.c','base/ftbase.c','base/ftinit.c','base/ftsystem.c','base/ftdebug.c','base/ftglyph.c','base/ftmm.c','base/ftsynth.c',
+  'autofit/autofit.c','truetype/truetype.c','cff/cff.c','psaux/psaux.c','psnames/psnames.c','pshinter/pshinter.c','sfnt/sfnt.c','smooth/smooth.c','raster/raster.c')
+foreach($ft in $ftSources) { $sources += "third_party\freetype\src\$ft" }
 
 $args = @{
   ProjectRoot = $ProjectRoot
@@ -63,7 +73,10 @@ $args = @{
   OutElfX64 = "build\sacx\Dihscover_x64.elf"
   Imports = "sdk\sacx\imports\default.imports.txt"
   Config = $Config
+  Preemptible = $true
   IncludeDir = @(
+    "sdk\sacx\apps\dihscover\port", "sdk\sacx\apps\dihscover\port\cxx",
+    "third_party\freetype\include", "third_party\harfbuzz\src",
     "sdk\sacx\freestanding\include", "third_party\tlsf",
     "third_party\netsurf-all-3.11\netsurf",
     "third_party\netsurf-all-3.11\netsurf\include",
@@ -86,10 +99,11 @@ $args = @{
   )
   Define = @(
     "NDEBUG", "DIHSCOVER_FREESTANDING", "netsurf", "nsdihos",
+    "FT2_BUILD_LIBRARY", "HB_NO_MT", "HB_NO_MMAP", "HB_NO_GETENV", "HB_NO_SETLOCALE", "HB_NO_ATEXIT",
     "WITHOUT_ICONV_FILTER",
     "_ALIGNED=", "STMTEXPR=1",
-    'NETSURF_BUILTIN_LOG_FILTER=\"level:WARNING\"',
-    'NETSURF_BUILTIN_VERBOSE_FILTER=\"level:DEBUG\"',
+    'NETSURF_BUILTIN_LOG_FILTER="level:WARNING"',
+    'NETSURF_BUILTIN_VERBOSE_FILTER="level:DEBUG"',
     "NETSURF_USE_CURL=NO", "NETSURF_USE_DUKTAPE=NO",
     "NETSURF_USE_OPENSSL=NO", "NETSURF_USE_LIBICONV_PLUG=NO",
     "NETSURF_USE_VIDEO=NO", "NETSURF_USE_PNG=NO", "NETSURF_USE_WEBP=NO",

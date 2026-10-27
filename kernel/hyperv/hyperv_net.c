@@ -1,4 +1,5 @@
 #include "hyperv/hyperv_net.h"
+#include "net/knet_link.h"
 #include "hyperv/hv_wire.h"
 #include "hyperv/vmbus.h"
 #include "memory/pmem.h"
@@ -135,6 +136,7 @@ static int send_rndis(uint32_t bytes, uint32_t control)
     if (nvsp_send(6,tx_wait,nv,sizeof(nv),tx_buffer,bytes)) return -1;
     uint64_t deadline=dihos_time_monotonic_ms()+2000;
     while (tx_done != tx_wait && dihos_time_monotonic_ms() < deadline) {
+        knet_link_checkpoint();
         if (pump_one() < 0) break;
         asm_relax();
     }

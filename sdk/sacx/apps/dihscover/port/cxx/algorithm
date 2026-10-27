@@ -1,0 +1,5 @@
+#pragma once
+#include <utility>
+namespace std {template<class I,class T,class C> I upper_bound(I first,I last,const T& value,C compare) {
+ auto count=last-first;while(count>0){auto step=count/2;I mid=first+step;if(!compare(value,*mid)){first=mid+1;count-=step+1;}else count=step;}return first;
+}}

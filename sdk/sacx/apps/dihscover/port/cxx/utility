@@ -1,0 +1,9 @@
+#pragma once
+#include <type_traits>
+namespace std {
+using size_t=__SIZE_TYPE__;
+template<class T> constexpr typename remove_reference<T>::type&& move(T&& x) noexcept {return static_cast<typename remove_reference<T>::type&&>(x);}
+template<class T> constexpr T&& forward(typename remove_reference<T>::type& x) noexcept {return static_cast<T&&>(x);}
+template<class T> constexpr T&& forward(typename remove_reference<T>::type&& x) noexcept {return static_cast<T&&>(x);}
+template<class T> void swap(T& a,T& b) {T temp=move(a);a=move(b);b=move(temp);}
+}

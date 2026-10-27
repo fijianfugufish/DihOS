@@ -1,3 +1,6 @@
+#ifdef DIHSCOVER_FREESTANDING
+#include "dihscover_profile.h"
+#endif
 /*
  * Copyright 2007 James Bursa <bursa@users.sourceforge.net>
  * Copyright 2010 Michael Drake <tlsa@netsurf-browser.org>
@@ -735,6 +738,10 @@ html_process_encoding_change(struct content *c,
 static bool
 html_process_data(struct content *c, const char *data, unsigned int size)
 {
+#ifdef DIHSCOVER_FREESTANDING
+    DIHSCOVER_PROFILE_SCOPE(DIHSCOVER_PARSE);
+#endif
+
 	html_content *html = (html_content *) c;
 	dom_hubbub_error dom_ret;
 	nserror err = NSERROR_OK; /* assume its all going to be ok */

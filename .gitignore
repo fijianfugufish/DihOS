@@ -21,3 +21,10 @@ cmds.md
 !tools/hyperv.ps1
 !tools/test_hyperv.ps1
 !tools/test_hyperv_package.ps1
+
+!tools/test_browser.ps1
+!tools/test_browser_fonts.ps1
+!tools/build_browser_validation.ps1
+!tools/sacx_build_cache.ps1
+!tools/test_sacx_build_cache.ps1
+!tools/test_browser_binary.ps1

@@ -5,7 +5,8 @@
 static uint8_t replies[16][1024];
 static uint32_t lengths[16], read_at, queued, dirty_count, cursor_count;
 static uint64_t ticks, rendered;
-static int reject_version;
+static int reject_version,panic_testing,panic_send_failure;
+static uint32_t receive_calls;
 uint64_t dihos_time_monotonic_ms(void) { return ++ticks; }
 uint64_t kgfx_rendered_frame_count(void) { return rendered; }
 uint32_t kgfx_cpu_present_damage(gpu_render_rect *out,uint32_t capacity)
@@ -37,6 +38,12 @@ int vmbus_device_send(uint32_t d,uint16_t type,uint64_t tid,const void *data,uin
     if (kind==3) { uint8_t *r=reply(4,8);memcpy(r,p+16,8); }
     if (kind==5) { reply(6,8); }
     if (kind==10) {
+        if(panic_testing){
+            assert(bytes==34 && p[17]==1);
+            assert(hv_get32(p+18)==0 && hv_get32(p+22)==0);
+            assert(hv_get32(p+26)==width && hv_get32(p+30)==height);
+            ++dirty_count;return panic_send_failure?-1:0;
+        }
         if (!pending) {
             assert(p[17]==2); /* distant updates stay disjoint, not full-screen */
             assert(hv_get32(p+26)==42 && hv_get32(p+30)==42);
@@ -48,7 +55,7 @@ int vmbus_device_send(uint32_t d,uint16_t type,uint64_t tid,const void *data,uin
 }
 int vmbus_device_receive(uint32_t d,void *out,uint32_t cap,uint32_t *n)
 {
-    assert(d==1);
+    assert(d==1);++receive_calls;
     if (!queued) { *n=0;return 1; }
     *n=lengths[read_at];assert(cap>=*n);memcpy(out,replies[read_at],*n);
     read_at=(read_at+1)%16;--queued;return 0;
@@ -66,11 +73,17 @@ int main(void)
     uint32_t before=dirty_count;
     hyperv_video_present_now(); assert(dirty_count==before+1);
     hyperv_video_present_now(); assert(dirty_count==before+2);
-    online=0; hyperv_video_present_now(); assert(dirty_count==before+2);
+    panic_testing=1;
+    uint64_t saved_ticks=ticks;uint32_t saved_receive=receive_calls,saved_pending=pending;
+    hyperv_video_panic_present();assert(dirty_count==before+3);
+    panic_send_failure=1;hyperv_video_panic_present();assert(dirty_count==before+4);
+    assert(ticks==saved_ticks && receive_calls==saved_receive && pending==saved_pending);
+    online=0;hyperv_video_panic_present();assert(dirty_count==before+4);panic_testing=0;
+    hyperv_video_present_now(); assert(dirty_count==before+4);
     bi.fb=(boot_fb){.fb_base=0xf0000000,.fb_size=1024*768*4,.width=1024,.height=768,.pitch=4096};
     assert(!hyperv_video_init(&bi) && bi.fb.width==1024); /* never exceeds reserved aperture */
     online=0;reject_version=1;boot_fb original=bi.fb;
     assert(hyperv_video_init(&bi)<0 && !memcmp(&original,&bi.fb,sizeof(original)));
-    puts("PASS: synthetic video negotiation, 1080p mode, VRAM capacity, dirty notifications, reconnect cursor hiding, rejected-version GOP fallback");
+    puts("PASS: synthetic video negotiation, 1080p mode, VRAM capacity, dirty notifications, bounded panic notification without receive/wait, reconnect cursor hiding, rejected-version GOP fallback");
     return 0;
 }

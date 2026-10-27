@@ -652,7 +652,7 @@ int usb_ethernet_recv_frame(void *frame, uint32_t cap, uint32_t *out_len)
     if (cap > g_usb_eth_dma_cap)
         cap = g_usb_eth_dma_cap;
     if (usbh_bulk_in_got_timeout(&g_usb_eth_dev, g_usb_eth_rx_dma, g_usb_eth_dma_cap,
-                                 &got, 100u) != 0)
+                                 &got, 1u) != 0)
     {
         g_usb_eth_last_rx_reason = USB_ETH_RX_NO_USB;
         g_usb_eth_last_rx_xhci_cc = g_xhci_last_cc;

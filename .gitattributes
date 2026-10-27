@@ -1,0 +1,5 @@
+# Preserve upstream source and pinned license hashes on Windows checkouts.
+third_party/freetype/** text=auto eol=lf
+third_party/harfbuzz/** text=auto eol=lf
+OS/System/Fonts/Web/*.txt text eol=lf
+OS/System/Fonts/Web/*.ttf binary

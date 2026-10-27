@@ -1,0 +1,3 @@
+#pragma once
+#include <utility>
+namespace std { template<class T> constexpr T* addressof(T& x) noexcept {return __builtin_addressof(x);} }

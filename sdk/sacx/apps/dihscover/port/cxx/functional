@@ -1,0 +1,3 @@
+#pragma once
+#include <utility>
+namespace std {template<class T> struct hash { size_t operator()(const T& x) const noexcept {return (size_t)x;} };}

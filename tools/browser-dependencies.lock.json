@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "freetype": {
+    "version": "2.14.1",
+    "ref": "VER-2-14-1",
+    "url": "https://codeload.github.com/freetype/freetype/zip/refs/tags/VER-2-14-1",
+    "archive_sha256": "9ca6e4df3e5e2ccc4839ba55501e9168dbad7b32ef3b970cb681fd89479c75a3"
+  },
+  "harfbuzz": {
+    "version": "11.4.5",
+    "url": "https://codeload.github.com/harfbuzz/harfbuzz/zip/refs/tags/11.4.5",
+    "archive_sha256": "8f90735337434ed3ed30e97f82f39799575cd79aa5ff841caab7971b3369d3c9"
+  },
+  "fonts": {
+    "source": "https://github.com/google/fonts",
+    "revision": "a4c0b21f839d7ac65a7d8b49eb81bddd110774a3",
+    "families": [
+      "Noto Sans",
+      "Noto Serif",
+      "Noto Sans Mono"
+    ],
+    "license": "SIL OFL 1.1"
+  },
+  "trees": {
+    "third_party/freetype/src": "4db0c6036daeaf4d10c29f59c51ba4525032ac27db2875dbe0fc9ce77d994557",
+    "third_party/freetype/include": "f286a53e4acc47da0512a26664c60269a1dc42786474c6fe5a7e16a93dae5c8a",
+    "third_party/harfbuzz/src": "ce456dc58895365edec75428ccee73714c4b99ca1a2f4d5a2f06bf56afb2eec3"
+  },
+  "files": {
+    "third_party/freetype/docs/FTL.TXT": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f",
+    "third_party/harfbuzz/COPYING": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+    "OS/System/Fonts/Web/Mono.ttf": "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081",
+    "OS/System/Fonts/Web/notosans-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a",
+    "OS/System/Fonts/Web/notosansmono-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a",
+    "OS/System/Fonts/Web/notoserif-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a",
+    "OS/System/Fonts/Web/Sans.ttf": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d",
+    "OS/System/Fonts/Web/Serif.ttf": "4d8e6761424656867019081a1a01336f3cb086982682698714054fc33f782713"
+  }
+}

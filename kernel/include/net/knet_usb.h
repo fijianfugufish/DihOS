@@ -21,12 +21,16 @@ typedef struct knet_usb_status
     char detail[96];
 } knet_usb_status;
 
+typedef int (*knet_stream_sink)(const uint8_t*,uint32_t,void*);
+void knet_usb_set_stream_sink(knet_stream_sink sink,void *context);
 int knet_usb_dhcp(uint32_t rounds);
-/* Bounded dispatch from the UI thread; DHCP work runs on a remote worker. */
+/* Poll from the core-0 network continuation with checkpoints installed. */
 void knet_usb_background_poll(void);
 void knet_usb_get_status(knet_usb_status *out_status);
 /* Suppress terminal/UI logging while a request runs on a worker core. */
 void knet_usb_set_worker_quiet(uint32_t quiet);
+/* Failure detail from the most recent owned fetch, including quiet requests. */
+const char *knet_usb_last_fetch_error(void);
 int knet_usb_get_url(const char *url, uint32_t max_bytes);
 int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
                        uint32_t *out_size, uint8_t *out_truncated,

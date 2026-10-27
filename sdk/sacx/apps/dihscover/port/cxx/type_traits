@@ -1,0 +1,29 @@
+#pragma once
+namespace std {
+template<class T,T Value> struct integral_constant {static constexpr T value=Value;};
+using true_type=integral_constant<bool,true>;using false_type=integral_constant<bool,false>;
+template<bool B,class T,class F> struct conditional {using type=T;};
+template<class T,class F> struct conditional<false,T,F> {using type=F;};
+template<class T> struct remove_reference {using type=T;};
+template<class T> struct remove_reference<T&> {using type=T;};
+template<class T> struct remove_reference<T&&> {using type=T;};
+template<class T> struct remove_cv {using type=T;};
+template<class T> struct remove_cv<const T> {using type=T;};
+template<class T> struct remove_cv<volatile T> {using type=T;};
+template<class T> struct remove_cv<const volatile T> {using type=T;};
+template<class T> struct decay {using type=__decay(T);};
+template<class T> struct is_const:integral_constant<bool,__is_const(T)>{};
+template<class T> struct is_reference:integral_constant<bool,__is_reference(T)>{};
+template<class T> struct is_integral:integral_constant<bool,__is_integral(T)>{};
+template<class T> struct is_signed:integral_constant<bool,__is_signed(T)>{};
+template<class T> struct is_floating_point:integral_constant<bool,__is_floating_point(T)>{};
+template<class T,class U> struct is_convertible:integral_constant<bool,__is_convertible(T,U)>{};
+template<class T> struct is_copy_constructible:integral_constant<bool,__is_constructible(T,const T&)>{};
+template<class T> struct is_default_constructible:integral_constant<bool,__is_constructible(T)>{};
+template<class T> struct is_copy_assignable:integral_constant<bool,__is_assignable(T&,const T&)>{};
+template<class T,class... A> struct is_trivially_constructible:integral_constant<bool,__is_trivially_constructible(T,A...)>{};
+template<class T> struct is_trivially_copyable:integral_constant<bool,__is_trivially_copyable(T)>{};
+template<class T> struct is_trivially_copy_assignable:integral_constant<bool,__is_trivially_assignable(T&,const T&)>{};
+template<class T> struct is_trivially_copy_constructible:integral_constant<bool,__is_trivially_constructible(T,const T&)>{};
+template<class T> struct is_trivially_destructible:integral_constant<bool,__is_trivially_destructible(T)>{};
+}

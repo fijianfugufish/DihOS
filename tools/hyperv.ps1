@@ -7,6 +7,7 @@ param(
   [string]$AssetSource = '',
   [string]$PackagePath = '',
   [switch]$IncludeDihscover,
+  [string]$KernelFile = 'OS\aa64\KERNEL.ELF',
   [uint64]$SizeBytes = 4GB,
   [ValidateRange(512MB, 1TB)]
   [uint64]$MemoryStartupBytes = 2GB,
@@ -116,12 +117,20 @@ if ($Action -eq 'Package') {
   $binaries = @{
     'EFI\BOOT\BOOTAA64.EFI' = 'build\BOOTAA64.EFI'
     'OS\aa64\STAGE2.EFI' = 'build\STAGE2.EFI'
-    'OS\aa64\KERNEL.ELF' = 'OS\aa64\KERNEL.ELF'
+    'OS\aa64\KERNEL.ELF' = $KernelFile
     'OS\System\Programs\Image Viewer\image_viewer.sacx' = 'build\sacx\image_viewer.sacx'
   }
   if ($IncludeDihscover) {
     $binaries['OS\System\Programs\Dihscover\Dihscover.sacx'] = 'build\sacx\Dihscover.sacx'
     $licenseRoot = Join-Path $PackagePath 'OS\System\Programs\Dihscover\Licenses'
+    foreach($font in @('Sans.ttf','Serif.ttf','Mono.ttf','notosans-OFL.txt','notoserif-OFL.txt','notosansmono-OFL.txt')) {
+      if(!(Test-Path -LiteralPath (Join-Path $PackagePath "OS\System\Fonts\Web\$font"))){throw "Required browser font/license missing: $font"}
+    }
+    New-Item -ItemType Directory -Force $licenseRoot | Out-Null
+    foreach($license in @(@('third_party\freetype\docs\FTL.TXT','FreeType.txt'),@('third_party\harfbuzz\COPYING','HarfBuzz.txt'),@('third_party\tlsf\tlsf.h','TLSF.txt'))) {
+      Copy-Item -LiteralPath (Join-Path $ProjectRoot $license[0]) -Destination (Join-Path $licenseRoot $license[1]) -Force
+    }
+    'Dihscover uses FreeType. Portions of this software are copyright The FreeType Project (www.freetype.org). All rights reserved. Font shaping uses HarfBuzz. Bundled Noto fonts use the SIL Open Font License. Full notices and NetSurf library licences accompany this package.' | Set-Content -Encoding ASCII (Join-Path $licenseRoot 'NOTICE.txt')
     foreach ($library in @('netsurf','libparserutils','libwapcaplet','libhubbub','libdom','libcss','libnsutils','libnsbmp','libnsgif')) {
       $license = Join-Path $ProjectRoot "third_party\netsurf-all-3.11\$library\COPYING"
       if (!(Test-Path -LiteralPath $license)) { throw "Dihscover license missing: $license" }
@@ -138,7 +147,7 @@ if ($Action -eq 'Package') {
   if (!(Test-Path (Join-Path $images 'bgpaper.jpg')) -and !(Test-Path (Join-Path $images 'wallpaper.jpg')) -and !(Test-Path (Join-Path $images 'bgpaper.bmp'))) { throw 'Wallpaper absent from asset bundle.' }
   if (!(Test-Path -LiteralPath (Join-Path $images 'Mouse\arrow.cur'))) { throw 'Required arrow.cur cursor absent from bundle.' }
   if (!(Test-Path -LiteralPath (Join-Path $PackagePath 'OS\System\Fonts\Solarize.psf'))) { throw 'Required Solarize.psf font absent from bundle.' }
-  $build = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '-' + (Get-FileHash (Join-Path $ProjectRoot 'OS\aa64\KERNEL.ELF')).Hash.Substring(0,12)
+  $build = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '-' + (Get-FileHash (Join-Path $ProjectRoot $KernelFile)).Hash.Substring(0,12)
   "DihOS ARM64 Hyper-V build $build`nSystem file hashes: 0:/manifest.json" | Set-Content -Encoding ASCII (Join-Path $PackagePath 'OS\System\BUILD.TXT')
   $files = @(Get-ChildItem -LiteralPath $PackagePath -Recurse -File | Sort-Object FullName | ForEach-Object {
     @{ path = $_.FullName.Substring($PackagePath.TrimEnd('\').Length + 1).Replace('\','/'); size = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }

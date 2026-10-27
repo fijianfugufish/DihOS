@@ -7,6 +7,9 @@ static const sacx_api *g_heap_api;
 static void *g_heap;
 static uint32_t g_heap_bytes;
 static tlsf_t g_tlsf;
+static uint64_t g_heap_used,g_heap_peak;
+uint64_t browser_heap_used(void){return g_heap_used;}
+uint64_t browser_heap_peak(void){return g_heap_peak;}
 
 void browser_heap_set_api(const sacx_api *api)
 {
@@ -45,24 +48,31 @@ int browser_heap_init(void)
 
 void browser_heap_reset(void)
 {
+    g_heap_used=g_heap_peak=0;
     if (g_heap && g_heap_bytes)
         g_tlsf = tlsf_create_with_pool(g_heap, g_heap_bytes);
 }
 
 void *browser_heap_alloc(uint32_t size)
 {
-    return g_tlsf && size ? tlsf_malloc(g_tlsf, size) : 0;
+    void *p=g_tlsf&&size?tlsf_malloc(g_tlsf,size):0;
+    if(p){g_heap_used+=tlsf_block_size(p);if(g_heap_used>g_heap_peak)g_heap_peak=g_heap_used;}return p;
 }
 
 void *browser_heap_realloc(void *ptr, uint32_t size)
 {
-    return g_tlsf ? tlsf_realloc(g_tlsf, ptr, size) : 0;
+    if(!g_tlsf)return 0;if(!size){browser_heap_free(ptr);return 0;}
+    size_t old=ptr?tlsf_block_size(ptr):0;void *p=tlsf_realloc(g_tlsf,ptr,size);
+    if(p){g_heap_used=g_heap_used-old+tlsf_block_size(p);if(g_heap_used>g_heap_peak)g_heap_peak=g_heap_used;}return p;
 }
 
 void browser_heap_free(void *ptr)
 {
     if (g_tlsf && ptr)
+    {
+        g_heap_used-=tlsf_block_size(ptr);
         tlsf_free(g_tlsf, ptr);
+    }
 }
 
 extern "C" void *malloc(__SIZE_TYPE__ size)

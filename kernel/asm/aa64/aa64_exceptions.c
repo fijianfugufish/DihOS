@@ -1,4 +1,6 @@
 #include "asm/asm.h"
+#include "apps/sacx_runtime.h"
+#include "hyperv/hyperv_video.h"
 #include "asm/aa64_user.h"
 #include "terminal/terminal_api.h"
 #include "kwrappers/kgfx.h"
@@ -32,7 +34,7 @@ static const kfont *g_aa64_panic_font;
  */
 static uint8_t g_aa64_panic_stacks[16u][4096u]
     __attribute__((aligned(16), used));
-typedef struct { uint64_t x[31], esr, far, elr, spsr; } aa64_fault_frame;
+typedef struct { uint64_t x[31], esr, far, elr, spsr, sp; } aa64_fault_frame;
 
 static const char *aa64_reason(uint64_t esr)
 {
@@ -76,6 +78,8 @@ static void aa64_terminal_panic_report(const aa64_fault_frame *f,
     aa64_terminal_register("far_el1", f->far);
     aa64_terminal_register("elr_el1", f->elr);
     aa64_terminal_register("spsr_el1", f->spsr);
+    aa64_terminal_register("interrupted_sp", f->sp);
+    terminal_warn("x16-x18 are panic-entry scratch, not original registers");
     for (uint32_t i = 0u; i < 31u; ++i)
         aa64_terminal_register(x_names[i], f->x[i]);
     if (have_source) aa64_terminal_source(source);
@@ -101,6 +105,8 @@ void aa64_exception_dispatch(const aa64_fault_frame *f)
         kcrash_map_lookup(f->elr, k_bootinfo_ptr->kernel_base_phys, &source) == 0;
     /* Persist the original exception before attempting the graphical report. */
     aa64_terminal_panic_report(f, &source, have_source);
+    if(k_bootinfo_ptr)aa64_terminal_register("kernel_base",k_bootinfo_ptr->kernel_base_phys);
+    sacx_runtime_panic_report(f->elr,f->x[30],f->sp);
     terminal_flush_log();
     kgfx_panic_begin((kcolor){8,45,120});
     if (g_aa64_panic_font) {
@@ -130,6 +136,7 @@ void aa64_exception_dispatch(const aa64_fault_frame *f)
         }
     }
     kgfx_panic_present();
+    hyperv_video_panic_present();
     aa64_exception_panic();
 }
 
@@ -221,12 +228,12 @@ __attribute__((naked)) void aa64_sync_current_el_spx(void)
 __attribute__((naked)) void aa64_exception_common(void)
 {
     __asm__ __volatile__(
+        "mov x18, sp\n"
         "mrs x16, mpidr_el1\n"
         "and x16, x16, #0xf\n"
         "adrp x17, g_aa64_panic_stacks\n"
         "add x17, x17, :lo12:g_aa64_panic_stacks\n"
-        "mov x18, #0x1000\n"
-        "madd x17, x16, x18, x17\n"
+        "add x17, x17, x16, lsl #12\n"
         "add x17, x17, #0x1000\n"
         "mov sp, x17\n"
         "sub sp, sp, #0x120\n"
@@ -236,6 +243,7 @@ __attribute__((naked)) void aa64_exception_common(void)
         "stp x24,x25,[sp,#192]\n" "stp x26,x27,[sp,#208]\n" "stp x28,x29,[sp,#224]\n" "str x30,[sp,#240]\n"
         "mrs x1,esr_el1\n" "str x1,[sp,#248]\n" "mrs x1,far_el1\n" "str x1,[sp,#256]\n"
         "mrs x1,elr_el1\n" "str x1,[sp,#264]\n" "mrs x1,spsr_el1\n" "str x1,[sp,#272]\n"
+        "str x18,[sp,#280]\n"
         "mov x0,sp\n" "bl aa64_exception_dispatch\n" "b aa64_exception_panic\n");
 }
 

@@ -1,3 +1,6 @@
+#ifdef DIHSCOVER_FREESTANDING
+#include "dihscover_profile.h"
+#endif
 /*
  * This file is part of LibCSS
  * Licensed under the MIT License,
@@ -1247,6 +1250,10 @@ css_error css_select_style(css_select_ctx *ctx, void *node,
 		css_select_handler *handler, void *pw,
 		css_select_results **result)
 {
+#ifdef DIHSCOVER_FREESTANDING
+    DIHSCOVER_PROFILE_SCOPE(DIHSCOVER_STYLE);
+#endif
+
 	css_origin origin = CSS_ORIGIN_UA;
 	uint32_t i, j, nhints;
 	css_error error;

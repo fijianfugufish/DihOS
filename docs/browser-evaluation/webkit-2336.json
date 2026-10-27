@@ -1,0 +1,61 @@
+{
+  "engine": "Playwright WebKit 26.5 revision 2336",
+  "host_only": true,
+  "tests": {
+    "javascript": true,
+    "flex": true,
+    "grid": true,
+    "unicode": true,
+    "fonts": "loaded"
+  },
+  "sites": [
+    {
+      "name": "wikipedia",
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "dom": {
+        "title": "Web browser - Wikipedia",
+        "text": 20095,
+        "links": 1224,
+        "state": "interactive"
+      },
+      "error": "TimeoutError: page.screenshot: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - taking page screenshot\u001b[22m\n\u001b[2m  - waiting for fonts to load...\u001b[22m\n",
+      "elapsed_ms": 22674
+    },
+    {
+      "name": "github",
+      "url": "https://github.com/servo/servo",
+      "dom": {
+        "title": "GitHub - servo/servo: Servo aims to empower developers with a lightweight, high-performance alternative for embedding web technologies in applications. · GitHub",
+        "text": 7566,
+        "links": 409,
+        "state": "complete"
+      },
+      "elapsed_ms": 16359
+    },
+    {
+      "name": "mdn",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/CSS",
+      "dom": {
+        "title": "CSS: Cascading Style Sheets | MDN",
+        "text": 5114,
+        "links": 1485,
+        "state": "complete"
+      },
+      "elapsed_ms": 11471
+    },
+    {
+      "name": "duckduckgo",
+      "url": "https://duckduckgo.com/?q=web+browser",
+      "dom": {
+        "title": "web browser at DuckDuckGo",
+        "text": 4930,
+        "links": 115,
+        "state": "complete"
+      },
+      "elapsed_ms": 13385
+    }
+  ],
+  "runtime": "26.5",
+  "local_navigation_ms": 102,
+  "status": "ran"
+}

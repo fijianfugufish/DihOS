@@ -1,3 +1,6 @@
+#ifdef DIHSCOVER_FREESTANDING
+#include "dihscover_profile.h"
+#endif
 /*
  * Copyright 2009 John-Mark Bell <jmb@netsurf-browser.org>
  *
@@ -252,6 +255,10 @@ static nserror nscss_create_css_data(struct content_css_data *c,
 static bool
 nscss_process_data(struct content *c, const char *data, unsigned int size)
 {
+#ifdef DIHSCOVER_FREESTANDING
+    DIHSCOVER_PROFILE_SCOPE(DIHSCOVER_PARSE);
+#endif
+
 	nscss_content *css = (nscss_content *) c;
 	css_error error;
 

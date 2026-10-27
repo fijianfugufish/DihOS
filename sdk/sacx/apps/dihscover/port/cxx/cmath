@@ -1,0 +1,30 @@
+#pragma once
+#include <math.h>
+namespace std { template<class T> inline bool isnan(T x) { return __builtin_isnan(x); } }
+
+static inline float cosf(float x) {return (float)cos(x);}
+static inline float sinf(float x) {return (float)sin(x);}
+static inline float sqrtf(float x) {return __builtin_sqrtf(x);}
+static inline float roundf(float x) {return x<0 ? -floorf(-x+0.5f):floorf(x+0.5f);}
+static inline float fmodf(float x,float y) {return (float)fmod(x,y);}
+static inline float powf(float x,float y) {return (float)pow(x,y);}
+
+#ifndef NAN
+#define NAN __builtin_nanf("")
+#endif
+static inline float hypotf(float x,float y) {x=fabsf(x);y=fabsf(y);float m=x>y?x:y;if(!m)return 0;x/=m;y/=m;return m*sqrtf(x*x+y*y);}
+static inline float tanf(float x) {return sinf(x)/cosf(x);}
+static inline float atanf(float x) {
+ bool negative=x<0;double v=negative?-x:x,offset=0;bool inverse=v>1;
+ if(inverse)v=1/v;if(v>0.414213562373095){v=(v-1)/(v+1);offset=0.7853981633974483;}
+ double square=v*v,term=v,result=v;
+ for(int i=1;i<14;++i){term*=-square;result+=term/(2*i+1);}
+ result+=offset;if(inverse)result=1.5707963267948966-result;return (float)(negative?-result:result);
+}
+static inline double log2(double x) {
+ if(x<=0)return x==0 ? -__builtin_inf():__builtin_nan("");
+ int exponent=0;while(x>=2){x*=0.5;++exponent;}while(x<1){x*=2;--exponent;}
+ double z=(x-1)/(x+1),square=z*z,term=z,sum=z;
+ for(int i=1;i<16;++i){term*=square;sum+=term/(2*i+1);}
+ return exponent+sum*2.8853900817779268;
+}

@@ -55,7 +55,8 @@ extern "C" int strncasecmp(const char*a,const char*b,size_t n){while(n&&*a&&tolo
 extern "C" long strtol(const char*s,char**end,int base){while(isspace(*s))++s;int sign=1;if(*s=='-'||*s=='+'){if(*s++=='-')sign=-1;}if(!base)base=(s[0]=='0'&&(s[1]=='x'||s[1]=='X'))?16:10;if(base==16&&s[0]=='0'&&(s[1]=='x'||s[1]=='X'))s+=2;unsigned long value=0;for(;;++s){int d=isdigit(*s)?*s-'0':tolower(*s)>='a'&&tolower(*s)<='z'?tolower(*s)-'a'+10:-1;if(d<0||d>=base)break;value=value*(unsigned)base+(unsigned)d;}if(end)*end=(char*)s;return(long)value*sign;}
 extern "C" unsigned long strtoul(const char*s,char**end,int base){return(unsigned long)strtol(s,end,base);}extern "C" int atoi(const char*s){return(int)strtol(s,0,10);}extern "C" int abs(int x){return x<0?-x:x;}
 extern "C" long long strtoll(const char*s,char**end,int base){return(long long)strtol(s,end,base);}extern "C" unsigned long long strtoull(const char*s,char**end,int base){return(unsigned long long)strtoul(s,end,base);}
-extern "C" double strtod(const char*s,char**end){while(isspace(*s))++s;double sign=1;if(*s=='-'||*s=='+'){if(*s++=='-')sign=-1;}double value=0;while(isdigit(*s))value=value*10+(*s++-'0');if(*s=='.'){double place=.1;++s;while(isdigit(*s)){value+=(*s++-'0')*place;place*=.1;}}if(*s=='e'||*s=='E'){++s;int esign=1;if(*s=='-'||*s=='+'){if(*s++=='-')esign=-1;}int exponent=0;while(isdigit(*s))exponent=exponent*10+(*s++-'0');double scale=1;while(exponent--)scale*=10;value=esign<0?value/scale:value*scale;}if(end)*end=(char*)s;return sign*value;}
+#include "browser_numbers.inc"
+extern "C" double strtod(const char*s,char**end){return browser_decimal(s,end);}
 extern "C" float strtof(const char*s,char**end){return(float)strtod(s,end);}
 static unsigned int rand_state=1;extern "C" void srand(unsigned int seed){rand_state=seed?seed:1;}extern "C" int rand(void){rand_state=rand_state*1103515245u+12345u;return(int)(rand_state&0x7fffffffu);}
 extern "C" char *getenv(const char*name){(void)name;return 0;}extern "C" char *realpath(const char*path,char*resolved){if(!path)return 0;if(!resolved)return strdup(path);strcpy(resolved,path);return resolved;}
@@ -81,12 +82,8 @@ static double reduce_angle(double x){x=fmod(x,2*M_PI);if(x>M_PI)x-=2*M_PI;else i
 extern "C" double sin(double x){x=reduce_angle(x);double x2=x*x;return x*(1-x2/6+x2*x2/120-x2*x2*x2/5040+x2*x2*x2*x2/362880);}
 extern "C" double cos(double x){x=reduce_angle(x);double x2=x*x;return 1-x2/2+x2*x2/24-x2*x2*x2/720+x2*x2*x2*x2/40320;}
 extern "C" double sqrt(double x){if(x<=0)return 0;double r=x>1?x:1;for(int i=0;i<20;++i)r=(r+x/r)*.5;return r;}
-extern "C" double pow(double base,double exponent){long long whole=(long long)exponent;if(exponent!=(double)whole)return 0;bool inverse=whole<0;if(inverse)whole=-whole;double result=1;while(whole){if(whole&1)result*=base;base*=base;whole>>=1;}return inverse?1/result:result;}
-extern "C" int gettimeofday(timeval*value,void*zone){(void)zone;const sacx_api*api=dihscover_netsurf_api();uint64_t ticks=api?api->time_ticks():0;value->tv_sec=(time_t)(ticks/1000u);value->tv_usec=(long)((ticks%1000u)*1000u);return 0;}
-extern "C" time_t time(time_t*value){timeval now;gettimeofday(&now,0);if(value)*value=now.tv_sec;return now.tv_sec;}extern "C" clock_t clock(void){const sacx_api*api=dihscover_netsurf_api();return(clock_t)(api?api->time_ticks():0);}
-extern "C" char *ctime(const time_t*value){(void)value;static char text[]="Thu Jan  1 00:00:00 1970\n";return text;}
-extern "C" tm *gmtime(const time_t*value){(void)value;static tm result={0,0,0,1,0,70,4,0,0};return &result;}extern "C" tm *localtime(const time_t*value){return gmtime(value);}extern "C" time_t mktime(tm*value){(void)value;return 0;}
-extern "C" size_t strftime(char*dst,size_t cap,const char*format,const tm*value){(void)format;(void)value;const char*text="1970-01-01";size_t n=strlen(text);if(cap){size_t copy=n<cap-1?n:cap-1;memcpy(dst,text,copy);dst[copy]=0;}return n;}
+extern "C" double pow(double base,double exponent){return browser_integer_pow(base,exponent);}
+#include "browser_clock.inc"
 extern "C" char *setlocale(int category,const char*locale){(void)category;(void)locale;static char c[]="C";return c;}extern "C" int access(const char*path,int mode){(void)path;(void)mode;return -1;}
 extern "C" int stat(const char*path,struct stat*result){(void)path;if(result)memset(result,0,sizeof(*result));return -1;}extern "C" int mkdir(const char*path,mode_t mode){(void)path;(void)mode;return -1;}extern "C" int unlink(const char*path){(void)path;return -1;}extern "C" int rmdir(const char*path){(void)path;return -1;}
 extern "C" int uname(struct utsname*result){if(!result)return -1;memset(result,0,sizeof(*result));strcpy(result->sysname,"DihOS");strcpy(result->nodename,"dihos");strcpy(result->release,"1");strcpy(result->version,"1");strcpy(result->machine,"aarch64");return 0;}
@@ -97,3 +94,5 @@ extern "C" size_t regerror(int error,const regex_t*regex,char*buffer,size_t capa
 extern "C" sighandler_t signal(int number,sighandler_t handler){(void)number;return handler;}
 extern "C" int inflateInit2_(z_stream*stream,int bits,const char*version,int size){(void)stream;(void)bits;(void)version;(void)size;return Z_DATA_ERROR;}extern "C" int inflate(z_stream*stream,int flush){(void)stream;(void)flush;return Z_DATA_ERROR;}extern "C" int inflateEnd(z_stream*stream){(void)stream;return Z_OK;}extern "C" gzFile gzopen(const char*path,const char*mode){(void)path;(void)mode;return 0;}extern "C" char*gzgets(gzFile file,char*buffer,int capacity){(void)file;(void)buffer;(void)capacity;return 0;}extern "C" int gzclose(gzFile file){(void)file;return Z_OK;}
 extern "C" iconv_t iconv_open(const char*to,const char*from){(void)to;(void)from;return(iconv_t)1;}extern "C" size_t iconv(iconv_t converter,char**input,size_t*input_left,char**output,size_t*output_left){(void)converter;size_t n=*input_left<*output_left?*input_left:*output_left;memcpy(*output,*input,n);*input+=n;*output+=n;*input_left-=n;*output_left-=n;return *input_left?((size_t)-1):0;}extern "C" int iconv_close(iconv_t converter){(void)converter;return 0;}
+
+extern "C" float sqrtf(float value){return (float)sqrt((double)value);}

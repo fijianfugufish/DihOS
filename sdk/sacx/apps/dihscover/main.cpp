@@ -4,7 +4,7 @@ extern "C" {
 #include "netsurf/keypress.h"
 }
 
-enum { ACTION_NONE, ACTION_BACK, ACTION_FORWARD, ACTION_RELOAD, ACTION_GO };
+enum { ACTION_NONE, ACTION_BACK, ACTION_FORWARD, ACTION_RELOAD, ACTION_GO, ACTION_FONT };
 enum { UI_TITLEBAR_H=34, UI_TOOLBAR_Y=42, UI_STATUS_Y=84, UI_PROGRESS_Y=101, UI_DOCUMENT_Y=112 };
 enum { DIHSCOVER_CONTENT_LOADING, DIHSCOVER_CONTENT_READY, DIHSCOVER_CONTENT_DONE };
 
@@ -14,12 +14,13 @@ static const sacx_api *g_api;
 static uint32_t g_window, g_root, g_viewport, g_status_obj;
 static uint32_t g_progress_bg, g_progress_fill;
 static uint32_t g_address, g_address_root;
-static toolbar_button g_buttons[4];
+static toolbar_button g_buttons[5];
 static uint32_t g_action, g_pressed_mask;
 static uint32_t g_root_w, g_root_h, g_view_w, g_view_h;
 static int32_t g_root_x, g_root_y;
 static uint8_t g_previous_mouse, g_previous_address_focus;
 static uint8_t g_loading;
+static uint32_t g_page_pointer=SACX_MOUSE_CURSOR_ARROW;
 static uint64_t g_load_started;
 static uint32_t g_last_done, g_last_failed;
 static char g_status_text[160];
@@ -44,7 +45,7 @@ static void url_changed(const char *url)
 
 static void pointer_changed(uint32_t pointer)
 {
-    (void)g_api->mouse_set_cursor(pointer);
+    g_page_pointer=pointer;
 }
 
 static void append_char(char *dst,uint32_t cap,char c)
@@ -66,7 +67,7 @@ static void append_uint(char *dst,uint32_t cap,uint32_t value)
 
 static void mark_loading(const char *status)
 {
-    g_loading=1u;g_load_started=g_api?g_api->time_ticks():0u;
+    g_loading=1u;g_load_started=g_api?g_api->time_monotonic_ms():0u;
     g_last_done=dihscover_netsurf_completed_fetches();g_last_failed=dihscover_netsurf_failed_fetches();
     set_status(status?status:"Loading");
 }
@@ -98,7 +99,9 @@ static void layout_ui(void)
     for(uint32_t i=0;i<3u;++i){(void)g_api->gfx_obj_set_rect(g_buttons[i].root,8+(int32_t)i*38,UI_TOOLBAR_Y,32,30);(void)g_api->gfx_text_set_pos(g_buttons[i].label,16,0);}
     (void)g_api->gfx_obj_set_rect(g_buttons[3].root,(int32_t)w-52,UI_TOOLBAR_Y,44,30);
     (void)g_api->gfx_text_set_pos(g_buttons[3].label,22,0);
-    (void)g_api->textbox_set_bounds(g_address,122,UI_TOOLBAR_Y,w>190u?w-190u:40u,30);
+    (void)g_api->gfx_obj_set_rect(g_buttons[4].root,(int32_t)w-100,UI_TOOLBAR_Y,42,30);
+    (void)g_api->gfx_text_set_pos(g_buttons[4].label,21,0);
+    (void)g_api->textbox_set_bounds(g_address,122,UI_TOOLBAR_Y,w>238u?w-238u:40u,30);
     (void)g_api->gfx_obj_set_rect(g_viewport,0,UI_DOCUMENT_Y,w,g_view_h);
     if(g_progress_bg)(void)g_api->gfx_obj_set_rect(g_progress_bg,10,UI_PROGRESS_Y,w>20u?w-20u:1u,4u);
     (void)g_api->gfx_text_set_pos(g_status_obj,10,UI_STATUS_Y);
@@ -107,11 +110,11 @@ static void layout_ui(void)
 
 static void poll_toolbar(void)
 {
-    static const uint32_t actions[4]={ACTION_BACK,ACTION_FORWARD,ACTION_RELOAD,ACTION_GO};
+    static const uint32_t actions[5]={ACTION_BACK,ACTION_FORWARD,ACTION_RELOAD,ACTION_GO,ACTION_FONT};
     uint32_t pressed=0;
-    for(uint32_t i=0;i<4u;++i)if(g_api->button_pressed(g_buttons[i].button))pressed|=1u<<i;
+    for(uint32_t i=0;i<5u;++i)if(g_api->button_pressed(g_buttons[i].button))pressed|=1u<<i;
     uint32_t released=g_pressed_mask&~pressed;
-    for(uint32_t i=0;i<4u;++i)if(released&(1u<<i)){g_action=actions[i];break;}
+    for(uint32_t i=0;i<5u;++i)if(released&(1u<<i)){g_action=actions[i];break;}
     g_pressed_mask=pressed;
     uint8_t focused=(uint8_t)(g_api->textbox_focused(g_address)>0);
     if(focused&&!g_previous_address_focus&&SACX_API_HAS(g_api,textbox_select))
@@ -139,6 +142,14 @@ static uint32_t netsurf_key_for_usage(uint8_t usage,uint8_t shift)
 static void poll_page_keys(void)
 {
     if(g_api->textbox_focused(g_address)>0)return;
+    if(g_api->input_key_pressed(SACX_KEY_F12)){dihscover_netsurf_diagnostics();return;}
+    if(g_api->input_key_pressed(SACX_KEY_F9)){dihscover_netsurf_toggle_images();return;}
+    if(g_api->input_key_down(SACX_KEY_LCTRL)||g_api->input_key_down(SACX_KEY_RCTRL)) {
+        if(g_api->input_key_pressed(SACX_KEY_EQUAL))dihscover_netsurf_zoom(10);
+        if(g_api->input_key_pressed(SACX_KEY_MINUS))dihscover_netsurf_zoom(-10);
+        return;
+    }
+    if(g_api->input_key_pressed(SACX_KEY_ESCAPE)){dihscover_netsurf_stop();g_loading=0;set_status("Stopped");return;}
     uint8_t shift=(g_api->input_key_down(SACX_KEY_LSHIFT)||g_api->input_key_down(SACX_KEY_RSHIFT))?1u:0u;
     /* Letter/punctuation HID usages only.  Control usages below are handled
        separately; scanning both was sending Backspace twice. */
@@ -155,11 +166,13 @@ static void handle_action(void)
     if(action==ACTION_GO){char url[DIHSCOVER_URL_CAP];if(g_api->textbox_text_copy(g_address,url,sizeof(url))>0){mark_loading("Loading");(void)dihscover_netsurf_navigate(url);}}
     else if(action==ACTION_BACK){mark_loading("Going back");(void)dihscover_netsurf_back();}
     else if(action==ACTION_FORWARD){mark_loading("Going forward");(void)dihscover_netsurf_forward();}
-    else if(action==ACTION_RELOAD){mark_loading("Reloading");(void)dihscover_netsurf_reload();}
+    else if(action==ACTION_RELOAD){if(g_loading){dihscover_netsurf_stop();g_loading=0;set_status("Stopped");}else{mark_loading("Reloading");(void)dihscover_netsurf_reload();}}
+    else if(action==ACTION_FONT)dihscover_netsurf_cycle_font();
 }
 
 static void update_progress(uint64_t now)
 {
+    (void)g_api->gfx_text_set(g_buttons[2].label,g_loading?"X":"R");
     uint32_t active=dihscover_netsurf_active_fetches();
     uint32_t done=dihscover_netsurf_completed_fetches();
     uint32_t failed=dihscover_netsurf_failed_fetches();
@@ -195,11 +208,14 @@ static void update_progress(uint64_t now)
 static int update(const sacx_api *api)
 {
     if(!api->window_visible(g_window)){dihscover_netsurf_shutdown();return api->app_exit(0,"Dihscover closed");}
-    uint64_t now=api->time_ticks();layout_ui();poll_toolbar();poll_page_keys();handle_action();dihscover_netsurf_pump(now);update_progress(now);
+    uint64_t now=api->time_monotonic_ms();layout_ui();poll_toolbar();poll_page_keys();handle_action();dihscover_netsurf_pump(now);update_progress(now);
     sacx_mouse_state mouse;
-    if(api->mouse_get_state(&mouse)==0&&api->window_focused(g_window)){
+    if(api->mouse_get_state(&mouse)==0&&api->window_point_can_receive_input(g_window,mouse.x,mouse.y)){
         int32_t local_x=mouse.x-g_root_x,local_y=mouse.y-g_root_y;
-        if(local_y>=UI_DOCUMENT_Y)dihscover_netsurf_mouse(local_x,local_y-UI_DOCUMENT_Y,mouse.buttons,mouse.wheel);
+        if(local_x>=0&&local_x<(int32_t)g_view_w&&local_y>=UI_DOCUMENT_Y&&local_y-UI_DOCUMENT_Y<(int32_t)g_view_h){
+            dihscover_netsurf_mouse(local_x,local_y-UI_DOCUMENT_Y,mouse.buttons,mouse.wheel);
+            (void)g_api->mouse_set_cursor(g_page_pointer);
+        }
         else (void)g_api->mouse_set_cursor(SACX_MOUSE_CURSOR_ARROW);
         g_previous_mouse=mouse.buttons;
     }
@@ -215,6 +231,7 @@ static int create_ui(void)
     if(g_api->window_create_ex(90,56,960,680,28,"Dihscover",&window_style,&g_window)!=0||g_api->window_root(g_window,&g_root)!=0)return -1;
     (void)g_api->window_set_visible(g_window,1u);
     if(make_button(&g_buttons[0],"<",ACTION_BACK)||make_button(&g_buttons[1],">",ACTION_FORWARD)||make_button(&g_buttons[2],"R",ACTION_RELOAD)||make_button(&g_buttons[3],"Go",ACTION_GO))return -1;
+    if(make_button(&g_buttons[4],"Aa",ACTION_FONT))return -1;
     textbox_style.fill=rgb(255,255,255);textbox_style.focus_fill=rgb(255,255,255);textbox_style.outline=rgb(112,124,134);
     textbox_style.focus_outline=rgb(21,137,166);textbox_style.text_color=rgb(22,28,33);textbox_style.text_scale=1u;
     if(g_api->textbox_add_rect(122,UI_TOOLBAR_Y,750,30,20,&textbox_style,0,0,&g_address)!=0||g_api->textbox_root(g_address,&g_address_root)!=0)return -1;
@@ -229,14 +246,23 @@ static int create_ui(void)
     layout_ui();return 0;
 }
 
+extern "C" void dihscover_schedule_api(const sacx_api *api);
+extern "C" void dihscover_schedule_window(uint32_t handle);
+
 extern "C" int sacx_main(const sacx_api *api)
 {
     if(!api||api->abi_version!=SACX_API_ABI_VERSION)return -1;
+    if(!SACX_API_HAS(api,app_checkpoint)||!SACX_API_HAS(api,net_response_headers_read)||!SACX_API_HAS(api,net_request_start_stream))return api->app_exit(-1,"Dihscover requires the updated streaming/preemption kernel");
+    dihscover_schedule_api(api);
     g_api=api;(void)SACX_APP_NO_CONSOLE(api);browser_heap_set_api(api);
+    if(api->log)api->log("Dihscover startup: heap");
     if(browser_heap_init()!=0)return api->app_exit(-1,"Dihscover heap allocation failed");
+    if(api->log)api->log("Dihscover startup: window");
     if(create_ui()!=0)return api->app_exit(-1,"Dihscover UI failed");
+    dihscover_schedule_window(g_window);
     dihscover_netsurf_callbacks callbacks={title_changed,url_changed,set_status,pointer_changed};
     if(dihscover_netsurf_init(api,g_viewport,&callbacks)!=0)return api->app_exit(-1,"NetSurf backend initialisation failed");
+    if(api->log)api->log("Dihscover startup: ready");
     (void)g_api->textbox_set_text(g_address,"https://www.netsurf-browser.org/");
     set_status("Ready");
     if(api->app_set_update(update)!=0)return api->app_exit(-1,"Dihscover update failed");

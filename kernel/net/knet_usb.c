@@ -18,6 +18,10 @@
 #define KNET_DHCP_XID 0x4449484Fu /* DIHO */
 
 static knet_usb_status g_knet;
+static uint32_t g_stream_stopped;
+#include "knet_receive.inc"
+static knet_stream_sink g_stream_sink;static void *g_stream_context;
+void knet_usb_set_stream_sink(knet_stream_sink sink,void *ctx) {g_stream_sink=sink;g_stream_context=ctx;if(sink)g_stream_stopped=0;}
 typedef struct knet_dns_cache_entry
 {
     char host[128];
@@ -52,6 +56,23 @@ static volatile uint32_t *g_fetch_cancelled;
 static volatile uint32_t g_fetch_busy;
 static uint64_t g_fetch_deadline;
 static volatile uint32_t g_worker_quiet;
+static char g_fetch_error[128];
+const char *knet_usb_last_fetch_error(void) { return g_fetch_error; }
+static void knet_record_error(const char *text)
+{
+    uint32_t n=0;
+    while(text&&text[n]&&n+1u<sizeof(g_fetch_error)){g_fetch_error[n]=text[n];++n;}
+    g_fetch_error[n]=0;
+}
+static void knet_record_tls_error(const char *prefix,uint32_t code)
+{
+    knet_record_error(prefix);
+    uint32_t n=0;while(g_fetch_error[n])++n;
+    char digits[10];uint32_t count=0;
+    do {digits[count++]=(char)('0'+code%10u);code/=10u;} while(code&&count<sizeof digits);
+    while(count&&n+1u<sizeof g_fetch_error)g_fetch_error[n++]=digits[--count];
+    g_fetch_error[n]=0;
+}
 
 static uint64_t knet_now_ms(void);
 static uint32_t g_dhcp_xid = KNET_DHCP_XID;
@@ -60,7 +81,7 @@ static uint8_t knet_fetch_cancelled(void)
 {
     if (g_fetch_cancelled)
         asm_dma_invalidate_range((const void *)g_fetch_cancelled, sizeof(*g_fetch_cancelled));
-    return (g_fetch_cancelled && __atomic_load_n(g_fetch_cancelled, __ATOMIC_ACQUIRE)) ||
+    return g_stream_stopped || (g_fetch_cancelled && __atomic_load_n(g_fetch_cancelled, __ATOMIC_ACQUIRE)) ||
            (g_fetch_deadline && knet_now_ms() >= g_fetch_deadline);
 }
 
@@ -72,8 +93,10 @@ static void knet_response_emit(const uint8_t *data, uint32_t len)
     {
         uint32_t room = g_fetch_size < g_fetch_capacity ? g_fetch_capacity - g_fetch_size : 0u;
         uint32_t take = len < room ? len : room;
-        if (take)
-            memcpy(g_fetch_output + g_fetch_size, data, take);
+        if (take) {
+            if(g_stream_sink) g_stream_stopped=g_stream_sink(data,take,g_stream_context)!=0;
+            else memcpy(g_fetch_output + g_fetch_size, data, take);
+        }
         g_fetch_size += take;
         if (take != len)
             g_fetch_truncated = 1u;
@@ -99,7 +122,7 @@ static void knet_log_print(const char *text) { if (knet_log_enabled()) terminal_
 static void knet_log_inline(const char *text) { if (knet_log_enabled()) terminal_print_inline(text); }
 static void knet_log_success(const char *text) { if (knet_log_enabled()) terminal_success(text); }
 static void knet_log_warn(const char *text) { if (knet_log_enabled()) terminal_warn(text); }
-static void knet_log_error(const char *text) { if (knet_log_enabled()) terminal_error(text); }
+static void knet_log_error(const char *text) { knet_record_error(text);if (knet_log_enabled()) terminal_error(text); }
 static void knet_log_hex32(uint32_t value) { if (knet_log_enabled()) terminal_print_inline_hex32(value); }
 static void knet_log_flush(void) { if (knet_log_enabled()) terminal_flush_log(); }
 
@@ -487,7 +510,7 @@ typedef struct dhcp_parse_result
     uint32_t lease_seconds;
 } dhcp_parse_result;
 
-static uint32_t g_auto_job, g_auto_phase, g_auto_attempts;
+static uint32_t g_auto_phase, g_auto_attempts;
 static uint64_t g_auto_deadline, g_auto_renew, g_auto_dispatch;
 static dhcp_parse_result g_auto_offer;
 
@@ -589,7 +612,7 @@ static int dhcp_wait(uint8_t want_type, dhcp_parse_result *out, uint32_t rounds)
         uint32_t got = 0u;
         uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
         ++scanned;
-        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) == 0)
+        if (knet_receive_frame(g_rx, sizeof(g_rx), &got) == 0)
         {
             dhcp_parse_result r;
             frames++;
@@ -737,7 +760,7 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
             retry_at = knet_now_ms() + 500u;
         }
         ++scanned;
-        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) == 0 &&
+        if (knet_receive_frame(g_rx, sizeof(g_rx), &got) == 0 &&
             parse_arp_reply(g_rx, got, target_ip, out_mac) == 0)
             return 0;
         if (!from_pending)
@@ -1123,7 +1146,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
             ++dns_scanned;
             if (!from_pending)
                 ++dns_polls;
-            if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) != 0 || got < 54u)
+            if (knet_receive_frame(g_rx, sizeof(g_rx), &got) != 0 || got < 54u)
                 continue;
             if (get_be16(g_rx + 12u) != KNET_ETH_TYPE_IPV4 || g_rx[23u] != KNET_IP_PROTO_UDP)
                 continue;
@@ -1250,7 +1273,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 #define KNET_PARSE_TCP(packet_, ok_) do { \
         uint32_t got_ = 0u; uint32_t ihl_; uint32_t to_; uint32_t thl_; uint32_t total_; \
         (ok_) = 0u; \
-        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got_) == 0 && got_ >= 54u && \
+        if (knet_receive_frame(g_rx, sizeof(g_rx), &got_) == 0 && got_ >= 54u && \
             get_be16(g_rx + 12u) == KNET_ETH_TYPE_IPV4 && g_rx[23u] == KNET_IP_PROTO_TCP && \
             get_be32(g_rx + 26u) == server_ip && get_be32(g_rx + 30u) == g_knet.ip) { \
             ihl_ = (uint32_t)(g_rx[14u] & 0x0Fu) * 4u; to_ = 14u + ihl_; total_ = get_be16(g_rx + 16u); \
@@ -1422,6 +1445,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                 int err = br_ssl_engine_last_error(&g_tls_client.eng);
                 if (err != 0)
                 {
+                    knet_record_tls_error("TLS handshake failed, engine error ",(uint32_t)err);
                     terminal_print_inline("net:get TLS error ");
                     print_dec_inline((uint32_t)err);
                     terminal_print("");
@@ -1580,6 +1604,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
             }
         }
 
+        knet_record_tls_error("TLS/HTTPS timeout, engine error ",(uint32_t)br_ssl_engine_last_error(&g_tls_client.eng));
         terminal_print_inline("net:get TLS/HTTPS timeout, engine error ");
         print_dec_inline((uint32_t)br_ssl_engine_last_error(&g_tls_client.eng));
         terminal_print("");
@@ -1693,6 +1718,8 @@ int knet_usb_fetch_request(const char *url, const char *method,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return -2;
 
+    g_fetch_error[0]=0;
+    g_stream_stopped=0;
     g_fetch_output = response;
     g_fetch_capacity = capacity;
     g_fetch_size = 0u;
@@ -1722,6 +1749,7 @@ int knet_usb_fetch_request(const char *url, const char *method,
     g_fetch_capacity = 0u;
     g_fetch_size = 0u;
     g_fetch_cancelled = 0;
+    g_stream_stopped=0;
     g_fetch_deadline = 0u;
     if (!knet_link_is_hyperv()) usbh_background_network_set(0u);
     __atomic_store_n(&g_fetch_busy, 0u, __ATOMIC_RELEASE);
@@ -1750,22 +1778,11 @@ int knet_usb_dhcp(uint32_t rounds)
 static void knet_idle_arp(void)
 {
     uint32_t got=0;
-    for (uint32_t i=0;i<8;++i) {
-        if (knet_link_recv_frame(g_rx,sizeof(g_rx),&got)) break;
-        if (got < 42 || get_be16(g_rx+12) != 0x0806 ||
-            get_be16(g_rx+14) != 1 || get_be16(g_rx+16) != 0x0800 ||
-            g_rx[18] != 6 || g_rx[19] != 4 || get_be16(g_rx+20) != 1 ||
-            get_be32(g_rx+38) != g_knet.ip) continue;
-        memset(g_tx,0,60);
-        memcpy(g_tx,g_rx+22,6); memcpy(g_tx+6,g_knet.mac,6); put_be16(g_tx+12,0x0806);
-        put_be16(g_tx+14,1); put_be16(g_tx+16,0x0800); g_tx[18]=6; g_tx[19]=4;
-        put_be16(g_tx+20,2); memcpy(g_tx+22,g_knet.mac,6); put_be32(g_tx+28,g_knet.ip);
-        memcpy(g_tx+32,g_rx+22,6); memcpy(g_tx+38,g_rx+28,4);
-        (void)knet_link_send_frame(g_tx,60);
-    }
+    for (uint32_t i=0;i<8;++i)
+        if (knet_receive_frame(g_rx,sizeof(g_rx),&got)) break;
 }
 
-/* One bounded state-machine step. The ordinary fetch lock also protects the
+/* One resumable state-machine step. The ordinary fetch lock also protects the
  * NIC rings and shared DHCP/DNS/TCP buffers against app/terminal requests. */
 static void knet_auto_step(void *ctx)
 {
@@ -1790,7 +1807,7 @@ static void knet_auto_step(void *ctx)
     }
     for (uint32_t i=0;i<32 && g_auto_phase;++i) {
         dhcp_parse_result reply;
-        if (knet_link_recv_frame(g_rx,sizeof(g_rx),&got)) break;
+        if (knet_receive_frame(g_rx,sizeof(g_rx),&got)) break;
         if (parse_dhcp_packet(g_rx,got,&reply)) continue;
         if (reply.msg_type == 6) { g_knet.configured=0; g_auto_phase=0; g_auto_deadline=now+1000; break; }
         if (g_auto_phase == 1 && reply.msg_type == 2) {
@@ -1828,11 +1845,8 @@ void knet_usb_background_poll(void)
     if (!knet_link_is_hyperv()) return;
     uint64_t now=dihos_time_monotonic_ms();
     if (now < g_auto_dispatch) return;
-    if (g_auto_job) {
-        uint32_t status=kwork_status(g_auto_job);
-        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING) return;
-    }
     g_auto_dispatch=now+50;
-    /* Never run blocking driver work on the UI core if no worker exists. */
-    (void)kwork_submit(knet_auto_step,0,KWORK_SUBMIT_REQUIRE_REMOTE|KWORK_SUBMIT_QUIET,&g_auto_job);
+    /* Called only by the core-0 network continuation, with the same polling
+     * checkpoints as fetches. DHCP must not depend on a remote worker. */
+    knet_auto_step(0);
 }

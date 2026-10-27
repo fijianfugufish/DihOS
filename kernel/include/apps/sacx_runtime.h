@@ -11,6 +11,9 @@ extern "C"
     typedef struct kimg kimg;
 
     typedef void (*sacx_runtime_print_fn)(const char *text, void *user);
+    typedef struct sacx_network_stats {uint64_t slices,elapsed_ms,max_slice_ms;uint32_t active,queued;} sacx_network_stats;
+    void sacx_runtime_get_network_stats(sacx_network_stats *out);
+    void sacx_runtime_update_cursor(void);
     typedef void (*sacx_runtime_console_visible_fn)(uint8_t visible, void *user);
 
     typedef struct sacx_runtime_io
@@ -60,6 +63,8 @@ extern "C"
     int sacx_runtime_init(const struct kfont *font);
     void sacx_runtime_set_font(const struct kfont *font);
     void sacx_runtime_update(void);
+    void sacx_runtime_network_poll(void);
+    void sacx_runtime_panic_report(uint64_t pc,uint64_t lr,uint64_t sp);
 
     int sacx_runtime_launch(const char *raw_path,
                             const char *friendly_path,

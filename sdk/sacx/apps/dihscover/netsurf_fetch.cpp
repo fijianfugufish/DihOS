@@ -21,7 +21,8 @@ typedef struct dihos_fetch {
     uint8_t aborted;
     uint8_t locked;
     uint8_t response_started;
-    uint8_t terminal;
+    uint8_t terminal,complete,streaming,start_failed,synthetic_redirect;
+    char redirect_url[DIHSCOVER_URL_CAP];
     char *post_data;
 } dihos_fetch;
 
@@ -31,10 +32,14 @@ static uint32_t g_failed_fetches;
 
 static void log_response(const sacx_net_response_info *info)
 {
+#ifdef DIHSCOVER_TRACE
     const sacx_api *api=dihscover_netsurf_api();if(!api||!api->log||!info)return;char text[176]="Dihscover NetSurf response: status=";uint32_t at=35u;char tmp[12];uint32_t n=0u,value=info->http_status;
     if(!value)tmp[n++]='0';while(value&&n<sizeof(tmp)){tmp[n++]=(char)('0'+value%10u);value/=10u;}while(n&&at+1u<sizeof(text))text[at++]=tmp[--n];
     const char body[]=" body=";for(uint32_t i=0;body[i]&&at+1u<sizeof(text);++i)text[at++]=body[i];n=0u;value=info->body_size;if(!value)tmp[n++]='0';while(value&&n<sizeof(tmp)){tmp[n++]=(char)('0'+value%10u);value/=10u;}while(n&&at+1u<sizeof(text))text[at++]=tmp[--n];
     const char mime[]=" mime=";for(uint32_t i=0;mime[i]&&at+1u<sizeof(text);++i)text[at++]=mime[i];for(uint32_t i=0;info->content_type[i]&&at+1u<sizeof(text);++i)text[at++]=info->content_type[i];text[at]=0;api->log(text);
+#else
+    (void)info;
+#endif
 }
 
 static char *copy_string(const char *text)
@@ -86,36 +91,31 @@ static void *fetch_setup(struct fetch *parent,nsurl *url,bool only_2xx,bool down
     (void)only_2xx;(void)downgrade_tls;(void)post_multipart;(void)headers;
     dihos_fetch *ctx=(dihos_fetch*)calloc(1,sizeof(*ctx));if(!ctx)return 0;
     ctx->parent=parent;ctx->url=nsurl_ref(url);ctx->post_data=post_urlenc?copy_string(post_urlenc):0;
+    if(post_urlenc&&!ctx->post_data){nsurl_unref(ctx->url);free(ctx);return 0;}
+    if(post_multipart)ctx->start_failed=1;
     ctx->next=g_fetches;g_fetches=ctx;return ctx;
 }
 
 static bool fetch_start(void *opaque)
 {
     dihos_fetch *ctx=(dihos_fetch*)opaque;const sacx_api *api=dihscover_netsurf_api();
-    if(!api||!SACX_API_HAS(api,net_request_start))return false;
-    /* DuckDuckGo result links are tracking wrappers that this tiny network
-       stack receives as a 200-byte landing page rather than an HTTP redirect.
-       Unwrap the destination before the request reaches the network. */
-    {char target[DIHSCOVER_URL_CAP];if(duckduckgo_target(nsurl_access(ctx->url),target,sizeof(target))){
-        /* Do not emit FETCH_REDIRECT synchronously here: core redirect handling
-           can free this fetch context during its own callback.  Repoint this
-           request to the destination instead, which is equivalent for a GET
-           and avoids a use-after-free data abort. */
-        nsurl *destination=0;if(nsurl_create(target,&destination)==NSERROR_OK){nsurl_unref(ctx->url);ctx->url=destination;}
-    }}
-    if(ctx->post_data&&SACX_API_HAS(api,net_request_start_ex)){
-        sacx_net_request_desc_ex desc={};desc.url=nsurl_access(ctx->url);desc.max_response_bytes=8u*1024u*1024u;
-        desc.timeout_ms=45000u;desc.redirect_limit=8u;desc.method="POST";desc.body=ctx->post_data;
-        desc.body_size=dihs_strlen(ctx->post_data);desc.content_type="application/x-www-form-urlencoded";
-        return api->net_request_start_ex(&desc,&ctx->request)==0;
+    if(ctx->start_failed)return true;
+    if(!api||!SACX_API_HAS(api,net_request_start_stream))return false;
+    if(duckduckgo_target(nsurl_access(ctx->url),ctx->redirect_url,sizeof ctx->redirect_url)) {
+        ctx->synthetic_redirect=1;return true; /* delivered asynchronously by poll */
     }
-    sacx_net_request_desc desc={};desc.url=nsurl_access(ctx->url);desc.max_response_bytes=8u*1024u*1024u;
-    desc.timeout_ms=45000u;desc.redirect_limit=8u;return api->net_request_start(&desc,&ctx->request)==0;
+    sacx_net_request_desc_ex desc={};desc.url=nsurl_access(ctx->url);desc.max_response_bytes=8u*1024u*1024u;
+    desc.timeout_ms=45000;desc.method=ctx->post_data?"POST":"GET";desc.body=ctx->post_data;
+    desc.body_size=ctx->post_data?dihs_strlen(ctx->post_data):0;desc.content_type="application/x-www-form-urlencoded";
+    int rc=api->net_request_start_stream(&desc,&ctx->request);
+    if(rc==-3)return false; /* bounded request slots: retry when a slot is freed */
+    if(rc)ctx->start_failed=1;
+    return true;
 }
 
 static void fetch_abort(void *opaque)
 {
-    dihos_fetch *ctx=(dihos_fetch*)opaque;ctx->aborted=1u;const sacx_api *api=dihscover_netsurf_api();if(api&&api->log)api->log("Dihscover NetSurf fetch: aborted by core before finished");
+    dihos_fetch *ctx=(dihos_fetch*)opaque;ctx->aborted=1u;ctx->terminal=1u;const sacx_api *api=dihscover_netsurf_api();
     if(ctx->request&&api)(void)api->net_request_cancel(ctx->request);
 }
 
@@ -133,8 +133,7 @@ static void fetch_free_context(void *opaque)
 
 static void fail_fetch(dihos_fetch *ctx,const char *error)
 {
-    const sacx_api *api=dihscover_netsurf_api();if(api&&api->log){char text[192]="Dihscover NetSurf fetch error: ";dihs_copy(text+30u,sizeof(text)-30u,error?error:"unknown");api->log(text);}fetch_msg msg={};msg.type=FETCH_ERROR;msg.data.error=error;send_message(ctx,&msg);ctx->aborted=1u;ctx->terminal=1u;++g_failed_fetches;
-    if(api&&SACX_API_HAS(api,app_set_console_visible))SACX_APP_SHOW_CONSOLE(api);
+    const sacx_api *api=dihscover_netsurf_api();if(api&&api->log){char text[192]="Dihscover NetSurf fetch error: ";const uint32_t prefix=sizeof("Dihscover NetSurf fetch error: ")-1;dihs_copy(text+prefix,sizeof(text)-prefix,error?error:"unknown");api->log(text);}fetch_msg msg={};msg.type=FETCH_ERROR;msg.data.error=error;send_message(ctx,&msg);ctx->aborted=1u;ctx->terminal=1u;++g_failed_fetches;
 }
 
 static void begin_response(dihos_fetch *ctx)
@@ -144,10 +143,25 @@ static void begin_response(dihos_fetch *ctx)
     log_response(&info);
     uint32_t status=info.http_status?info.http_status:200u;
     fetch_set_http_code(ctx->parent,status);
-    /* FETCH_HEADER messages are individual fields, not raw HTTP lines.  The
-       old framing could leave NetSurf with a completed but untyped document. */
-    send_header(ctx,"Content-Type",info.content_type[0]?info.content_type:"text/html; charset=utf-8");
-    send_content_length(ctx,info.body_size);
+    uint8_t raw[16384];uint32_t bytes=0;
+    if(api->net_response_headers_read(ctx->request,0,raw,sizeof raw,&bytes)) {fail_fetch(ctx,"HTTP headers unavailable");return;}
+    uint32_t offset=0;bool first=true,has_type=false;ctx->redirect_url[0]=0;
+    while(offset+1<bytes) {
+        uint32_t end=offset;while(end+1<bytes&&!(raw[end]=='\r'&&raw[end+1]=='\n'))++end;
+        if(end==offset)break;
+        if(first){first=false;offset=end+2;continue;}
+        uint32_t colon=offset;while(colon<end&&raw[colon]!=':')++colon;
+        auto name_is=[&](const char *name){uint32_t n=0;for(;offset+n<colon&&name[n];++n){uint8_t c=raw[offset+n];if(c>='A'&&c<='Z')c+=32;if(c!=(uint8_t)name[n])return false;}return offset+n==colon&&!name[n];};
+        if(name_is("content-type"))has_type=true;
+        if(name_is("location")){uint32_t at=colon+1;while(at<end&&(raw[at]==' '||raw[at]=='\t'))++at;uint32_t n=end-at;if(n>=sizeof ctx->redirect_url){fail_fetch(ctx,"HTTP redirect URL too long");return;}dihs_memcpy(ctx->redirect_url,raw+at,n);ctx->redirect_url[n]=0;}
+        fetch_msg header={};header.type=FETCH_HEADER;header.data.header_or_data.buf=raw+offset;header.data.header_or_data.len=end-offset;send_message(ctx,&header);
+        if(ctx->aborted)return;offset=end+2;
+    }
+    if(status>=300&&status<400&&status!=304&&ctx->redirect_url[0]) {
+        fetch_msg redirect={};redirect.type=FETCH_REDIRECT;redirect.data.redirect=ctx->redirect_url;ctx->terminal=1;send_message(ctx,&redirect);return;
+    }
+    if(status==304){fetch_msg fresh={};fresh.type=FETCH_NOTMODIFIED;ctx->terminal=1;send_message(ctx,&fresh);return;}
+    if(!has_type)send_header(ctx,"Content-Type","text/html; charset=utf-8");
     ctx->body_size=info.body_size;ctx->body_offset=0u;ctx->response_started=1u;
 }
 
@@ -158,22 +172,42 @@ static void stream_response(dihos_fetch *ctx)
        only one bounded fragment per application update so network-heavy pages
        cannot monopolise the kernel and look frozen. */
     if(!ctx->aborted&&ctx->body_offset<ctx->body_size){uint32_t want=ctx->body_size-ctx->body_offset;if(want>sizeof(chunk))want=sizeof(chunk);uint32_t got=0u;
-        if(api->net_response_read(ctx->request,ctx->body_offset,chunk,want,&got)!=0||!got){
+        if((ctx->streaming ? api->net_response_read_available(ctx->request,ctx->body_offset,chunk,want,&got) : api->net_response_read(ctx->request,ctx->body_offset,chunk,want,&got))!=0||!got){
             fail_fetch(ctx,"DihOS network response ended before its declared length");return;
         }
-        msg.type=FETCH_DATA;msg.data.header_or_data.buf=chunk;msg.data.header_or_data.len=got;send_message(ctx,&msg);ctx->body_offset+=got;if(ctx->aborted){const sacx_api *log_api=dihscover_netsurf_api();if(log_api&&log_api->log)log_api->log("Dihscover NetSurf fetch: abort followed page-data callback");return;}
+        msg.type=FETCH_DATA;msg.data.header_or_data.buf=chunk;msg.data.header_or_data.len=got;send_message(ctx,&msg);ctx->body_offset+=got;if(ctx->aborted)return;
     }
-    if(!ctx->aborted&&ctx->body_offset==ctx->body_size){msg.type=FETCH_FINISHED;send_message(ctx,&msg);ctx->terminal=1u;++g_completed_fetches;const sacx_api *log_api=dihscover_netsurf_api();if(log_api&&log_api->log)log_api->log("Dihscover NetSurf fetch: all response bytes delivered");}
+    if(!ctx->aborted&&ctx->complete&&ctx->body_offset==ctx->body_size){msg.type=FETCH_FINISHED;send_message(ctx,&msg);ctx->terminal=1u;++g_completed_fetches;}
 }
 
 static void fetch_poll_scheme(lwc_string *scheme)
 {
     (void)scheme;const sacx_api *api=dihscover_netsurf_api();dihos_fetch *ctx=g_fetches;
-    while(ctx){dihos_fetch *next=ctx->next;if(!ctx->locked&&ctx->request){uint32_t status=api->net_request_status(ctx->request);
-        if(status==SACX_NET_STATUS_DONE){if(!ctx->response_started)begin_response(ctx);if(!ctx->terminal&&!ctx->locked)stream_response(ctx);}
-        else if(status==SACX_NET_STATUS_FAILED||status==SACX_NET_STATUS_CANCELLED)fail_fetch(ctx,"DihOS network request failed");
+    while(ctx){dihos_fetch *next=ctx->next;
+        if(!ctx->locked&&ctx->synthetic_redirect){fetch_set_http_code(ctx->parent,302);fetch_msg redirect={};redirect.type=FETCH_REDIRECT;redirect.data.redirect=ctx->redirect_url;ctx->synthetic_redirect=0;ctx->terminal=1;send_message(ctx,&redirect);}
+        if(!ctx->locked&&ctx->start_failed){ctx->start_failed=0;fail_fetch(ctx,"Network request rejected: URL, form size or available memory");}
+        if(!ctx->locked&&!ctx->terminal&&ctx->request){uint32_t status=api->net_request_status(ctx->request);
+        ctx->streaming=SACX_API_HAS(api,net_response_progress)&&SACX_API_HAS(api,net_response_read_available);
+        if(ctx->streaming&&(status==SACX_NET_STATUS_LOADING||status==SACX_NET_STATUS_DONE)) {
+            sacx_net_progress progress={};
+            if(api->net_response_progress(ctx->request,&progress)==0&&progress.headers_ready) {
+                if(progress.truncated){fail_fetch(ctx,"Response exceeds the configured size limit");} else {
+                if(!ctx->response_started)begin_response(ctx);
+                ctx->body_size=progress.available_bytes;ctx->complete=progress.complete;
+                if(!ctx->terminal&&!ctx->locked)stream_response(ctx);
+                }
+            }
+        }
+        else if(status==SACX_NET_STATUS_DONE){ctx->complete=1;if(!ctx->response_started)begin_response(ctx);if(!ctx->terminal&&!ctx->locked)stream_response(ctx);}
+        else if(status==SACX_NET_STATUS_FAILED||status==SACX_NET_STATUS_CANCELLED){
+            sacx_net_response_info failure={};
+            if(api->net_response_info(ctx->request,&failure)==0&&failure.error[0])
+                fail_fetch(ctx,failure.error);
+            else fail_fetch(ctx,status==SACX_NET_STATUS_CANCELLED?"Network request cancelled":"DihOS network request failed");
+        }
+    }
         if(ctx->terminal){fetch_remove_from_queues(ctx->parent);fetch_free(ctx->parent);}
-    }ctx=next;}
+        ctx=next;}
 }
 
 extern "C" uint32_t dihscover_fetch_active_count(void)

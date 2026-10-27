@@ -15,6 +15,14 @@ foreach ($path in @('build\BOOTAA64.EFI','build\STAGE2.EFI','OS\aa64\KERNEL.ELF'
   Set-Content -LiteralPath (Join-Path $source $path) -Value 'fixture binary' -Encoding ASCII
 }
 Set-Content (Join-Path $source 'build\sacx\Dihscover.sacx') 'fixture browser'
+New-Item -ItemType Directory -Force (Join-Path $source 'OS\System\Fonts\Web') | Out-Null
+foreach($font in @('Sans.ttf','Serif.ttf','Mono.ttf','notosans-OFL.txt','notoserif-OFL.txt','notosansmono-OFL.txt')) {
+  Set-Content (Join-Path $source "OS\System\Fonts\Web\$font") 'fixture font/license'
+}
+foreach($license in @('third_party\freetype\docs\FTL.TXT','third_party\harfbuzz\COPYING','third_party\tlsf\tlsf.h')) {
+  New-Item -ItemType Directory -Force (Split-Path (Join-Path $source $license) -Parent) | Out-Null
+  Set-Content (Join-Path $source $license) 'fixture font library license'
+}
 foreach ($library in @('netsurf','libparserutils','libwapcaplet','libhubbub','libdom','libcss','libnsutils','libnsbmp','libnsgif')) {
   $licenseDir=Join-Path $source "third_party\netsurf-all-3.11\$library"
   New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
@@ -34,7 +42,7 @@ $manifest = Get-Content (Join-Path $package 'manifest.json') -Raw | ConvertFrom-
 if (!$manifest.files.Count -or !$manifest.build) { throw 'Package manifest absent' }
 if($manifest.files | Where-Object path -like 'OS/System/Logs/*'){throw 'Runtime logs entered the update manifest'}
 if (!($manifest.files | Where-Object path -eq 'OS/System/Programs/Dihscover/Dihscover.sacx')) { throw 'Browser absent from manifest' }
-if (@($manifest.files | Where-Object path -like 'OS/System/Programs/Dihscover/Licenses/*').Count -ne 9) { throw 'Browser licenses absent' }
+if (@($manifest.files | Where-Object path -like 'OS/System/Programs/Dihscover/Licenses/*').Count -ne 13) { throw 'Browser licenses absent' }
 
 # Fake only the host disk APIs. The production manifest verification and copy
 # implementation runs against a disposable directory without Hyper-V privileges.

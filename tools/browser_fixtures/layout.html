@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>Dihscover deterministic layout</title>
+<style>
+@font-face{font-family:FixtureSans;src:url(/fonts/Sans.ttf)}
+@font-face{font-family:FixtureSerif;src:url(/fonts/Serif.ttf)}
+@font-face{font-family:FixtureMono;src:url(/fonts/Mono.ttf)}
+body{margin:20px;background:#fff;color:#172231;font:16px FixtureSans,sans-serif}
+section{width:640px;margin:16px 0;padding:12px;border:1px solid #789}
+.flex{display:flex;gap:12px}.flex>div{width:100px;height:40px;background:#75b9cf}
+.grid{display:grid;grid-template-columns:100px 200px;gap:12px}.grid>div{height:40px;background:#afd6a4}
+.clip{position:relative;overflow:hidden;width:180px;height:60px;border:2px solid #d55}.clip>div{position:absolute;left:120px;width:120px;height:100px;background:#dfb07d}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #789;padding:8px}
+</style>
+<h1>Layout and text fixture</h1>
+<section><p>Proportional: WWWW iiii. café Ωμέγα — Unicode and <b>bold</b>, <i>italic</i>, <span style="font-size:17.5px">fractional sizes</span>.</p>
+<p style="font-family:FixtureSerif,serif">Serif: a paragraph with a baseline and wrapping across several words in a fixed width container. The quick brown fox jumps over the lazy dog.</p>
+<p style="font-family:FixtureMono,monospace">Monospace: WWWW iiii 0123456789</p></section>
+<section><table><tr><th>Name</th><th>Value</th></tr><tr><td>Fixed table cell</td><td>Wrapping table content, controls below.</td></tr></table>
+<p><input value="Input text"><button>Button</button><select><option>Option one</option></select></p>
+<div class="clip"><div></div></div></section>
+<section><h2>Flex and Grid (engine capability probes)</h2><div class="flex" id="flex"><div id="f1">one</div><div id="f2">two</div></div>
+<div class="grid"><div id="g1">one</div><div id="g2">two</div></div></section>
+<section id="js">JavaScript did not execute.</section>
+<script>
+document.getElementById('js').textContent='JavaScript executed; DOM updated.';
+window.fixtureResults=()=>({
+ javascript:document.getElementById('js').textContent.includes('DOM updated'),
+ flex:Math.abs(document.getElementById('f2').getBoundingClientRect().left-document.getElementById('f1').getBoundingClientRect().left-112)<1,
+ grid:Math.abs(document.getElementById('g2').getBoundingClientRect().left-document.getElementById('g1').getBoundingClientRect().left-112)<1,
+ unicode:document.characterSet==='UTF-8',
+ fonts:document.fonts?document.fonts.status:'unavailable'
+});
+</script>

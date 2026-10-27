@@ -22,6 +22,7 @@ param(
 
   [switch]$BuildX64,
 
+  [switch]$Preemptible,
   [switch]$RebuildPacker
 )
 
@@ -47,6 +48,8 @@ $ld = "ld.lld"
 
 $sdkInc = Join-Path $ProjectRoot "sdk\sacx\include"
 $toolsDir = Join-Path $ProjectRoot "tools"
+. (Join-Path $toolsDir "sacx_build_cache.ps1")
+$compilerEpoch = (Get-Item -LiteralPath (Get-Command $clang).Source).LastWriteTimeUtc.Ticks.ToString() + ":" + (Get-Item -LiteralPath (Get-Command $clangxx).Source).LastWriteTimeUtc.Ticks.ToString()
 $packerCpp = Join-Path $toolsDir "sacx_pack.cpp"
 
 $buildDir = Join-Path $ProjectRoot "build\sacx"
@@ -67,7 +70,7 @@ $objStem = [System.IO.Path]::GetFileNameWithoutExtension($sacxOut)
 function Get-SourceObjectKey([string]$SourcePath) {
   $sha = [System.Security.Cryptography.SHA256]::Create()
   try {
-    $signature = $SourcePath.ToLowerInvariant() + "|" + $Config + "|" + ($IncludeDir -join ";") + "|" + ($Define -join ";")
+    $signature = $SourcePath.ToLowerInvariant() + "|" + $Config + "|" + ($IncludeDir -join ";") + "|" + ($Define -join ";") + "|preemptible=" + $Preemptible + "|coverage=trace-pc,bb,no-prune-v1|dependencies=v2|compiler=" + $compilerEpoch
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($signature)
     return (($sha.ComputeHash($bytes)[0..5] | ForEach-Object { $_.ToString("x2") }) -join "")
   } finally {
@@ -96,8 +99,7 @@ for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
   $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
   $sourceKey = Get-SourceObjectKey $SourcePaths[$i]
   $obj = Join-Path $objDir ("{0}_aa64_{1}_{2}.o" -f $objStem, $sourceKey, $baseName)
-  if ((Test-Path -LiteralPath $obj) -and
-      ((Get-Item -LiteralPath $obj).LastWriteTimeUtc -ge (Get-Item -LiteralPath $SourcePaths[$i]).LastWriteTimeUtc)) {
+  if (Test-SacxObjectFresh $obj $SourcePaths[$i]) {
     $objAA64 += $obj
     continue
   }
@@ -112,12 +114,15 @@ for ($i = 0; $i -lt $SourcePaths.Count; ++$i)
       $sourceIncludes += @("-I", $includePath)
     }
   }
+  $checkpointFlags = @()
+  if ($Preemptible -and $baseName -notin @('scheduling','profiling','runtime','heap','netsurf_libc','setjmp')) { $checkpointFlags=@('-fsanitize-coverage=trace-pc,bb,no-prune') }
   & $compiler `
+    $checkpointFlags `
     "-target" "aarch64-unknown-none-elf" `
     "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
     "-fPIE" $language `
     $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
-    $opt "-g" `
+    $opt "-g" "-MMD" "-MF" ($obj+".d") `
     "-I" $sdkInc $sourceIncludes $extraIncludes $extraDefines `
     "-c" $SourcePaths[$i] "-o" $obj
   if ($LASTEXITCODE) { throw "AA64 clang++ failed on $($SourcePaths[$i])" }
@@ -128,7 +133,7 @@ Write-Host "== Link AA64 ELF ==" -ForegroundColor Cyan
 if (Test-Path -LiteralPath $elfOutAA64) {
   Remove-Item -LiteralPath $elfOutAA64 -Force
 }
-$rspAA64 = Join-Path $buildDir "sacx_link_aa64.rsp"
+$rspAA64 = Join-Path $buildDir ("sacx_link_{0}_aa64.rsp" -f $objStem)
 $rspAA64Lines = @("-pie", "-nostdlib", "-e", "sacx_main", "-o", ('"' + $elfOutAA64 + '"')) + @($objAA64 | ForEach-Object { '"' + $_ + '"' })
 Set-Content -LiteralPath $rspAA64 -Value $rspAA64Lines -Encoding Ascii
 & $ld "@$rspAA64"
@@ -142,8 +147,7 @@ if ($BuildX64)
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($SourcePaths[$i])
     $sourceKey = Get-SourceObjectKey $SourcePaths[$i]
     $obj = Join-Path $objDir ("{0}_x64_{1}_{2}.o" -f $objStem, $sourceKey, $baseName)
-    if ((Test-Path -LiteralPath $obj) -and
-        ((Get-Item -LiteralPath $obj).LastWriteTimeUtc -ge (Get-Item -LiteralPath $SourcePaths[$i]).LastWriteTimeUtc)) {
+    if (Test-SacxObjectFresh $obj $SourcePaths[$i]) {
       $objX64 += $obj
       continue
     }
@@ -158,12 +162,15 @@ if ($BuildX64)
         $sourceIncludes += @("-I", $includePath)
       }
     }
+    $checkpointFlags = @()
+    if ($Preemptible -and $baseName -notin @('scheduling','profiling','runtime','heap','netsurf_libc','setjmp')) { $checkpointFlags=@('-fsanitize-coverage=trace-pc,bb,no-prune') }
     & $compiler `
+      $checkpointFlags `
       "-target" "x86_64-unknown-none-elf" `
       "-ffreestanding" "-fno-builtin" "-fno-stack-protector" `
       "-fPIE" $language `
       $(if (!$isC) { "-fno-exceptions" }) $(if (!$isC) { "-fno-rtti" }) `
-      $opt "-g" `
+      $opt "-g" "-MMD" "-MF" ($obj+".d") `
       "-I" $sdkInc $sourceIncludes $extraIncludes $extraDefines `
       "-c" $SourcePaths[$i] "-o" $obj
     if ($LASTEXITCODE) { throw "x64 clang++ failed on $($SourcePaths[$i])" }
@@ -174,7 +181,7 @@ if ($BuildX64)
   if (Test-Path -LiteralPath $elfOutX64) {
     Remove-Item -LiteralPath $elfOutX64 -Force
   }
-  $rspX64 = Join-Path $buildDir "sacx_link_x64.rsp"
+  $rspX64 = Join-Path $buildDir ("sacx_link_{0}_x64.rsp" -f $objStem)
   $rspX64Lines = @("-pie", "-nostdlib", "-e", "sacx_main", "-o", ('"' + $elfOutX64 + '"')) + @($objX64 | ForEach-Object { '"' + $_ + '"' })
   Set-Content -LiteralPath $rspX64 -Value $rspX64Lines -Encoding Ascii
   & $ld "@$rspX64"

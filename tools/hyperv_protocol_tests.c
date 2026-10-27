@@ -24,6 +24,7 @@ static const uint8_t absolute_desc[]={
 
 uint64_t dihos_time_monotonic_ms(void) { return ++clock_ms; }
 void asm_relax(void) {}
+void knet_link_checkpoint(void) {}
 void asm_dma_clean_range(const void *p, uint64_t n) { (void)p;(void)n; }
 void asm_dma_invalidate_range(const void *p, uint64_t n) { (void)p;(void)n; }
 void *pmem_alloc_pages(uint64_t n) { void *p=malloc((size_t)n*4096); if (p) memset(p,0,(size_t)n*4096); return p; }

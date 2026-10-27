@@ -1,0 +1,59 @@
+{
+  "engine": "Servo 0.7.0",
+  "host_only": true,
+  "exe_sha256": "c07962fd69d175b02a58ebd5136fff20ae22f0aa08c7abd05ba22bcaaac73e03",
+  "tests": {
+    "flex": true,
+    "unicode": true,
+    "grid": true,
+    "javascript": true
+  },
+  "local_navigation_ms": 656.0,
+  "sites": [
+    {
+      "name": "wikipedia",
+      "url": "https://en.wikipedia.org/wiki/Web_browser",
+      "dom": {
+        "links": 1223,
+        "text": 20039,
+        "title": "Web browser - Wikipedia",
+        "state": "complete"
+      },
+      "elapsed_ms": 10734.0
+    },
+    {
+      "name": "github",
+      "url": "https://github.com/servo/servo",
+      "dom": {
+        "state": "complete",
+        "title": "GitHub - servo/servo: Servo aims to empower developers with a lightweight, high-performance alternative for embedding web technologies in applications. \u00b7 GitHub",
+        "links": 409,
+        "text": 8353
+      },
+      "elapsed_ms": 13625.0
+    },
+    {
+      "name": "mdn",
+      "url": "https://developer.mozilla.org/en-US/docs/Web/CSS",
+      "dom": {
+        "state": "complete",
+        "text": 5114,
+        "links": 1485,
+        "title": "CSS: Cascading Style Sheets | MDN"
+      },
+      "elapsed_ms": 12985.0
+    },
+    {
+      "name": "duckduckgo",
+      "url": "https://duckduckgo.com/?q=web+browser",
+      "dom": {
+        "state": "complete",
+        "text": 6786,
+        "links": 143,
+        "title": "web browser at DuckDuckGo"
+      },
+      "elapsed_ms": 17906.0
+    }
+  ],
+  "status": "ran"
+}

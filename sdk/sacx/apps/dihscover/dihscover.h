@@ -17,4 +17,6 @@ void browser_heap_reset(void);
 void *browser_heap_alloc(uint32_t size);
 void *browser_heap_realloc(void *ptr, uint32_t size);
 void browser_heap_free(void *ptr);
+uint64_t browser_heap_used(void);
+uint64_t browser_heap_peak(void);
 

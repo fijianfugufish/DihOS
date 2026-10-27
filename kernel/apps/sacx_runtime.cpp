@@ -27,6 +27,8 @@ extern "C"
 #include "system/dihos_time.h"
 #include "system/kbusy.h"
 #include "system/kwork.h"
+#include "system/kfiber.h"
+#include "net/knet_link.h"
 #include "system/smp.h"
 #include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
@@ -198,29 +200,8 @@ typedef struct sacx_async_image_save_slot
     char path[256];
 } sacx_async_image_save_slot;
 
-typedef struct __attribute__((aligned(64))) sacx_net_request_slot
-{
-    uint8_t used;
-    uint8_t truncated;
-    uint16_t reserved0;
-    uint32_t id;
-    uint32_t job_id;
-    volatile uint32_t status;
-    volatile uint32_t cancelled;
-    uint32_t capacity;
-    uint32_t redirect_limit;
-    uint32_t timeout_ms;
-    uint32_t raw_size;
-    uint32_t body_size;
-    uint64_t pages;
-    uint8_t *buffer;
-    sacx_net_response_info info;
-    char url[768];
-    char method[8];
-    char content_type[96];
-    uint32_t request_body_size;
-    uint8_t request_body[4096];
-} sacx_net_request_slot;
+#include "apps/sacx_network_internal.h"
+static sacx_net_request_slot *G_net_active_slot;
 
 typedef struct sacx_memory_slot
 {
@@ -246,6 +227,11 @@ typedef struct sacx_task
     uint32_t image_size;
     uint32_t loaded_arch;
     uint8_t loaded_from_fat;
+    uint8_t launch_pending,launch_cancelled;
+    char launch_path[256];
+    uint32_t requested_cursor;
+    uint64_t cursor_request_ms;
+    uint8_t cursor_request_valid;
 
     sacx_entry_fn entry;
     sacx_update_fn update_fn;
@@ -285,11 +271,22 @@ typedef struct sacx_task
     sacx_3d_player_slot players3d[SACX_MAX_TASK_3D_PLAYERS];
     sacx_worker_slot workers[SACX_MAX_TASK_WORKERS];
     sacx_async_image_save_slot image_saves[SACX_MAX_TASK_ASYNC_IMAGE_SAVES];
+    kfiber execution;
+    void *execution_stack;
+    uint64_t execution_deadline;
+    uint32_t api_depth,callback_finished,release_pending;
+    const char *active_api,*last_api;
+    int callback_result;
     sacx_net_request_slot net_requests[SACX_MAX_TASK_NET_REQUESTS];
     sacx_memory_slot memory_allocs[SACX_MAX_TASK_MEMORY_ALLOCS];
 } sacx_task;
 
 static sacx_task G_tasks[SACX_MAX_TASKS];
+static sacx_task *G_launch_active;
+static kfiber G_launch_fiber;
+static void *G_launch_stack;
+static uint64_t G_launch_slice_end,G_launch_deadline;
+static int G_launch_result;
 /*
  * SACX callbacks may run on the scheduler core or on a kwork core.  A single
  * current-task pointer made one app's API calls depend on which callback
@@ -312,6 +309,7 @@ static const kfont *G_runtime_font = 0;
 
 static kwindow_handle sacx_task_busy_window(sacx_task *task);
 static void sacx_task_clean_worker_memory(sacx_task *task);
+static int sacx_loader_checkpoint(void);
 
 static void sacx_sync_executable_range(const void *base, uint32_t size)
 {
@@ -322,7 +320,7 @@ static void sacx_sync_executable_range(const void *base, uint32_t size)
         asm_sync_executable_range(bytes, (uint64_t)chunk);
         bytes += chunk;
         size -= chunk;
-        kbusy_pump();
+        if(sacx_loader_checkpoint())return;
     }
 }
 
@@ -371,6 +369,7 @@ static int sacx_task_worker_active(const sacx_task *task)
     {
         if (!task->net_requests[i].used)
             continue;
+        if (&task->net_requests[i]==G_net_active_slot) return 1;
         uint32_t status = kwork_status(task->net_requests[i].job_id);
         if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
             return 1;
@@ -438,6 +437,10 @@ static uint8_t sacx_ascii_lower(uint8_t c)
 {
     return (c >= 'A' && c <= 'Z') ? (uint8_t)(c + ('a' - 'A')) : c;
 }
+
+/* Yield only between complete filesystem calls or CPU-only loader chunks.
+ * The loader keeps its KFile/buffer on its private stack until cleanup ends. */
+#include "sacx_launch_checkpoint.inc"
 
 static int sacx_span_ieq(const uint8_t *text, uint32_t len, const char *wanted)
 {
@@ -798,7 +801,7 @@ static uint32_t sacx_crc32_zero_range(const uint8_t *data, uint32_t size, uint32
                 crc >>= 1;
         }
         if ((i & 0x3FFFu) == 0x3FFFu)
-            kbusy_pump();
+            if(sacx_loader_checkpoint())return 0;
     }
 
     return ~crc;
@@ -813,7 +816,7 @@ static void sacx_memset_cooperative(void *dst, uint8_t value, uint32_t size)
         memset(bytes, value, chunk);
         bytes += chunk;
         size -= chunk;
-        kbusy_pump();
+        if(sacx_loader_checkpoint())return;
     }
 }
 
@@ -828,7 +831,7 @@ static void sacx_memcpy_cooperative(void *dst, const void *src, uint32_t size)
         out += chunk;
         in += chunk;
         size -= chunk;
-        kbusy_pump();
+        if(sacx_loader_checkpoint())return;
     }
 }
 
@@ -1912,8 +1915,9 @@ static void sacx_task_destroy_net_requests(sacx_task *task)
         if (!slot->used)
             continue;
         status = kwork_status(slot->job_id);
-        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
+        if (slot==G_net_active_slot || status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING)
         {
+            slot->release_when_done=1;
             __atomic_store_n(&slot->cancelled, 1u, __ATOMIC_RELEASE);
             asm_dma_clean_range((const void *)&slot->cancelled, sizeof(slot->cancelled));
             (void)kwork_cancel(slot->job_id);
@@ -1985,6 +1989,12 @@ static void sacx_task_finish(sacx_task *task, int32_t status, const char *messag
     if (!task)
         return;
 
+    if(task->launch_pending){task->launch_cancelled=1;return;}
+    if(smp_current_logical_id()==0u&&kfiber_is_current(&task->execution)) {
+        task->exit_requested=1;task->pending_exit_status=status;
+        sacx_copy_trunc(task->pending_exit_message,sizeof(task->pending_exit_message),message?message:"");
+        return;
+    }
     worker_active = sacx_task_worker_active(task);
 
     sacx_task_close_files(task);
@@ -2065,6 +2075,7 @@ static void sacx_task_reset(sacx_task *task)
 {
     if (!task)
         return;
+    if(task->execution_stack)pmem_free_pages(task->execution_stack,64);
     memset(task, 0, sizeof(*task));
     task->state = SACX_TASK_UNUSED;
     for (uint32_t i = 0u; i < SACX_MAX_TASK_WINDOWS; ++i)
@@ -2114,61 +2125,7 @@ static sacx_task *sacx_alloc_task_slot(void)
     return 0;
 }
 
-static int sacx_read_file_all(const char *path, uint8_t **out_buf, uint32_t *out_size)
-{
-    KFile file;
-    uint64_t size64 = 0u;
-    uint32_t size = 0u;
-    uint32_t total_read = 0u;
-    uint32_t pages = 0u;
-    uint8_t *buf = 0;
-
-    if (!path || !out_buf || !out_size)
-        return -1;
-
-    *out_buf = 0;
-    *out_size = 0u;
-
-    if (kfile_open(&file, path, KFILE_READ) != 0)
-        return -1;
-
-    size64 = kfile_size(&file);
-    if (size64 == 0u || size64 > SACX_MAX_FILE_BYTES)
-    {
-        kfile_close(&file);
-        return -1;
-    }
-
-    size = (uint32_t)size64;
-    pages = (size + 4095u) / 4096u;
-    buf = (uint8_t *)pmem_alloc_pages((uint64_t)pages);
-    if (!buf)
-    {
-        kfile_close(&file);
-        return -1;
-    }
-
-    while (total_read < size)
-    {
-        uint32_t chunk = size - total_read;
-        uint32_t read = 0u;
-        if (chunk > 16384u)
-            chunk = 16384u;
-        if (kfile_read(&file, buf + total_read, chunk, &read) != 0 || read != chunk)
-        {
-            pmem_free_pages(buf, pages);
-            kfile_close(&file);
-            return -1;
-        }
-        total_read += read;
-        kbusy_pump();
-    }
-
-    kfile_close(&file);
-    *out_buf = buf;
-    *out_size = size;
-    return 0;
-}
+#include "sacx_launch_read.inc"
 
 typedef struct sacx_selected_image
 {
@@ -2439,6 +2396,7 @@ static int sacx_load_image_payload(sacx_task *task, const uint8_t *file_data, ui
 
     for (uint32_t i = 0u; i < hdr->reloc_count; ++i)
     {
+        if((i&63u)==0u&&sacx_loader_checkpoint())return -1;
         sacx_reloc rel;
         uint64_t *where = 0;
 
@@ -2519,8 +2477,13 @@ static int sacx_api_yield(void)
         return -1;
     G_current_task->sleep_requested = 1u;
     G_current_task->pending_wake_tick = dihos_time_ticks() + 1u;
+    /* Preserve the ABI's callback-end yield request. Compiler checkpoints
+     * suspend long callbacks; yielding here as well halves normal update rate
+     * for the common `return api->app_yield()` pattern. */
     return 0;
 }
+
+#include "sacx_app_checkpoint.inc"
 
 static int sacx_api_sleep_ticks(uint64_t ticks)
 {
@@ -2716,6 +2679,19 @@ static sacx_net_request_slot *sacx_net_slot_from_id(sacx_task *task, uint32_t re
     return slot->used ? slot : 0;
 }
 
+static int sacx_net_is_redirect(uint32_t status) {return status==301||status==302||status==303||status==307||status==308;}
+static int sacx_net_stream_sink(const uint8_t *data,uint32_t bytes,void *context)
+{
+    sacx_net_request_slot *slot=(sacx_net_request_slot*)context;
+    if(http_stream_feed(&slot->stream,data,bytes)) return -1;
+    if(!slot->stream.headers_ready||(!slot->no_follow&&sacx_net_is_redirect(slot->stream.http_status))) return slot->stream.complete;
+    slot->info.http_status=slot->stream.http_status;
+    sacx_copy_trunc(slot->info.content_type,sizeof(slot->info.content_type),slot->stream.content_type);
+    slot->body_size=slot->stream.available;
+    slot->info.body_size=slot->body_size;
+    slot->info.status=SACX_NET_STATUS_LOADING;
+    return slot->stream.complete;
+}
 static void sacx_net_request_worker(void *ctx)
 {
     sacx_net_request_slot *slot = (sacx_net_request_slot *)ctx;
@@ -2740,12 +2716,16 @@ static void sacx_net_request_worker(void *ctx)
         slot->body_size = 0u;
         slot->truncated = 0u;
         memset(&slot->info, 0, sizeof(slot->info));
-        knet_usb_set_worker_quiet(smp_current_logical_id() != 0u);
+        http_stream_init(&slot->stream,slot->buffer,slot->capacity);
+        sacx_copy_trunc(slot->info.final_url,sizeof(slot->info.final_url),current_url);
+        knet_usb_set_worker_quiet(1u);
+        knet_usb_set_stream_sink(sacx_net_stream_sink,slot);
         rc = knet_usb_fetch_request(current_url, slot->method,
                                     slot->request_body, slot->request_body_size,
                                     slot->content_type, slot->buffer, slot->capacity,
                                     &slot->raw_size, &slot->truncated, &slot->cancelled,
                                     slot->timeout_ms);
+        knet_usb_set_stream_sink(0,0);
         knet_usb_set_worker_quiet(0u);
         if (__atomic_load_n(&slot->cancelled, __ATOMIC_ACQUIRE))
         {
@@ -2753,26 +2733,31 @@ static void sacx_net_request_worker(void *ctx)
             asm_dma_clean_range(slot, sizeof(*slot));
             return;
         }
-        if (rc != 0)
+        if (rc != 0 && !slot->stream.complete)
         {
             sacx_copy_trunc(slot->info.error, sizeof(slot->info.error),
-                            rc == -4 ? "network request timed out" : "network request failed");
+                            slot->stream.failed ? slot->stream.error : rc == -4 ? "network request timed out" : rc == -2 ? "network transport busy" : knet_usb_last_fetch_error()[0] ? knet_usb_last_fetch_error() : "network request failed");
             slot->info.status = SACX_NET_STATUS_FAILED;
             __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
             asm_dma_clean_range(slot, sizeof(*slot));
             return;
         }
-        if (sacx_net_parse_response(slot, location, sizeof(location)) != 0)
+        if (http_stream_finish(&slot->stream) != 0)
         {
-            sacx_copy_trunc(slot->info.error, sizeof(slot->info.error), "malformed HTTP response");
+            sacx_copy_trunc(slot->info.error, sizeof(slot->info.error), slot->stream.error[0] ? slot->stream.error : "malformed HTTP response");
             slot->info.status = SACX_NET_STATUS_FAILED;
             __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
             asm_dma_clean_range(slot, sizeof(*slot));
             return;
         }
+        slot->info.http_status=slot->stream.http_status;
+        slot->body_size=slot->stream.available;slot->info.body_size=slot->body_size;
+        slot->info.truncated=slot->truncated||slot->stream.truncated;
+        sacx_copy_trunc(slot->info.content_type,sizeof(slot->info.content_type),slot->stream.content_type);
+        sacx_copy_trunc(location,sizeof(location),slot->stream.location);
         if ((slot->info.http_status == 301u || slot->info.http_status == 302u ||
              slot->info.http_status == 303u || slot->info.http_status == 307u ||
-             slot->info.http_status == 308u) && location[0])
+             slot->info.http_status == 308u) && location[0] && !slot->no_follow)
         {
             if (redirects++ >= slot->redirect_limit ||
                 sacx_url_resolve(current_url, location, next_url, sizeof(next_url)) != 0)
@@ -2802,74 +2787,14 @@ static void sacx_net_request_worker(void *ctx)
     }
 }
 
-static int sacx_api_net_request_start_ex(const sacx_net_request_desc_ex *desc, uint32_t *out_request_id)
-{
-    sacx_net_request_slot *slot = 0;
-    uint32_t capacity;
-    if (out_request_id)
-        *out_request_id = 0u;
-    if (!G_current_task || !desc || !desc->url || !desc->url[0] || !out_request_id ||
-        desc->body_size > 4096u || (desc->body_size && !desc->body))
-        return -1;
-    for (uint32_t t = 0u; t < SACX_MAX_TASKS; ++t)
-        for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
-        {
-            uint32_t status = __atomic_load_n(&G_tasks[t].net_requests[i].status, __ATOMIC_ACQUIRE);
-            if (G_tasks[t].net_requests[i].used &&
-                (status == SACX_NET_STATUS_QUEUED || status == SACX_NET_STATUS_LOADING))
-                return -2;
-        }
-    for (uint32_t i = 0u; i < SACX_MAX_TASK_NET_REQUESTS; ++i)
-        if (!G_current_task->net_requests[i].used)
-        {
-            slot = &G_current_task->net_requests[i];
-            memset(slot, 0, sizeof(*slot));
-            slot->used = 1u;
-            slot->id = i + 1u;
-            break;
-        }
-    if (!slot)
-        return -3;
-    capacity = desc->max_response_bytes ? desc->max_response_bytes : SACX_NET_DEFAULT_BYTES;
-    if (capacity < 4096u)
-        capacity = 4096u;
-    if (capacity > SACX_NET_MAX_BYTES)
-        capacity = SACX_NET_MAX_BYTES;
-    slot->pages = ((uint64_t)capacity + 4095ull) >> 12;
-    slot->buffer = (uint8_t *)pmem_alloc_pages(slot->pages);
-    if (!slot->buffer)
-    {
-        memset(slot, 0, sizeof(*slot));
-        return -4;
-    }
-    slot->capacity = capacity;
-    slot->redirect_limit = desc->redirect_limit > 10u ? 10u : desc->redirect_limit;
-    if (!slot->redirect_limit)
-        slot->redirect_limit = 5u;
-    slot->timeout_ms = desc->timeout_ms;
-    if (slot->timeout_ms < 1000u)
-        slot->timeout_ms = 45000u;
-    if (slot->timeout_ms > 120000u)
-        slot->timeout_ms = 120000u;
-    sacx_copy_trunc(slot->url, sizeof(slot->url), desc->url);
-    sacx_copy_trunc(slot->method, sizeof(slot->method), desc->method && desc->method[0] ? desc->method : "GET");
-    sacx_copy_trunc(slot->content_type, sizeof(slot->content_type),
-                    desc->content_type && desc->content_type[0] ? desc->content_type : "application/x-www-form-urlencoded");
-    slot->request_body_size = desc->body_size;
-    if (desc->body_size)
-        memcpy(slot->request_body, desc->body, desc->body_size);
-    __atomic_store_n(&slot->status, SACX_NET_STATUS_QUEUED, __ATOMIC_RELEASE);
-    asm_dma_clean_range(slot, sizeof(*slot));
+#include "sacx_network_service.inc"
 
-    /*
-     * xHCI/USB Ethernet is currently owned by core 0.  Running it through a
-     * remote worker is not safe until the driver is genuinely SMP-safe.
-     */
-    slot->job_id = 0u;
-    sacx_net_request_worker(slot);
-    *out_request_id = slot->id;
-    return 0;
+extern "C" void sacx_runtime_get_network_stats(sacx_network_stats *out) {
+    if(!out)return;*out={G_net_slices,G_net_elapsed_ms,G_net_max_slice_ms,G_net_active_slot?1u:0u,0};
+    for(auto &task:G_tasks)for(auto &slot:task.net_requests)if(slot.used&&slot.status==SACX_NET_STATUS_QUEUED)++out->queued;
 }
+
+#include "sacx_network_start.inc"
 
 static int sacx_api_net_request_start(const sacx_net_request_desc *desc, uint32_t *out_request_id)
 {
@@ -2936,35 +2861,29 @@ static int sacx_api_net_response_read(uint32_t request_id, uint32_t offset, void
     return 0;
 }
 
-static int sacx_api_net_request_cancel(uint32_t request_id)
+#include "sacx_network_lifetime.inc"
+
+static int sacx_api_net_response_progress(uint32_t id,sacx_net_progress *out)
 {
-    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
-    if (!slot)
-        return -1;
-    __atomic_store_n(&slot->cancelled, 1u, __ATOMIC_RELEASE);
-    asm_dma_clean_range((const void *)&slot->cancelled, sizeof(slot->cancelled));
-    (void)kwork_cancel(slot->job_id);
-    if (__atomic_load_n(&slot->status, __ATOMIC_ACQUIRE) == SACX_NET_STATUS_QUEUED)
-    {
-        __atomic_store_n(&slot->status, SACX_NET_STATUS_CANCELLED, __ATOMIC_RELEASE);
-        asm_dma_clean_range((const void *)&slot->status, sizeof(slot->status));
-    }
-    return 0;
+    sacx_net_request_slot *slot=sacx_net_slot_from_id(G_current_task,id);
+    if(!slot||!out)return -1;
+    uint32_t ready=slot->stream.headers_ready&&(slot->no_follow||!sacx_net_is_redirect(slot->stream.http_status));
+    *out={slot->status,ready,ready?slot->body_size:0,slot->stream.has_length?slot->stream.expected:0,
+          slot->status==SACX_NET_STATUS_DONE,slot->info.truncated};return 0;
+}
+static int sacx_api_net_response_read_available(uint32_t id,uint32_t offset,void *dst,uint32_t capacity,uint32_t *got)
+{
+    if(got)*got=0;sacx_net_request_slot *slot=sacx_net_slot_from_id(G_current_task,id);
+    if(!slot||!got||!dst||!slot->stream.headers_ready||(!slot->no_follow&&sacx_net_is_redirect(slot->stream.http_status))||slot->stream.failed)return -1;
+    if(offset>=slot->body_size)return 0;uint32_t take=slot->body_size-offset;if(take>capacity)take=capacity;
+    memcpy(dst,slot->buffer+offset,take);*got=take;return 0;
 }
 
-static int sacx_api_net_request_release(uint32_t request_id)
-{
-    sacx_net_request_slot *slot = sacx_net_slot_from_id(G_current_task, request_id);
-    uint32_t status;
-    if (!slot)
-        return -1;
-    status = __atomic_load_n(&slot->status, __ATOMIC_ACQUIRE);
-    if (status == SACX_NET_STATUS_QUEUED || status == SACX_NET_STATUS_LOADING)
-        return -2;
-    if (slot->buffer && slot->pages)
-        pmem_free_pages(slot->buffer, slot->pages);
-    memset(slot, 0, sizeof(*slot));
-    return 0;
+static int sacx_api_net_response_headers_read(uint32_t id,uint32_t offset,void *dst,uint32_t capacity,uint32_t *got) {
+    if(got)*got=0;sacx_net_request_slot *slot=sacx_net_slot_from_id(G_current_task,id);
+    if(!slot||!got||!dst||!slot->stream.headers_ready)return -1;
+    if(offset>=slot->stream.header_bytes)return 0;uint32_t n=slot->stream.header_bytes-offset;if(n>capacity)n=capacity;
+    memcpy(dst,slot->stream.headers+offset,n);*got=n;return 0;
 }
 
 static int sacx_api_mem_alloc(uint32_t size, void **out_ptr)
@@ -4680,10 +4599,7 @@ static int sacx_api_input_mouse_consume(sacx_mouse_state *out_state)
     return 0;
 }
 
-static int sacx_api_mouse_set_cursor(uint32_t cursor)
-{
-    return kmouse_set_cursor(sacx_to_mouse_cursor(cursor));
-}
+#include "sacx_cursor_service.inc"
 
 static uint32_t sacx_api_mouse_current_cursor(void)
 {
@@ -5121,6 +5037,8 @@ static int sacx_api_img_pixels(uint32_t image_handle, uint32_t **out_argb, uint3
     return 0;
 }
 
+static int sacx_api_img_publish_region(uint32_t image_handle,const uint32_t *source,uint32_t stride,
+                                      uint32_t x,uint32_t y,uint32_t width,uint32_t height);
 static int sacx_api_img_touch(uint32_t image_handle)
 {
     sacx_image_slot *slot = sacx_image_from_handle(G_current_task, image_handle);
@@ -5180,6 +5098,18 @@ static kwindow_handle sacx_task_busy_window(sacx_task *task)
         }
     }
     return none;
+}
+
+static int sacx_api_img_publish_region(uint32_t image_handle,const uint32_t *source,uint32_t stride,
+                                      uint32_t x,uint32_t y,uint32_t width,uint32_t height)
+{
+    sacx_image_slot *slot=sacx_image_from_handle(G_current_task,image_handle);
+    if(!slot||!source||!width||!height||x>slot->image.w||y>slot->image.h||
+       width>slot->image.w-x||height>slot->image.h-y||stride<x+width)return -1;
+    for(uint32_t row=0;row<height;++row)
+        memcpy(slot->image.px+(uint64_t)(y+row)*slot->image.w+x,
+               source+(uint64_t)(y+row)*stride+x,(uint64_t)width*4);
+    return sacx_api_img_touch(image_handle);
 }
 
 static int sacx_api_img_save(uint32_t image_handle, const char *path, uint32_t format, uint32_t quality)
@@ -5943,6 +5873,8 @@ static int sacx_api_k3d_scene_add_obstacle_cube(uint32_t scene_handle, uint32_t 
     return 0;
 }
 
+#include "sacx_api_guards.inc"
+
 static void sacx_task_init_api(sacx_task *task)
 {
     if (!task)
@@ -5951,260 +5883,268 @@ static void sacx_task_init_api(sacx_task *task)
     memset(&task->api, 0, sizeof(task->api));
     task->api.abi_version = SACX_API_ABI_VERSION;
     task->api.struct_size = sizeof(task->api);
-    task->api.app_set_update = sacx_api_set_update;
-    task->api.app_exit = sacx_api_exit;
+    task->api.app_set_update = sacx_guard_app_set_update;
+    task->api.app_exit = sacx_guard_app_exit;
     task->api.app_yield = sacx_api_yield;
-    task->api.app_sleep_ticks = sacx_api_sleep_ticks;
-    task->api.time_ticks = sacx_api_time_ticks;
-    task->api.time_seconds = sacx_api_time_seconds;
-    task->api.log = sacx_api_log;
+    task->api.app_sleep_ticks = sacx_guard_app_sleep_ticks;
+    task->api.time_ticks = sacx_guard_time_ticks;
+    task->api.time_seconds = sacx_guard_time_seconds;
+    task->api.log = sacx_guard_log;
 
-    task->api.file_open = sacx_api_file_open;
-    task->api.file_read = sacx_api_file_read;
-    task->api.file_write = sacx_api_file_write;
-    task->api.file_seek = sacx_api_file_seek;
-    task->api.file_size = sacx_api_file_size;
-    task->api.file_close = sacx_api_file_close;
-    task->api.file_unlink = sacx_api_file_unlink;
-    task->api.file_rename = sacx_api_file_rename;
-    task->api.file_mkdir = sacx_api_file_mkdir;
+    task->api.file_open = sacx_guard_file_open;
+    task->api.file_read = sacx_guard_file_read;
+    task->api.file_write = sacx_guard_file_write;
+    task->api.file_seek = sacx_guard_file_seek;
+    task->api.file_size = sacx_guard_file_size;
+    task->api.file_close = sacx_guard_file_close;
+    task->api.file_unlink = sacx_guard_file_unlink;
+    task->api.file_rename = sacx_guard_file_rename;
+    task->api.file_mkdir = sacx_guard_file_mkdir;
 
-    task->api.window_create = sacx_api_window_create;
-    task->api.window_destroy = sacx_api_window_destroy;
-    task->api.window_set_visible = sacx_api_window_set_visible;
-    task->api.window_set_title = sacx_api_window_set_title;
+    task->api.window_create = sacx_guard_window_create;
+    task->api.window_destroy = sacx_guard_window_destroy;
+    task->api.window_set_visible = sacx_guard_window_set_visible;
+    task->api.window_set_title = sacx_guard_window_set_title;
 
-    task->api.gfx_fill_rgb = sacx_api_gfx_fill_rgb;
-    task->api.gfx_rect_rgb = sacx_api_gfx_rect_rgb;
-    task->api.gfx_flush = sacx_api_gfx_flush;
+    task->api.gfx_fill_rgb = sacx_guard_gfx_fill_rgb;
+    task->api.gfx_rect_rgb = sacx_guard_gfx_rect_rgb;
+    task->api.gfx_flush = sacx_guard_gfx_flush;
 
-    task->api.input_key_down = sacx_api_input_key_down;
-    task->api.input_key_pressed = sacx_api_input_key_pressed;
-    task->api.input_key_released = sacx_api_input_key_released;
+    task->api.input_key_down = sacx_guard_input_key_down;
+    task->api.input_key_pressed = sacx_guard_input_key_pressed;
+    task->api.input_key_released = sacx_guard_input_key_released;
 
-    task->api.dir_open = sacx_api_dir_open;
-    task->api.dir_next = sacx_api_dir_next;
-    task->api.dir_close = sacx_api_dir_close;
+    task->api.dir_open = sacx_guard_dir_open;
+    task->api.dir_next = sacx_guard_dir_next;
+    task->api.dir_close = sacx_guard_dir_close;
 
-    task->api.window_create_ex = sacx_api_window_create_ex;
-    task->api.window_visible = sacx_api_window_visible;
-    task->api.window_raise = sacx_api_window_raise;
-    task->api.window_set_work_area_bottom_inset = sacx_api_window_set_work_area_bottom_inset;
-    task->api.window_root = sacx_api_window_root;
-    task->api.window_point_can_receive_input = sacx_api_window_point_can_receive_input;
+    task->api.window_create_ex = sacx_guard_window_create_ex;
+    task->api.window_visible = sacx_guard_window_visible;
+    task->api.window_raise = sacx_guard_window_raise;
+    task->api.window_set_work_area_bottom_inset = sacx_guard_window_set_work_area_bottom_inset;
+    task->api.window_root = sacx_guard_window_root;
+    task->api.window_point_can_receive_input = sacx_guard_window_point_can_receive_input;
 
-    task->api.gfx_obj_add_rect = sacx_api_gfx_obj_add_rect;
-    task->api.gfx_obj_add_circle = sacx_api_gfx_obj_add_circle;
-    task->api.gfx_obj_add_text = sacx_api_gfx_obj_add_text;
-    task->api.gfx_obj_add_image_from_img = sacx_api_gfx_obj_add_image_from_img;
-    task->api.gfx_obj_destroy = sacx_api_gfx_obj_destroy;
-    task->api.gfx_obj_set_visible = sacx_api_gfx_obj_set_visible;
-    task->api.gfx_obj_visible = sacx_api_gfx_obj_visible;
-    task->api.gfx_obj_set_z = sacx_api_gfx_obj_set_z;
-    task->api.gfx_obj_z = sacx_api_gfx_obj_z;
-    task->api.gfx_obj_set_parent = sacx_api_gfx_obj_set_parent;
-    task->api.gfx_obj_clear_parent = sacx_api_gfx_obj_clear_parent;
-    task->api.gfx_obj_set_clip_to_parent = sacx_api_gfx_obj_set_clip_to_parent;
-    task->api.gfx_obj_set_fill_rgb = sacx_api_gfx_obj_set_fill_rgb;
-    task->api.gfx_obj_set_alpha = sacx_api_gfx_obj_set_alpha;
-    task->api.gfx_obj_set_outline_rgb = sacx_api_gfx_obj_set_outline_rgb;
-    task->api.gfx_obj_set_outline_width = sacx_api_gfx_obj_set_outline_width;
-    task->api.gfx_obj_set_outline_alpha = sacx_api_gfx_obj_set_outline_alpha;
-    task->api.gfx_obj_set_rect = sacx_api_gfx_obj_set_rect;
-    task->api.gfx_obj_get_rect = sacx_api_gfx_obj_get_rect;
-    task->api.gfx_obj_set_rotation_deg = sacx_api_gfx_obj_set_rotation_deg;
-    task->api.gfx_obj_rotation_deg = sacx_api_gfx_obj_rotation_deg;
-    task->api.gfx_obj_set_rotation_pivot = sacx_api_gfx_obj_set_rotation_pivot;
-    task->api.gfx_obj_clear_rotation_pivot = sacx_api_gfx_obj_clear_rotation_pivot;
-    task->api.gfx_obj_set_circle = sacx_api_gfx_obj_set_circle;
-    task->api.gfx_text_set = sacx_api_gfx_text_set;
-    task->api.gfx_text_set_align = sacx_api_gfx_text_set_align;
-    task->api.gfx_text_set_spacing = sacx_api_gfx_text_set_spacing;
-    task->api.gfx_text_set_scale = sacx_api_gfx_text_set_scale;
-    task->api.gfx_text_set_pos = sacx_api_gfx_text_set_pos;
-    task->api.gfx_image_set_size = sacx_api_gfx_image_set_size;
-    task->api.gfx_image_set_pos = sacx_api_gfx_image_set_pos;
-    task->api.gfx_image_set_scale_pct = sacx_api_gfx_image_set_scale_pct;
-    task->api.gfx_image_set_sample_mode = sacx_api_gfx_image_set_sample_mode;
+    task->api.gfx_obj_add_rect = sacx_guard_gfx_obj_add_rect;
+    task->api.gfx_obj_add_circle = sacx_guard_gfx_obj_add_circle;
+    task->api.gfx_obj_add_text = sacx_guard_gfx_obj_add_text;
+    task->api.gfx_obj_add_image_from_img = sacx_guard_gfx_obj_add_image_from_img;
+    task->api.gfx_obj_destroy = sacx_guard_gfx_obj_destroy;
+    task->api.gfx_obj_set_visible = sacx_guard_gfx_obj_set_visible;
+    task->api.gfx_obj_visible = sacx_guard_gfx_obj_visible;
+    task->api.gfx_obj_set_z = sacx_guard_gfx_obj_set_z;
+    task->api.gfx_obj_z = sacx_guard_gfx_obj_z;
+    task->api.gfx_obj_set_parent = sacx_guard_gfx_obj_set_parent;
+    task->api.gfx_obj_clear_parent = sacx_guard_gfx_obj_clear_parent;
+    task->api.gfx_obj_set_clip_to_parent = sacx_guard_gfx_obj_set_clip_to_parent;
+    task->api.gfx_obj_set_fill_rgb = sacx_guard_gfx_obj_set_fill_rgb;
+    task->api.gfx_obj_set_alpha = sacx_guard_gfx_obj_set_alpha;
+    task->api.gfx_obj_set_outline_rgb = sacx_guard_gfx_obj_set_outline_rgb;
+    task->api.gfx_obj_set_outline_width = sacx_guard_gfx_obj_set_outline_width;
+    task->api.gfx_obj_set_outline_alpha = sacx_guard_gfx_obj_set_outline_alpha;
+    task->api.gfx_obj_set_rect = sacx_guard_gfx_obj_set_rect;
+    task->api.gfx_obj_get_rect = sacx_guard_gfx_obj_get_rect;
+    task->api.gfx_obj_set_rotation_deg = sacx_guard_gfx_obj_set_rotation_deg;
+    task->api.gfx_obj_rotation_deg = sacx_guard_gfx_obj_rotation_deg;
+    task->api.gfx_obj_set_rotation_pivot = sacx_guard_gfx_obj_set_rotation_pivot;
+    task->api.gfx_obj_clear_rotation_pivot = sacx_guard_gfx_obj_clear_rotation_pivot;
+    task->api.gfx_obj_set_circle = sacx_guard_gfx_obj_set_circle;
+    task->api.gfx_text_set = sacx_guard_gfx_text_set;
+    task->api.gfx_text_set_align = sacx_guard_gfx_text_set_align;
+    task->api.gfx_text_set_spacing = sacx_guard_gfx_text_set_spacing;
+    task->api.gfx_text_set_scale = sacx_guard_gfx_text_set_scale;
+    task->api.gfx_text_set_pos = sacx_guard_gfx_text_set_pos;
+    task->api.gfx_image_set_size = sacx_guard_gfx_image_set_size;
+    task->api.gfx_image_set_pos = sacx_guard_gfx_image_set_pos;
+    task->api.gfx_image_set_scale_pct = sacx_guard_gfx_image_set_scale_pct;
+    task->api.gfx_image_set_sample_mode = sacx_guard_gfx_image_set_sample_mode;
 
-    task->api.button_add_rect = sacx_api_button_add_rect;
-    task->api.button_destroy = sacx_api_button_destroy;
-    task->api.button_root = sacx_api_button_root;
-    task->api.button_set_callback = sacx_api_button_set_callback;
-    task->api.button_set_style = sacx_api_button_set_style;
-    task->api.button_set_enabled = sacx_api_button_set_enabled;
-    task->api.button_enabled = sacx_api_button_enabled;
-    task->api.button_hovered = sacx_api_button_hovered;
-    task->api.button_pressed = sacx_api_button_pressed;
+    task->api.button_add_rect = sacx_guard_button_add_rect;
+    task->api.button_destroy = sacx_guard_button_destroy;
+    task->api.button_root = sacx_guard_button_root;
+    task->api.button_set_callback = sacx_guard_button_set_callback;
+    task->api.button_set_style = sacx_guard_button_set_style;
+    task->api.button_set_enabled = sacx_guard_button_set_enabled;
+    task->api.button_enabled = sacx_guard_button_enabled;
+    task->api.button_hovered = sacx_guard_button_hovered;
+    task->api.button_pressed = sacx_guard_button_pressed;
 
-    task->api.textbox_add_rect = sacx_api_textbox_add_rect;
-    task->api.textbox_destroy = sacx_api_textbox_destroy;
-    task->api.textbox_root = sacx_api_textbox_root;
-    task->api.textbox_set_callback = sacx_api_textbox_set_callback;
-    task->api.textbox_set_enabled = sacx_api_textbox_set_enabled;
-    task->api.textbox_enabled = sacx_api_textbox_enabled;
-    task->api.textbox_set_focus = sacx_api_textbox_set_focus;
-    task->api.textbox_clear_focus = sacx_api_textbox_clear_focus;
-    task->api.textbox_focused = sacx_api_textbox_focused;
-    task->api.textbox_set_bounds = sacx_api_textbox_set_bounds;
-    task->api.textbox_set_text = sacx_api_textbox_set_text;
-    task->api.textbox_clear = sacx_api_textbox_clear;
-    task->api.textbox_text_copy = sacx_api_textbox_text_copy;
+    task->api.textbox_add_rect = sacx_guard_textbox_add_rect;
+    task->api.textbox_destroy = sacx_guard_textbox_destroy;
+    task->api.textbox_root = sacx_guard_textbox_root;
+    task->api.textbox_set_callback = sacx_guard_textbox_set_callback;
+    task->api.textbox_set_enabled = sacx_guard_textbox_set_enabled;
+    task->api.textbox_enabled = sacx_guard_textbox_enabled;
+    task->api.textbox_set_focus = sacx_guard_textbox_set_focus;
+    task->api.textbox_clear_focus = sacx_guard_textbox_clear_focus;
+    task->api.textbox_focused = sacx_guard_textbox_focused;
+    task->api.textbox_set_bounds = sacx_guard_textbox_set_bounds;
+    task->api.textbox_set_text = sacx_guard_textbox_set_text;
+    task->api.textbox_clear = sacx_guard_textbox_clear;
+    task->api.textbox_text_copy = sacx_guard_textbox_text_copy;
 
-    task->api.input_mouse_dx = sacx_api_input_mouse_dx;
-    task->api.input_mouse_dy = sacx_api_input_mouse_dy;
-    task->api.input_mouse_wheel = sacx_api_input_mouse_wheel;
-    task->api.input_mouse_buttons = sacx_api_input_mouse_buttons;
-    task->api.input_mouse_consume = sacx_api_input_mouse_consume;
+    task->api.input_mouse_dx = sacx_guard_input_mouse_dx;
+    task->api.input_mouse_dy = sacx_guard_input_mouse_dy;
+    task->api.input_mouse_wheel = sacx_guard_input_mouse_wheel;
+    task->api.input_mouse_buttons = sacx_guard_input_mouse_buttons;
+    task->api.input_mouse_consume = sacx_guard_input_mouse_consume;
 
-    task->api.mouse_set_cursor = sacx_api_mouse_set_cursor;
-    task->api.mouse_current_cursor = sacx_api_mouse_current_cursor;
-    task->api.mouse_set_sensitivity_pct = sacx_api_mouse_set_sensitivity_pct;
-    task->api.mouse_sensitivity_pct = sacx_api_mouse_sensitivity_pct;
-    task->api.mouse_x = sacx_api_mouse_x;
-    task->api.mouse_y = sacx_api_mouse_y;
-    task->api.mouse_dx = sacx_api_mouse_dx;
-    task->api.mouse_dy = sacx_api_mouse_dy;
-    task->api.mouse_wheel = sacx_api_mouse_wheel;
-    task->api.mouse_buttons = sacx_api_mouse_buttons;
-    task->api.mouse_visible = sacx_api_mouse_visible;
-    task->api.mouse_get_state = sacx_api_mouse_get_state;
+    task->api.mouse_set_cursor = sacx_guard_mouse_set_cursor;
+    task->api.mouse_current_cursor = sacx_guard_mouse_current_cursor;
+    task->api.mouse_set_sensitivity_pct = sacx_guard_mouse_set_sensitivity_pct;
+    task->api.mouse_sensitivity_pct = sacx_guard_mouse_sensitivity_pct;
+    task->api.mouse_x = sacx_guard_mouse_x;
+    task->api.mouse_y = sacx_guard_mouse_y;
+    task->api.mouse_dx = sacx_guard_mouse_dx;
+    task->api.mouse_dy = sacx_guard_mouse_dy;
+    task->api.mouse_wheel = sacx_guard_mouse_wheel;
+    task->api.mouse_buttons = sacx_guard_mouse_buttons;
+    task->api.mouse_visible = sacx_guard_mouse_visible;
+    task->api.mouse_get_state = sacx_guard_mouse_get_state;
 
-    task->api.text_draw = sacx_api_text_draw;
-    task->api.text_draw_align = sacx_api_text_draw_align;
-    task->api.text_draw_outline_align = sacx_api_text_draw_outline_align;
-    task->api.text_measure_line_px = sacx_api_text_measure_line_px;
-    task->api.text_line_height = sacx_api_text_line_height;
-    task->api.text_scale_mul_px = sacx_api_text_scale_mul_px;
+    task->api.text_draw = sacx_guard_text_draw;
+    task->api.text_draw_align = sacx_guard_text_draw_align;
+    task->api.text_draw_outline_align = sacx_guard_text_draw_outline_align;
+    task->api.text_measure_line_px = sacx_guard_text_measure_line_px;
+    task->api.text_line_height = sacx_guard_text_line_height;
+    task->api.text_scale_mul_px = sacx_guard_text_scale_mul_px;
 
-    task->api.img_load = sacx_api_img_load;
-    task->api.img_load_bmp = sacx_api_img_load_bmp;
-    task->api.img_load_png = sacx_api_img_load_png;
-    task->api.img_load_jpg = sacx_api_img_load_jpg;
-    task->api.img_draw = sacx_api_img_draw;
-    task->api.img_destroy = sacx_api_img_destroy;
-    task->api.img_size = sacx_api_img_size;
+    task->api.img_load = sacx_guard_img_load;
+    task->api.img_load_bmp = sacx_guard_img_load_bmp;
+    task->api.img_load_png = sacx_guard_img_load_png;
+    task->api.img_load_jpg = sacx_guard_img_load_jpg;
+    task->api.img_draw = sacx_guard_img_draw;
+    task->api.img_destroy = sacx_guard_img_destroy;
+    task->api.img_size = sacx_guard_img_size;
 
-    task->api.sched_preempt_guard_enter = sacx_api_sched_preempt_guard_enter;
-    task->api.sched_preempt_guard_leave = sacx_api_sched_preempt_guard_leave;
-    task->api.sched_quantum_ticks = sacx_api_sched_quantum_ticks;
-    task->api.sched_preemptions = sacx_api_sched_preemptions;
-    task->api.app_set_console_visible = sacx_api_set_console_visible;
-    task->api.app_arg_raw_path = sacx_api_app_arg_raw_path;
-    task->api.app_arg_friendly_path = sacx_api_app_arg_friendly_path;
-    task->api.dialog_open_file = sacx_api_dialog_open_file;
-    task->api.dialog_active = sacx_api_dialog_active;
-    task->api.window_focused = sacx_api_window_focused;
+    task->api.sched_preempt_guard_enter = sacx_guard_sched_preempt_guard_enter;
+    task->api.sched_preempt_guard_leave = sacx_guard_sched_preempt_guard_leave;
+    task->api.sched_quantum_ticks = sacx_guard_sched_quantum_ticks;
+    task->api.sched_preemptions = sacx_guard_sched_preemptions;
+    task->api.app_set_console_visible = sacx_guard_app_set_console_visible;
+    task->api.app_arg_raw_path = sacx_guard_app_arg_raw_path;
+    task->api.app_arg_friendly_path = sacx_guard_app_arg_friendly_path;
+    task->api.dialog_open_file = sacx_guard_dialog_open_file;
+    task->api.dialog_active = sacx_guard_dialog_active;
+    task->api.window_focused = sacx_guard_window_focused;
 
-    task->api.k3d_scene_create = sacx_api_k3d_scene_create;
-    task->api.k3d_scene_destroy = sacx_api_k3d_scene_destroy;
-    task->api.k3d_scene_render = sacx_api_k3d_scene_render;
-    task->api.k3d_scene_resize = sacx_api_k3d_scene_resize;
-    task->api.k3d_scene_root_obj = sacx_api_k3d_scene_root_obj;
-    task->api.k3d_scene_set_camera = sacx_api_k3d_scene_set_camera;
-    task->api.k3d_scene_get_camera = sacx_api_k3d_scene_get_camera;
-    task->api.k3d_scene_set_ambient = sacx_api_k3d_scene_set_ambient;
-    task->api.k3d_scene_set_directional_light = sacx_api_k3d_scene_set_directional_light;
-    task->api.k3d_scene_clear_point_lights = sacx_api_k3d_scene_clear_point_lights;
-    task->api.k3d_scene_add_point_light = sacx_api_k3d_scene_add_point_light;
-    task->api.k3d_scene_set_point_light = sacx_api_k3d_scene_set_point_light;
-    task->api.k3d_scene_set_fog = sacx_api_k3d_scene_set_fog;
-    task->api.k3d_scene_new_cube = sacx_api_k3d_scene_new_cube;
-    task->api.k3d_scene_load_obj = sacx_api_k3d_scene_load_obj;
-    task->api.k3d_scene_add_image_surface = sacx_api_k3d_scene_add_image_surface;
-    task->api.k3d_scene_add_text_surface = sacx_api_k3d_scene_add_text_surface;
-    task->api.k3d_instance_set_pos = sacx_api_k3d_instance_set_pos;
-    task->api.k3d_instance_set_rotation = sacx_api_k3d_instance_set_rotation;
-    task->api.k3d_instance_set_scale = sacx_api_k3d_instance_set_scale;
-    task->api.k3d_instance_set_visible = sacx_api_k3d_instance_set_visible;
-    task->api.k3d_instance_set_casts_shadow = sacx_api_k3d_instance_set_casts_shadow;
-    task->api.k3d_player_create = sacx_api_k3d_player_create;
-    task->api.k3d_player_destroy = sacx_api_k3d_player_destroy;
-    task->api.k3d_player_set_free_mode = sacx_api_k3d_player_set_free_mode;
-    task->api.k3d_player_set_camera = sacx_api_k3d_player_set_camera;
-    task->api.k3d_player_get_camera = sacx_api_k3d_player_get_camera;
-    task->api.k3d_player_clear_colliders = sacx_api_k3d_player_clear_colliders;
-    task->api.k3d_player_add_collider = sacx_api_k3d_player_add_collider;
-    task->api.k3d_player_update = sacx_api_k3d_player_update;
-    task->api.k3d_scene_apply_default_world = sacx_api_k3d_scene_apply_default_world;
-    task->api.k3d_scene_add_room = sacx_api_k3d_scene_add_room;
-    task->api.k3d_scene_add_obstacle_cube = sacx_api_k3d_scene_add_obstacle_cube;
+    task->api.k3d_scene_create = sacx_guard_k3d_scene_create;
+    task->api.k3d_scene_destroy = sacx_guard_k3d_scene_destroy;
+    task->api.k3d_scene_render = sacx_guard_k3d_scene_render;
+    task->api.k3d_scene_resize = sacx_guard_k3d_scene_resize;
+    task->api.k3d_scene_root_obj = sacx_guard_k3d_scene_root_obj;
+    task->api.k3d_scene_set_camera = sacx_guard_k3d_scene_set_camera;
+    task->api.k3d_scene_get_camera = sacx_guard_k3d_scene_get_camera;
+    task->api.k3d_scene_set_ambient = sacx_guard_k3d_scene_set_ambient;
+    task->api.k3d_scene_set_directional_light = sacx_guard_k3d_scene_set_directional_light;
+    task->api.k3d_scene_clear_point_lights = sacx_guard_k3d_scene_clear_point_lights;
+    task->api.k3d_scene_add_point_light = sacx_guard_k3d_scene_add_point_light;
+    task->api.k3d_scene_set_point_light = sacx_guard_k3d_scene_set_point_light;
+    task->api.k3d_scene_set_fog = sacx_guard_k3d_scene_set_fog;
+    task->api.k3d_scene_new_cube = sacx_guard_k3d_scene_new_cube;
+    task->api.k3d_scene_load_obj = sacx_guard_k3d_scene_load_obj;
+    task->api.k3d_scene_add_image_surface = sacx_guard_k3d_scene_add_image_surface;
+    task->api.k3d_scene_add_text_surface = sacx_guard_k3d_scene_add_text_surface;
+    task->api.k3d_instance_set_pos = sacx_guard_k3d_instance_set_pos;
+    task->api.k3d_instance_set_rotation = sacx_guard_k3d_instance_set_rotation;
+    task->api.k3d_instance_set_scale = sacx_guard_k3d_instance_set_scale;
+    task->api.k3d_instance_set_visible = sacx_guard_k3d_instance_set_visible;
+    task->api.k3d_instance_set_casts_shadow = sacx_guard_k3d_instance_set_casts_shadow;
+    task->api.k3d_player_create = sacx_guard_k3d_player_create;
+    task->api.k3d_player_destroy = sacx_guard_k3d_player_destroy;
+    task->api.k3d_player_set_free_mode = sacx_guard_k3d_player_set_free_mode;
+    task->api.k3d_player_set_camera = sacx_guard_k3d_player_set_camera;
+    task->api.k3d_player_get_camera = sacx_guard_k3d_player_get_camera;
+    task->api.k3d_player_clear_colliders = sacx_guard_k3d_player_clear_colliders;
+    task->api.k3d_player_add_collider = sacx_guard_k3d_player_add_collider;
+    task->api.k3d_player_update = sacx_guard_k3d_player_update;
+    task->api.k3d_scene_apply_default_world = sacx_guard_k3d_scene_apply_default_world;
+    task->api.k3d_scene_add_room = sacx_guard_k3d_scene_add_room;
+    task->api.k3d_scene_add_obstacle_cube = sacx_guard_k3d_scene_add_obstacle_cube;
 
-    task->api.img_create = sacx_api_img_create;
-    task->api.img_clone = sacx_api_img_clone;
-    task->api.img_pixels = sacx_api_img_pixels;
-    task->api.img_touch = sacx_api_img_touch;
-    task->api.img_save = sacx_api_img_save;
-    task->api.img_save_async = sacx_api_img_save_async;
-    task->api.img_save_status = sacx_api_img_save_status;
-    task->api.img_save_release = sacx_api_img_save_release;
-    task->api.img_draw_text = sacx_api_img_draw_text;
-    task->api.img_clipboard_set = sacx_api_img_clipboard_set;
-    task->api.img_clipboard_get = sacx_api_img_clipboard_get;
-    task->api.app_arg_image = sacx_api_app_arg_image;
-    task->api.dialog_save_file = sacx_api_dialog_save_file;
-    task->api.window_set_close_deferred = sacx_api_window_set_close_deferred;
-    task->api.window_close_requested = sacx_api_window_close_requested;
-    task->api.window_close_accept = sacx_api_window_close_accept;
-    task->api.window_close_cancel = sacx_api_window_close_cancel;
-    task->api.textbox_select = sacx_api_textbox_select;
-    task->api.textbox_selection = sacx_api_textbox_selection;
-    task->api.textbox_copy_selection = sacx_api_textbox_copy_selection;
-    task->api.textbox_cut_selection = sacx_api_textbox_cut_selection;
-    task->api.textbox_paste = sacx_api_textbox_paste;
-    task->api.textbox_undo = sacx_api_textbox_undo;
-    task->api.textbox_redo = sacx_api_textbox_redo;
-    task->api.textbox_set_max_len = sacx_api_textbox_set_max_len;
-    task->api.textbox_max_len = sacx_api_textbox_max_len;
-    task->api.window_set_modal_child = sacx_api_window_set_modal_child;
-    task->api.window_clear_modal_child = sacx_api_window_clear_modal_child;
-    task->api.window_has_active_modal = sacx_api_window_has_active_modal;
-    task->api.window_center_on_parent = sacx_api_window_center_on_parent;
-    task->api.dialog_open_file_for_window = sacx_api_dialog_open_file_for_window;
-    task->api.dialog_save_file_for_window = sacx_api_dialog_save_file_for_window;
-    task->api.ui_view_create_rect = sacx_api_ui_view_create_rect;
-    task->api.ui_window_view_create = sacx_api_ui_window_view_create;
-    task->api.ui_view_destroy = sacx_api_ui_view_destroy;
-    task->api.ui_view_root = sacx_api_ui_view_root;
-    task->api.ui_view_add_obj = sacx_api_ui_view_add_obj;
-    task->api.ui_view_set_state = sacx_api_ui_view_set_state;
-    task->api.ui_view_state = sacx_api_ui_view_state;
-    task->api.ui_view_set_visible = sacx_api_ui_view_set_visible;
-    task->api.ui_view_set_layout = sacx_api_ui_view_set_layout;
-    task->api.ui_view_apply_layout = sacx_api_ui_view_apply_layout;
-    task->api.ui_view_set_bounds = sacx_api_ui_view_set_bounds;
-    task->api.ui_dropdown_create = sacx_api_ui_dropdown_create;
-    task->api.ui_dropdown_destroy = sacx_api_ui_dropdown_destroy;
-    task->api.ui_dropdown_root = sacx_api_ui_dropdown_root;
-    task->api.ui_dropdown_selected = sacx_api_ui_dropdown_selected;
-    task->api.ui_dropdown_set_selected = sacx_api_ui_dropdown_set_selected;
-    task->api.ui_dropdown_set_enabled = sacx_api_ui_dropdown_set_enabled;
-    task->api.ui_radio_create = sacx_api_ui_radio_create;
-    task->api.ui_radio_destroy = sacx_api_ui_radio_destroy;
-    task->api.ui_radio_root = sacx_api_ui_radio_root;
-    task->api.ui_radio_selected = sacx_api_ui_radio_selected;
-    task->api.ui_radio_set_selected = sacx_api_ui_radio_set_selected;
-    task->api.ui_radio_set_enabled = sacx_api_ui_radio_set_enabled;
-    task->api.ui_toggle_create = sacx_api_ui_toggle_create;
-    task->api.ui_toggle_destroy = sacx_api_ui_toggle_destroy;
-    task->api.ui_toggle_root = sacx_api_ui_toggle_root;
-    task->api.ui_toggle_checked = sacx_api_ui_toggle_checked;
-    task->api.ui_toggle_set_checked = sacx_api_ui_toggle_set_checked;
-    task->api.ui_toggle_set_enabled = sacx_api_ui_toggle_set_enabled;
-    task->api.work_submit = sacx_api_work_submit;
-    task->api.work_status = sacx_api_work_status;
-    task->api.work_wait = sacx_api_work_wait;
-    task->api.work_cancel = sacx_api_work_cancel;
-    task->api.net_request_start = sacx_api_net_request_start;
-    task->api.net_request_status = sacx_api_net_request_status;
-    task->api.net_response_info = sacx_api_net_response_info;
-    task->api.net_response_read = sacx_api_net_response_read;
-    task->api.net_request_cancel = sacx_api_net_request_cancel;
-    task->api.net_request_release = sacx_api_net_request_release;
-    task->api.img_load_memory = sacx_api_img_load_memory;
-    task->api.mem_alloc = sacx_api_mem_alloc;
-    task->api.mem_free = sacx_api_mem_free;
-    task->api.net_request_start_ex = sacx_api_net_request_start_ex;
+    task->api.img_create = sacx_guard_img_create;
+    task->api.img_clone = sacx_guard_img_clone;
+    task->api.img_pixels = sacx_guard_img_pixels;
+    task->api.img_touch = sacx_guard_img_touch;
+    task->api.img_save = sacx_guard_img_save;
+    task->api.img_save_async = sacx_guard_img_save_async;
+    task->api.img_save_status = sacx_guard_img_save_status;
+    task->api.img_save_release = sacx_guard_img_save_release;
+    task->api.img_draw_text = sacx_guard_img_draw_text;
+    task->api.img_clipboard_set = sacx_guard_img_clipboard_set;
+    task->api.img_clipboard_get = sacx_guard_img_clipboard_get;
+    task->api.app_arg_image = sacx_guard_app_arg_image;
+    task->api.dialog_save_file = sacx_guard_dialog_save_file;
+    task->api.window_set_close_deferred = sacx_guard_window_set_close_deferred;
+    task->api.window_close_requested = sacx_guard_window_close_requested;
+    task->api.window_close_accept = sacx_guard_window_close_accept;
+    task->api.window_close_cancel = sacx_guard_window_close_cancel;
+    task->api.textbox_select = sacx_guard_textbox_select;
+    task->api.textbox_selection = sacx_guard_textbox_selection;
+    task->api.textbox_copy_selection = sacx_guard_textbox_copy_selection;
+    task->api.textbox_cut_selection = sacx_guard_textbox_cut_selection;
+    task->api.textbox_paste = sacx_guard_textbox_paste;
+    task->api.textbox_undo = sacx_guard_textbox_undo;
+    task->api.textbox_redo = sacx_guard_textbox_redo;
+    task->api.textbox_set_max_len = sacx_guard_textbox_set_max_len;
+    task->api.textbox_max_len = sacx_guard_textbox_max_len;
+    task->api.window_set_modal_child = sacx_guard_window_set_modal_child;
+    task->api.window_clear_modal_child = sacx_guard_window_clear_modal_child;
+    task->api.window_has_active_modal = sacx_guard_window_has_active_modal;
+    task->api.window_center_on_parent = sacx_guard_window_center_on_parent;
+    task->api.dialog_open_file_for_window = sacx_guard_dialog_open_file_for_window;
+    task->api.dialog_save_file_for_window = sacx_guard_dialog_save_file_for_window;
+    task->api.ui_view_create_rect = sacx_guard_ui_view_create_rect;
+    task->api.ui_window_view_create = sacx_guard_ui_window_view_create;
+    task->api.ui_view_destroy = sacx_guard_ui_view_destroy;
+    task->api.ui_view_root = sacx_guard_ui_view_root;
+    task->api.ui_view_add_obj = sacx_guard_ui_view_add_obj;
+    task->api.ui_view_set_state = sacx_guard_ui_view_set_state;
+    task->api.ui_view_state = sacx_guard_ui_view_state;
+    task->api.ui_view_set_visible = sacx_guard_ui_view_set_visible;
+    task->api.ui_view_set_layout = sacx_guard_ui_view_set_layout;
+    task->api.ui_view_apply_layout = sacx_guard_ui_view_apply_layout;
+    task->api.ui_view_set_bounds = sacx_guard_ui_view_set_bounds;
+    task->api.ui_dropdown_create = sacx_guard_ui_dropdown_create;
+    task->api.ui_dropdown_destroy = sacx_guard_ui_dropdown_destroy;
+    task->api.ui_dropdown_root = sacx_guard_ui_dropdown_root;
+    task->api.ui_dropdown_selected = sacx_guard_ui_dropdown_selected;
+    task->api.ui_dropdown_set_selected = sacx_guard_ui_dropdown_set_selected;
+    task->api.ui_dropdown_set_enabled = sacx_guard_ui_dropdown_set_enabled;
+    task->api.ui_radio_create = sacx_guard_ui_radio_create;
+    task->api.ui_radio_destroy = sacx_guard_ui_radio_destroy;
+    task->api.ui_radio_root = sacx_guard_ui_radio_root;
+    task->api.ui_radio_selected = sacx_guard_ui_radio_selected;
+    task->api.ui_radio_set_selected = sacx_guard_ui_radio_set_selected;
+    task->api.ui_radio_set_enabled = sacx_guard_ui_radio_set_enabled;
+    task->api.ui_toggle_create = sacx_guard_ui_toggle_create;
+    task->api.ui_toggle_destroy = sacx_guard_ui_toggle_destroy;
+    task->api.ui_toggle_root = sacx_guard_ui_toggle_root;
+    task->api.ui_toggle_checked = sacx_guard_ui_toggle_checked;
+    task->api.ui_toggle_set_checked = sacx_guard_ui_toggle_set_checked;
+    task->api.ui_toggle_set_enabled = sacx_guard_ui_toggle_set_enabled;
+    task->api.work_submit = sacx_guard_work_submit;
+    task->api.work_status = sacx_guard_work_status;
+    task->api.work_wait = sacx_guard_work_wait;
+    task->api.work_cancel = sacx_guard_work_cancel;
+    task->api.net_request_start = sacx_guard_net_request_start;
+    task->api.net_request_status = sacx_guard_net_request_status;
+    task->api.net_response_info = sacx_guard_net_response_info;
+    task->api.net_response_read = sacx_guard_net_response_read;
+    task->api.net_request_cancel = sacx_guard_net_request_cancel;
+    task->api.net_request_release = sacx_guard_net_request_release;
+    task->api.img_load_memory = sacx_guard_img_load_memory;
+    task->api.mem_alloc = sacx_guard_mem_alloc;
+    task->api.mem_free = sacx_guard_mem_free;
+    task->api.net_request_start_ex = sacx_guard_net_request_start_ex;
+    task->api.net_response_progress = sacx_guard_net_response_progress;
+    task->api.net_response_read_available = sacx_guard_net_response_read_available;
+    task->api.time_monotonic_ms = sacx_guard_time_monotonic_ms;
+    task->api.app_checkpoint=sacx_api_app_checkpoint;
+    task->api.img_publish_region=sacx_guard_img_publish_region;
+    task->api.time_utc=sacx_guard_time_utc;
+    task->api.net_request_start_stream=sacx_guard_net_request_start_stream;
+    task->api.net_response_headers_read=sacx_guard_net_response_headers_read;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -6223,81 +6163,8 @@ extern "C" void sacx_runtime_set_font(const kfont *font)
     G_runtime_font = font;
 }
 
-extern "C" int sacx_runtime_launch_ex(const char *raw_path,
-                                      const char *friendly_path,
-                                      const char *arg_raw_path,
-                                      const char *arg_friendly_path,
-                                      const sacx_runtime_io *io,
-                                      uint32_t *out_task_id)
-{
-    sacx_task *task = 0;
-    uint8_t *file_data = 0;
-    uint32_t file_size = 0u;
-    int rc = -1;
-
-    if (!raw_path || !raw_path[0])
-        return -1;
-
-    task = sacx_alloc_task_slot();
-    if (!task)
-    {
-        terminal_warn("sacx: no free task slot");
-        return -1;
-    }
-
-    sacx_task_reset(task);
-    task->task_id = G_next_task_id++;
-    if (!G_next_task_id)
-        G_next_task_id = 1u;
-    task->state = SACX_TASK_READY;
-    task->wake_tick = dihos_time_ticks();
-    if (io)
-        task->io = *io;
-    sacx_copy_trunc(task->launch_arg_raw, sizeof(task->launch_arg_raw), arg_raw_path ? arg_raw_path : "");
-    sacx_copy_trunc(task->launch_arg_friendly, sizeof(task->launch_arg_friendly),
-                    arg_friendly_path ? arg_friendly_path : "");
-
-    if (sacx_read_file_all(raw_path, &file_data, &file_size) != 0)
-    {
-        terminal_print_inline("sacx: app file read failed rc=");
-        terminal_print_inline_hex32((uint32_t)kfile_last_result());
-        terminal_print("");
-        sacx_task_reset(task);
-        return -1;
-    }
-
-    terminal_print_inline("sacx: app file bytes=");
-    terminal_print_inline_hex32(file_size);
-    terminal_print("");
-
-    rc = sacx_load_image(task, file_data, file_size, friendly_path ? friendly_path : raw_path);
-    pmem_free_pages(file_data, (file_size + 4095u) / 4096u);
-    if (rc != 0)
-    {
-        if (task->arena)
-            pmem_free_executable_pages(task->arena, task->arena_size / 4096u);
-        sacx_task_reset(task);
-        return -1;
-    }
-
-    sacx_task_init_api(task);
-    if (out_task_id)
-        *out_task_id = task->task_id;
-
-    {
-        char msg[320];
-        ksb b;
-        ksb_init(&b, msg, sizeof(msg));
-        ksb_puts(&b, "[sacx] launched ");
-        ksb_puts(&b, task->friendly_path[0] ? task->friendly_path : raw_path);
-        ksb_puts(&b, " [");
-        ksb_puts(&b, sacx_arch_name(task->loaded_arch));
-        ksb_puts(&b, task->loaded_from_fat ? " fat]" : " legacy]");
-        sacx_task_log(task, msg);
-    }
-
-    return 0;
-}
+#include "sacx_launch_service.inc"
+#include "sacx_launch_start.inc"
 
 extern "C" int sacx_runtime_launch(const char *raw_path,
                                    const char *friendly_path,
@@ -6339,22 +6206,42 @@ extern "C" int sacx_runtime_launch_image(const char *raw_path,
     return 0;
 }
 
+static void sacx_execution_entry(void *context)
+{
+    sacx_task *task=(sacx_task*)context;
+    for(;;) {
+        int rc=0;
+        if(!task->started) {task->started=1;rc=task->entry(&task->api);}
+        else if(task->update_fn)rc=task->update_fn(&task->api);
+        task->callback_result=rc;task->callback_finished=1;
+        kfiber_yield();
+    }
+}
+
 extern "C" void sacx_runtime_update(void)
 {
+    sacx_runtime_launch_poll();
     uint64_t now = dihos_time_ticks();
 
     for (uint32_t i = 0u; i < SACX_MAX_TASKS; ++i)
     {
         sacx_task *task = &G_tasks[i];
+        if(task->release_pending && !sacx_task_worker_active(task)) {
+            (void)sacx_runtime_task_release(task->task_id);
+            continue;
+        }
         if (task->state == SACX_TASK_SLEEPING && now >= task->wake_tick)
             task->state = SACX_TASK_READY;
         if (task->state != SACX_TASK_UNUSED)
             task->state_age++;
     }
 
+    uint64_t app_frame_deadline=dihos_time_monotonic_ms()+4;
+    const uint32_t frame_cursor=G_rr_cursor;
     for (uint32_t pass = 0u; pass < SACX_MAX_TASKS; ++pass)
     {
-        uint32_t idx = (G_rr_cursor + pass) % SACX_MAX_TASKS;
+        if(pass&&dihos_time_monotonic_ms()>=app_frame_deadline)break;
+        uint32_t idx = (frame_cursor + pass) % SACX_MAX_TASKS;
         sacx_task *task = &G_tasks[idx];
         uint32_t quantum = 0u;
         uint8_t preempted = 0u;
@@ -6364,41 +6251,40 @@ extern "C" void sacx_runtime_update(void)
         if (task->state != SACX_TASK_READY)
             continue;
 
+        G_rr_cursor=(idx+1u)%SACX_MAX_TASKS;
         G_current_task = task;
-        task->sleep_requested = 0u;
-        task->pending_wake_tick = 0u;
-        task->exit_requested = 0u;
-        task->pending_exit_message[0] = 0;
-        task->pending_exit_status = 0;
-
-        if (!task->started)
-        {
-            if (!task->entry || !sacx_ptr_in_image(task, (const void *)task->entry))
-            {
-                rc = -1;
-                fault_message = "invalid entry pointer";
-            }
-            else
-            {
-                task->started = 1u;
-                rc = task->entry(&task->api);
-            }
+        if(!task->execution_stack || task->callback_finished) {
+            task->sleep_requested = 0u;
+            task->pending_wake_tick = 0u;
+            task->exit_requested = 0u;
+            task->pending_exit_message[0] = 0;
+            task->pending_exit_status = 0;
         }
-        else if (task->update_fn)
-        {
-            if (!sacx_ptr_in_image(task, (const void *)task->update_fn))
-            {
-                rc = -1;
-                fault_message = "invalid update pointer";
+
+        if((!task->started&&(!task->entry||!sacx_ptr_in_image(task,(const void*)task->entry)))||
+           (task->started&&task->update_fn&&!sacx_ptr_in_image(task,(const void*)task->update_fn))) {
+            rc=-1;fault_message="invalid app callback";
+        } else {
+            if(!task->execution_stack) {
+                task->execution_stack=pmem_alloc_pages(64);
+                if(task->execution_stack)kfiber_init(&task->execution,task->execution_stack,64*4096,sacx_execution_entry,task);
             }
-            else
-            {
-                rc = task->update_fn(&task->api);
+            if(!task->execution_stack){rc=-1;fault_message="app execution stack allocation failed";}
+            else {
+                task->callback_finished=0;task->execution_deadline=dihos_time_monotonic_ms()+2;
+                if(kfiber_resume(&task->execution)<0){rc=-1;fault_message="app continuation failed";}
+                else rc=task->callback_result;
             }
         }
 
         G_current_task = 0;
 
+        if(!task->callback_finished&&!task->exit_requested&&!fault_message) {
+            task->state=task->sleep_requested ? SACX_TASK_SLEEPING:SACX_TASK_READY;
+            if(task->sleep_requested)task->wake_tick=task->pending_wake_tick ? task->pending_wake_tick:now+1;
+            task->sleep_requested=0;
+            continue;
+        }
         if (task->exit_requested)
         {
             sacx_task_finish(task, task->pending_exit_status, task->pending_exit_message, SACX_TASK_EXITED);
@@ -6431,7 +6317,6 @@ extern "C" void sacx_runtime_update(void)
                 if (task->sched_budget_left == 0u)
                 {
                     preempted = 1u;
-                    task->preemptions++;
                     task->sched_budget_left = quantum;
                 }
             }
@@ -6572,8 +6457,10 @@ extern "C" int sacx_runtime_task_release(uint32_t task_id)
         return -1;
     if (task->state != SACX_TASK_EXITED && task->state != SACX_TASK_FAULTED)
         return -1;
-    if (sacx_task_worker_active(task))
-        return -2;
+    if (sacx_task_worker_active(task)) {
+        task->release_pending=1;
+        return 0; /* scheduler reaps after cancellation completes */
+    }
     if (task->arena)
     {
         pmem_free_executable_pages(task->arena, task->arena_size / 4096u);
@@ -6583,3 +6470,5 @@ extern "C" int sacx_runtime_task_release(uint32_t task_id)
     sacx_task_reset(task);
     return 0;
 }
+
+#include "sacx_panic_report.inc"

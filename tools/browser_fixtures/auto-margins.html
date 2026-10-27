@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Automatic vertical margin regression</title>
+<style>
+html{background:white;color:black}
+body{width:320px;margin:auto;font:16px/1.6 sans-serif}
+p{margin:16px 0}
+.centered{width:200px;margin:auto}
+.negative{margin-top:-4px;margin-bottom:12px}
+</style>
+<body>
+<p>Visible text after an automatic body margin.</p>
+<div class="centered"><p>Nested automatic margins must collapse to zero vertically and center horizontally.</p></div>
+<p class="negative">Negative margins must keep their normal layout behavior.</p>
+</body></html>

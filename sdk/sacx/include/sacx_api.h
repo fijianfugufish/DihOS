@@ -133,6 +133,10 @@ extern "C"
         char error[128];
     } sacx_net_response_info;
 
+    typedef struct sacx_net_progress {
+        uint32_t status,headers_ready,available_bytes,expected_bytes,complete,truncated;
+    } sacx_net_progress;
+
     typedef struct sacx_api sacx_api;
     typedef int (*sacx_update_fn)(const sacx_api *api);
     typedef int (*sacx_entry_fn)(const sacx_api *api);
@@ -710,6 +714,16 @@ extern "C"
 
         /* ABI v1 append-only HTTP form request extension. */
         int (*net_request_start_ex)(const sacx_net_request_desc_ex *desc, uint32_t *out_request_id);
+        /* ABI v1 append-only streaming and elapsed-time extension. */
+        int (*net_response_progress)(uint32_t request_id,sacx_net_progress *out_progress);
+        int (*net_response_read_available)(uint32_t request_id,uint32_t offset,void *dst,uint32_t capacity,uint32_t *out_read);
+        uint64_t (*time_monotonic_ms)(void);
+        int (*app_checkpoint)(void);
+        int (*img_publish_region)(uint32_t image,const uint32_t *source,uint32_t stride,uint32_t x,uint32_t y,uint32_t width,uint32_t height);
+        int (*time_utc)(uint64_t *seconds);
+        /* Stream first response; let the browser resolve redirects and cache headers. */
+        int (*net_request_start_stream)(const sacx_net_request_desc_ex *desc,uint32_t *out_request_id);
+        int (*net_response_headers_read)(uint32_t request_id,uint32_t offset,void *dst,uint32_t capacity,uint32_t *out_read);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

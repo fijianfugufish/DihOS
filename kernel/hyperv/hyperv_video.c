@@ -145,3 +145,13 @@ void hyperv_video_present(void)
     if (!send_message(10,dirt,2+count*16)) { pending=0; damage_count=0; }
     next_present=now+16;
 }
+
+void hyperv_video_panic_present(void)
+{
+    if (!online) return;
+    /* Panic has halted the normal compositor loop. Send one full rectangle
+     * directly, without polling channels, changing modes or waiting for host. */
+    uint8_t dirt[18]={0};dirt[1]=1;
+    hv_put32(dirt+10,width);hv_put32(dirt+14,height);
+    (void)send_message(10,dirt,sizeof dirt);
+}

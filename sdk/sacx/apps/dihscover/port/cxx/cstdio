@@ -1,0 +1,6 @@
+#pragma once
+#include <stdio.h>
+
+#ifndef BUFSIZ
+#define BUFSIZ 8192
+#endif
