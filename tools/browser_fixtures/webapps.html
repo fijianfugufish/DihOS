@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DihOS web application fixture</title>
+<style>
+body{font:16px/1.5 system-ui,sans-serif;background:#eef2f6;color:#162336;margin:0}main{max-width:960px;margin:auto;padding:24px}header{display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:26px;margin:0}input,button{font:inherit;padding:10px;border:1px solid #8495a8;border-radius:6px}button{background:#174b78;color:white;cursor:pointer}#feed{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin:24px 0}article{background:white;border:1px solid #ccd5df;border-radius:10px;padding:16px}article h2{font-size:18px;margin:0 0 12px}.tag{color:#506278}pre{white-space:pre-wrap;background:#162336;color:#d6f2dd;padding:16px;border-radius:8px}canvas{border:1px solid #8495a8}#heartbeat{display:inline-block;width:12px;height:12px;background:#249465;border-radius:50%}
+</style>
+<main><header><h1>Local web-app checks</h1><span id="heartbeat" aria-label="animation heartbeat"></span><label>Filter <input id="filter" value="" placeholder="Try DihOS"></label><button id="more">Load more</button></header>
+<p id="status" role="status">JavaScript must run to load this feed. This fixture contains no external resources.</p>
+<section id="feed" aria-label="Feed"></section><canvas id="canvas" width="240" height="60"></canvas><pre id="results">Waiting for JavaScript.</pre></main>
+<script>
+'use strict';
+const results={host_fixture:true,tests:{},capabilities:{},errors:[]};window.webAppResults=results;
+let entries=[],loaded=0,frameCount=0;
+function render(){const q=document.querySelector('#filter').value.toLowerCase(),feed=document.querySelector('#feed');feed.textContent='';for(let i=0;i<loaded;++i){const item=entries[i%entries.length];if(q&&!item.title.toLowerCase().includes(q))continue;const card=document.createElement('article');card.innerHTML='<h2></h2><p></p><span class="tag"></span>';card.querySelector('h2').textContent=item.title;card.querySelector('p').textContent=item.text;card.querySelector('.tag').textContent='Card '+(i+1);feed.appendChild(card);}}
+document.querySelector('#filter').addEventListener('input',render);document.querySelector('#more').addEventListener('click',()=>{loaded+=entries.length;render();});
+function bounded(p,label){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error(label+' timed out')),5000);Promise.resolve(p).then(value=>{clearTimeout(timer);resolve(value);},error=>{clearTimeout(timer);reject(error);});});}
+async function check(name,fn){try{results.tests[name]=!!await bounded(fn(),name);}catch(error){results.tests[name]=false;results.errors.push(name+': '+error.message);}}
+function database(){return new Promise((resolve,reject)=>{const name='dihos-webapp-fixture-'+Date.now(),open=indexedDB.open(name,1);let db;open.onupgradeneeded=()=>open.result.createObjectStore('items');open.onerror=()=>reject(open.error);open.onsuccess=()=>{db=open.result;const tx=db.transaction('items','readwrite'),store=tx.objectStore('items');store.put('saved','probe');const get=store.get('probe');let value;get.onsuccess=()=>{value=get.result;};tx.onerror=()=>{db.close();indexedDB.deleteDatabase(name);reject(tx.error);};tx.oncomplete=()=>{db.close();const clean=indexedDB.deleteDatabase(name);clean.onsuccess=()=>resolve(value==='saved');clean.onerror=()=>reject(clean.error);};};});}
+window.webAppCheckPromise=(async()=>{
+ await check('fetch_and_dom',async()=>{const response=await fetch('webapps-feed.json');if(!response.ok)throw new Error('HTTP '+response.status);entries=await response.json();loaded=entries.length;render();return document.querySelectorAll('article').length===entries.length;});
+ await check('input_filter',async()=>{const input=document.querySelector('#filter');input.value='DihOS';input.dispatchEvent(new Event('input',{bubbles:true}));const cards=[...document.querySelectorAll('article')];const ok=cards.length>0&&cards.every(card=>card.textContent.includes('DihOS'));input.value='';input.dispatchEvent(new Event('input'));return ok;});
+ await check('feed_append',async()=>{const before=document.querySelectorAll('article').length;document.querySelector('#more').click();return document.querySelectorAll('article').length===before+entries.length;});
+ await check('promises_and_timers',async()=>{await Promise.resolve();return await new Promise(resolve=>setTimeout(()=>resolve(true),20));});
+ await check('mutation_observer',()=>new Promise(resolve=>{const observer=new MutationObserver(()=>{observer.disconnect();resolve(true);});observer.observe(document.querySelector('#status'),{childList:true});document.querySelector('#status').textContent='Feed loaded. Filter and append controls are interactive.';}));
+ await check('local_storage',async()=>{const key='dihos-fixture',old=localStorage.getItem(key);try{localStorage.setItem(key,'saved');return localStorage.getItem(key)==='saved';}finally{if(old===null)localStorage.removeItem(key);else localStorage.setItem(key,old);}});
+ await check('indexed_db',database);
+ await check('canvas',async()=>{const ctx=document.querySelector('#canvas').getContext('2d');ctx.fillStyle='#174b78';ctx.fillRect(0,0,240,60);ctx.fillStyle='white';ctx.font='16px sans-serif';ctx.fillText('Canvas and Unicode: café',12,35);return ctx.getImageData(0,0,1,1).data[2]===120;});
+ await check('css_grid',async()=>getComputedStyle(document.querySelector('#feed')).display==='grid');
+ await check('animation_frames',()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true)))));
+ const video=document.createElement('video');results.capabilities={video_webm_vp9_opus:video.canPlayType('video/webm; codecs="vp9,opus"'),video_mp4_avc:video.canPlayType('video/mp4; codecs="avc1.42E01E"'),media_source:typeof MediaSource!=='undefined',web_audio:typeof AudioContext!=='undefined',workers:typeof Worker!=='undefined',service_workers:'serviceWorker' in navigator};
+ results.media_playback_tested=false;results.passed=Object.values(results.tests).every(Boolean);document.querySelector('#results').textContent=JSON.stringify(results,null,2);return results;
+})();
+function pulse(){document.querySelector('#heartbeat').style.opacity=String(.35+.65*(Math.sin(++frameCount/20)+1)/2);requestAnimationFrame(pulse);}requestAnimationFrame(pulse);
+</script></html>

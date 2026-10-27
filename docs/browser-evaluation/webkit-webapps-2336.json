@@ -1,0 +1,33 @@
+{
+  "host_only": true,
+  "media_playback_tested": false,
+  "status": "passed",
+  "engine": "Playwright WebKit 26.5",
+  "fixture": {
+    "host_fixture": true,
+    "tests": {
+      "fetch_and_dom": true,
+      "input_filter": true,
+      "feed_append": true,
+      "promises_and_timers": true,
+      "mutation_observer": true,
+      "local_storage": true,
+      "indexed_db": true,
+      "canvas": true,
+      "css_grid": true,
+      "animation_frames": true
+    },
+    "capabilities": {
+      "video_webm_vp9_opus": "probably",
+      "video_mp4_avc": "probably",
+      "media_source": false,
+      "web_audio": false,
+      "workers": true,
+      "service_workers": true
+    },
+    "errors": [],
+    "media_playback_tested": false,
+    "passed": true
+  },
+  "script_errors": []
+}

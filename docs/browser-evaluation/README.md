@@ -9,6 +9,14 @@ The experiments are deliberately separate from the shipping browser. Dihscover
 still uses NetSurf 3.11 with JavaScript disabled; no standalone JS interpreter
 has been attached to it.
 
+## Web applications and video follow-up
+
+See [the web-app and muted-video roadmap](webapps-roadmap.md) for the new scope,
+process/runtime prerequisites, concrete acceptance gates and host web-app fixture.
+Audio output is explicitly deferred. The Windows WebKit evaluation build passes
+the new interactive checks but reports MediaSource unavailable; it does not prove
+YouTube playback. The replacement engine still needs ARM64 host and guest testing.
+
 ## Pinned inputs and actual execution
 
 | Candidate | Pin | Executed here |
