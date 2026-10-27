@@ -25,6 +25,8 @@ void *pmem_alloc_executable_pages(uint64_t n_pages);
 void pmem_free_executable_pages(void *p, uint64_t n_pages);
 void pmem_free_pages(void *p, uint64_t n); // naive free (optional)
 void pmem_get_stats(pmem_stats *out_stats);
+/* Largest contiguous allocation available from the ordinary page pools. */
+uint64_t pmem_largest_free_pages(void);
 
 /* Address conversion helpers for page-table/MMIO code. */
 void *pmem_phys_to_virt(uint64_t phys);

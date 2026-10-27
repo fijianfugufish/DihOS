@@ -3,6 +3,9 @@
 #include "asm/asm.h"
 #include "memory/pmem.h"
 #include "terminal/terminal_api.h"
+#include "system/dihos_time.h"
+#include "hyperv/hv_wire.h"
+#include "hyperv/hv_ring.h"
 
 enum
 {
@@ -389,25 +392,7 @@ static uint64_t vmbus_post_contact(void)
     return hyperv_hypercall(HV_CALL_POST_MESSAGE, input_phys, 0u);
 }
 
-static uint64_t vmbus_post_channel_message(uint32_t connection_id,
-                                           const uint8_t *payload,
-                                           uint32_t payload_size)
-{
-    uint8_t *input = (uint8_t *)pmem_alloc_pages(1);
-
-    if (!input || !payload || payload_size > 240u)
-        return ~0ull;
-    vmbus_zero_page(input);
-    vmbus_put_u32(input + 0, connection_id);
-    vmbus_put_u32(input + 8, HV_MESSAGE_TYPE_CHANNEL);
-    vmbus_put_u32(input + 12, payload_size);
-    for (uint32_t i = 0; i < payload_size; ++i)
-        input[16u + i] = payload[i];
-    asm_dma_clean_range(input, 256u);
-    return hyperv_hypercall(HV_CALL_POST_MESSAGE,
-                            pmem_virt_to_phys(input),
-                            0u);
-}
+#include "vmbus_post_message.inc"
 
 static void vmbus_release_message(volatile uint8_t *message)
 {
@@ -511,6 +496,9 @@ int vmbus_probe_contact(uint64_t acpi_rsdp)
     return -1;
 }
 
+#include "vmbus_ring_io.inc"
+#include "vmbus_devices.inc"
+
 int vmbus_find_storvsc_offer(void)
 {
     uint8_t request[8] = {0};
@@ -562,6 +550,7 @@ int vmbus_find_storvsc_offer(void)
         if (channel_type == VMBUS_CHANNEL_OFFER)
         {
             ++offer_count;
+            vmbus_device_offer(payload);
             if (vmbus_guid_equal(payload + 8, G_storvsc_guid))
             {
                 uint32_t relid = vmbus_get_u32(payload + 184);
@@ -695,6 +684,8 @@ static int vmbus_create_ring_gpadl(void)
     }
     for (uint32_t i = 0; i < VMBUS_RING_PAGES * 4096u; ++i)
         G_storvsc_ring[i] = 0u;
+    hv_ring_store(G_storvsc_ring+64,1);
+    hv_ring_store(G_storvsc_ring+VMBUS_RING_DOWNSTREAM_OFFSET*4096+64,1);
     asm_dma_clean_range(G_storvsc_ring, VMBUS_RING_PAGES * 4096u);
     ring_phys = pmem_virt_to_phys(G_storvsc_ring);
 
@@ -813,6 +804,8 @@ static int vmbus_create_kbd_ring_gpadl(void)
     }
     for (uint32_t i = 0; i < VMBUS_RING_PAGES * 4096u; ++i)
         G_kbd_ring[i] = 0u;
+    hv_ring_store(G_kbd_ring+64,1);
+    hv_ring_store(G_kbd_ring+VMBUS_RING_DOWNSTREAM_OFFSET*4096+64,1);
     asm_dma_clean_range(G_kbd_ring, VMBUS_RING_PAGES * 4096u);
     ring_phys = pmem_virt_to_phys(G_kbd_ring);
 
@@ -912,115 +905,33 @@ int vmbus_open_keyboard_channel(void)
     return 0;
 }
 
-static int vmbus_kbd_signal(void)
+
+int vmbus_keyboard_send_inband(const void *payload,uint32_t payload_bytes)
 {
-    uint8_t *send_events = G_event_page + 2048u;
-    uint32_t byte = G_kbd_relid >> 3;
-    uint8_t mask = (uint8_t)(1u << (G_kbd_relid & 7u));
-    uint64_t status;
-
-    if (!G_event_page || !G_kbd_connection_id)
-        return -1;
-
-    asm_dma_invalidate_range(send_events + byte, 1u);
-    send_events[byte] |= mask;
-    asm_dma_clean_range(send_events + byte, 1u);
-
-    status = hyperv_hypercall(HV_CALL_SIGNAL_EVENT | HV_HYPERCALL_FAST_BIT,
-                              G_kbd_connection_id, 0u);
-    return ((uint16_t)status == 0u) ? 0 : -1;
+    uint8_t packet[288]={0};
+    if (!G_kbd_ring || !G_kbd_gpadl || !payload || !payload_bytes || payload_bytes>256) return -1;
+    uint32_t length=(16+payload_bytes+7)&~7u;
+    hv_put16(packet,6); hv_put16(packet+2,2); hv_put16(packet+4,(uint16_t)(length/8));
+    for (uint32_t i=0;i<payload_bytes;++i) packet[16+i]=((const uint8_t *)payload)[i];
+    return vmbus_ring_write(G_kbd_ring,G_kbd_connection_id,packet,length);
 }
 
-int vmbus_keyboard_send_inband(const void *payload, uint32_t payload_bytes)
+int vmbus_keyboard_receive(uint8_t *payload,uint32_t capacity,uint32_t *bytes)
 {
-    uint8_t packet[512] = {0};
-    uint32_t packet_bytes;
-    uint32_t packet_aligned;
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t next;
-
-    if (!G_kbd_ring || !G_kbd_gpadl || !payload || payload_bytes == 0u ||
-        payload_bytes > 256u)
-        return -1;
-
-    packet_bytes = 16u + payload_bytes;
-    packet_aligned = (packet_bytes + 7u) & ~7u;
-    if (packet_aligned + 8u > sizeof(packet))
-        return -1;
-
-    write_index = vmbus_get_u32(G_kbd_ring + 0);
-    read_index = vmbus_get_u32(G_kbd_ring + 4);
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-        return -1;
-
-    vmbus_put_u16(packet + 0, VMBUS_PACKET_DATA_INBAND);
-    vmbus_put_u16(packet + 2, 2u);
-    vmbus_put_u16(packet + 4, (uint16_t)(packet_aligned / 8u));
-    vmbus_put_u16(packet + 6, VMBUS_PACKET_COMPLETION_REQUESTED);
-    vmbus_put_u64(packet + 8, VMBUS_RQST_INIT);
-    for (uint32_t i = 0; i < payload_bytes; ++i)
-        packet[16u + i] = ((const uint8_t *)payload)[i];
-
-    next = vmbus_ring_copy_to(G_kbd_ring, write_index, packet, packet_aligned);
-    next = vmbus_ring_copy_to(G_kbd_ring, next, (const uint8_t *)&write_index, 4u);
-    next = vmbus_ring_copy_to(G_kbd_ring, next, (const uint8_t *)&write_index, 4u);
-    asm_dma_clean_range(G_kbd_ring + 4096u, VMBUS_RING_DATA_SIZE);
-    vmbus_put_u32(G_kbd_ring + 0, next);
-    asm_dma_clean_range(G_kbd_ring, 16u);
-    return vmbus_kbd_signal();
-}
-
-int vmbus_keyboard_receive(uint8_t *payload, uint32_t payload_cap,
-                           uint32_t *payload_bytes)
-{
-    uint8_t *ring;
-    uint8_t packet[512];
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t packet_len8;
-    uint32_t packet_offset8;
-    uint32_t packet_bytes;
-    uint32_t data_bytes;
-    uint32_t next;
-
-    if (payload_bytes)
-        *payload_bytes = 0u;
-    if (!G_kbd_ring || !payload || payload_cap == 0u)
-        return -1;
-
-    ring = G_kbd_ring + VMBUS_RING_DOWNSTREAM_OFFSET * 4096u;
-    asm_dma_invalidate_range(ring, VMBUS_RING_DATA_SIZE + 16u);
-    write_index = vmbus_get_u32(ring + 0);
-    read_index = vmbus_get_u32(ring + 4);
-    if (write_index == read_index)
-        return 1;
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-        return -1;
-
-    vmbus_ring_copy_from(ring, read_index, packet, 16u);
-    packet_offset8 = vmbus_get_u16(packet + 2);
-    packet_len8 = vmbus_get_u16(packet + 4);
-    packet_bytes = packet_len8 * 8u;
-    if (packet_bytes < 16u || packet_bytes > sizeof(packet) ||
-        packet_offset8 * 8u > packet_bytes)
-        return -1;
-
-    vmbus_ring_copy_from(ring, read_index, packet, packet_bytes);
-    data_bytes = packet_bytes - packet_offset8 * 8u;
-    if (data_bytes > payload_cap)
-        data_bytes = payload_cap;
-    for (uint32_t i = 0; i < data_bytes; ++i)
-        payload[i] = packet[packet_offset8 * 8u + i];
-
-    next = (read_index + packet_bytes + 8u) % VMBUS_RING_DATA_SIZE;
-    vmbus_put_u32(ring + 4, next);
-    asm_dma_clean_range(ring, 16u);
-    if (payload_bytes)
-        *payload_bytes = data_bytes;
-    return 0;
+    uint8_t packet[512]; uint32_t size=0;
+    if (bytes) *bytes=0;
+    if (!G_kbd_ring || !payload || !capacity) return -1;
+    for (uint32_t n=0;n<16;++n) {
+        int rc=vmbus_ring_read(G_kbd_ring+VMBUS_RING_DOWNSTREAM_OFFSET*4096,G_kbd_connection_id,packet,sizeof(packet),&size);
+        if (rc) return rc;
+        if (hv_get16(packet)!=6) continue;
+        uint32_t offset=hv_get16(packet+2)*8u, count=size-offset;
+        if (count>capacity) return -1;
+        for (uint32_t i=0;i<count;++i) payload[i]=packet[offset+i];
+        if (bytes) *bytes=count;
+        return 0;
+    }
+    return 1;
 }
 
 static int vmbus_create_mouse_ring_gpadl(void)
@@ -1040,6 +951,8 @@ static int vmbus_create_mouse_ring_gpadl(void)
     }
     for (uint32_t i = 0; i < VMBUS_RING_PAGES * 4096u; ++i)
         G_mouse_ring[i] = 0u;
+    hv_ring_store(G_mouse_ring+64,1);
+    hv_ring_store(G_mouse_ring+VMBUS_RING_DOWNSTREAM_OFFSET*4096+64,1);
     asm_dma_clean_range(G_mouse_ring, VMBUS_RING_PAGES * 4096u);
     ring_phys = pmem_virt_to_phys(G_mouse_ring);
 
@@ -1139,313 +1052,36 @@ int vmbus_open_mouse_channel(void)
     return 0;
 }
 
-static int vmbus_mouse_signal(void)
+
+int vmbus_mouse_send_inband(const void *payload,uint32_t payload_bytes)
 {
-    uint8_t *send_events = G_event_page + 2048u;
-    uint32_t byte = G_mouse_relid >> 3;
-    uint8_t mask = (uint8_t)(1u << (G_mouse_relid & 7u));
-    uint64_t status;
-
-    if (!G_event_page || !G_mouse_connection_id)
-        return -1;
-
-    asm_dma_invalidate_range(send_events + byte, 1u);
-    send_events[byte] |= mask;
-    asm_dma_clean_range(send_events + byte, 1u);
-
-    status = hyperv_hypercall(HV_CALL_SIGNAL_EVENT | HV_HYPERCALL_FAST_BIT,
-                              G_mouse_connection_id, 0u);
-    return ((uint16_t)status == 0u) ? 0 : -1;
+    uint8_t packet[288]={0};
+    if (!G_mouse_ring || !G_mouse_gpadl || !payload || !payload_bytes || payload_bytes>256) return -1;
+    uint32_t length=(16+payload_bytes+7)&~7u;
+    hv_put16(packet,6); hv_put16(packet+2,2); hv_put16(packet+4,(uint16_t)(length/8));
+    for (uint32_t i=0;i<payload_bytes;++i) packet[16+i]=((const uint8_t *)payload)[i];
+    return vmbus_ring_write(G_mouse_ring,G_mouse_connection_id,packet,length);
 }
 
-int vmbus_mouse_send_inband(const void *payload, uint32_t payload_bytes)
+int vmbus_mouse_receive(uint8_t *payload,uint32_t capacity,uint32_t *bytes)
 {
-    uint8_t packet[512] = {0};
-    uint32_t packet_bytes;
-    uint32_t packet_aligned;
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t next;
-
-    if (!G_mouse_ring || !G_mouse_gpadl || !payload || payload_bytes == 0u ||
-        payload_bytes > 256u)
-        return -1;
-
-    packet_bytes = 16u + payload_bytes;
-    packet_aligned = (packet_bytes + 7u) & ~7u;
-    if (packet_aligned + 8u > sizeof(packet))
-        return -1;
-
-    write_index = vmbus_get_u32(G_mouse_ring + 0);
-    read_index = vmbus_get_u32(G_mouse_ring + 4);
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-        return -1;
-
-    vmbus_put_u16(packet + 0, VMBUS_PACKET_DATA_INBAND);
-    vmbus_put_u16(packet + 2, 2u);
-    vmbus_put_u16(packet + 4, (uint16_t)(packet_aligned / 8u));
-    vmbus_put_u16(packet + 6, VMBUS_PACKET_COMPLETION_REQUESTED);
-    vmbus_put_u64(packet + 8, VMBUS_RQST_INIT);
-    for (uint32_t i = 0; i < payload_bytes; ++i)
-        packet[16u + i] = ((const uint8_t *)payload)[i];
-
-    next = vmbus_ring_copy_to(G_mouse_ring, write_index, packet, packet_aligned);
-    next = vmbus_ring_copy_to(G_mouse_ring, next, (const uint8_t *)&write_index, 4u);
-    next = vmbus_ring_copy_to(G_mouse_ring, next, (const uint8_t *)&write_index, 4u);
-    asm_dma_clean_range(G_mouse_ring + 4096u, VMBUS_RING_DATA_SIZE);
-    vmbus_put_u32(G_mouse_ring + 0, next);
-    asm_dma_clean_range(G_mouse_ring, 16u);
-    return vmbus_mouse_signal();
-}
-
-int vmbus_mouse_receive(uint8_t *payload, uint32_t payload_cap,
-                        uint32_t *payload_bytes)
-{
-    uint8_t *ring;
-    uint8_t packet[512];
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t packet_len8;
-    uint32_t packet_offset8;
-    uint32_t packet_bytes;
-    uint32_t data_bytes;
-    uint32_t next;
-
-    if (payload_bytes)
-        *payload_bytes = 0u;
-    if (!G_mouse_ring || !payload || payload_cap == 0u)
-        return -1;
-
-    ring = G_mouse_ring + VMBUS_RING_DOWNSTREAM_OFFSET * 4096u;
-    asm_dma_invalidate_range(ring, VMBUS_RING_DATA_SIZE + 16u);
-    write_index = vmbus_get_u32(ring + 0);
-    read_index = vmbus_get_u32(ring + 4);
-    if (write_index == read_index)
-        return 1;
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-        return -1;
-
-    vmbus_ring_copy_from(ring, read_index, packet, 16u);
-    packet_offset8 = vmbus_get_u16(packet + 2);
-    packet_len8 = vmbus_get_u16(packet + 4);
-    packet_bytes = packet_len8 * 8u;
-    if (packet_bytes < 16u || packet_bytes > sizeof(packet) ||
-        packet_offset8 * 8u > packet_bytes)
-        return -1;
-
-    vmbus_ring_copy_from(ring, read_index, packet, packet_bytes);
-    data_bytes = packet_bytes - packet_offset8 * 8u;
-    if (data_bytes > payload_cap)
-        data_bytes = payload_cap;
-    for (uint32_t i = 0; i < data_bytes; ++i)
-        payload[i] = packet[packet_offset8 * 8u + i];
-
-    next = (read_index + packet_bytes + 8u) % VMBUS_RING_DATA_SIZE;
-    vmbus_put_u32(ring + 4, next);
-    asm_dma_clean_range(ring, 16u);
-    if (payload_bytes)
-        *payload_bytes = data_bytes;
-    return 0;
-}
-
-static int vmbus_storvsc_signal(void)
-{
-    uint8_t *send_events = G_event_page + 2048u;
-    uint32_t byte = G_storvsc_relid >> 3;
-    uint8_t mask = (uint8_t)(1u << (G_storvsc_relid & 7u));
-    uint64_t status;
-
-    /*
-     * Hyper-V clears this shared bit after consuming a notification.
-     * Discard our cached copy first so every new ring write publishes a
-     * genuine zero-to-one transition instead of cleaning a stale one.
-     */
-    asm_dma_invalidate_range(send_events + byte, 1u);
-    send_events[byte] |= mask;
-    asm_dma_clean_range(send_events + byte, 1u);
-    status = hyperv_hypercall(HV_CALL_SIGNAL_EVENT | HV_HYPERCALL_FAST_BIT,
-                              G_storvsc_connection_id, 0u);
-    if ((uint16_t)status != 0u)
-    {
-        terminal_error("vmbus: StorVSC SIGNAL_EVENT failed status=");
-        terminal_print_inline_hex64(status);
-        return -1;
-    }
-    return 0;
-}
-
-static int vmbus_storvsc_send_inband(const uint8_t payload[64])
-{
-    uint8_t packet[80] = {0};
-    uint8_t trailer[8];
-    volatile uint8_t *ring = G_storvsc_ring;
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t next;
-
-    asm_dma_invalidate_range((const void *)ring, 16u);
-    write_index = vmbus_get_u32(ring + 0);
-    read_index = vmbus_get_u32(ring + 4);
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-    {
-        terminal_error("vmbus: StorVSC outbound ring indices invalid");
-        return -1;
-    }
-
-    vmbus_put_u16(packet + 0, VMBUS_PACKET_DATA_INBAND);
-    vmbus_put_u16(packet + 2, 2u);
-    vmbus_put_u16(packet + 4, 10u);
-    vmbus_put_u16(packet + 6, VMBUS_PACKET_COMPLETION_REQUESTED);
-    vmbus_put_u64(packet + 8, VMBUS_RQST_INIT);
-    for (uint32_t i = 0; i < 64u; ++i)
-        packet[16u + i] = payload[i];
-
-    vmbus_put_u32(trailer + 0, write_index);
-    vmbus_put_u32(trailer + 4, read_index);
-    next = vmbus_ring_copy_to(G_storvsc_ring, write_index,
-                              packet, sizeof(packet));
-    next = vmbus_ring_copy_to(G_storvsc_ring, next,
-                              trailer, sizeof(trailer));
-    asm_dma_clean_range(G_storvsc_ring + 4096u, VMBUS_RING_DATA_SIZE);
-    vmbus_put_u32(G_storvsc_ring + 0, next);
-    asm_dma_clean_range(G_storvsc_ring, 16u);
-    return vmbus_storvsc_signal();
-}
-
-static int vmbus_storvsc_send_gpa_direct(const uint8_t payload[64],
-                                         void *buffer,
-                                         uint32_t buffer_bytes)
-{
-    uint8_t packet[104] = {0};
-    uint8_t trailer[8];
-    volatile uint8_t *ring = G_storvsc_ring;
-    uint64_t buffer_phys;
-    uint32_t write_index;
-    uint32_t read_index;
-    uint32_t next;
-
-    if (!buffer || buffer_bytes == 0u || buffer_bytes > 4096u)
-        return -1;
-    buffer_phys = pmem_virt_to_phys(buffer);
-    if (!buffer_phys)
-        return -1;
-
-    asm_dma_invalidate_range((const void *)ring, 16u);
-    write_index = vmbus_get_u32(ring + 0);
-    read_index = vmbus_get_u32(ring + 4);
-    if (write_index >= VMBUS_RING_DATA_SIZE ||
-        read_index >= VMBUS_RING_DATA_SIZE)
-    {
-        terminal_error("vmbus: StorVSC outbound ring indices invalid");
-        return -1;
-    }
-
-    vmbus_put_u16(packet + 0, VMBUS_PACKET_DATA_USING_GPA_DIRECT);
-    vmbus_put_u16(packet + 2, 5u);
-    vmbus_put_u16(packet + 4, 13u);
-    vmbus_put_u16(packet + 6, VMBUS_PACKET_COMPLETION_REQUESTED);
-    vmbus_put_u64(packet + 8, VMBUS_RQST_INIT);
-    vmbus_put_u32(packet + 16, 0u);
-    vmbus_put_u32(packet + 20, 1u);
-    vmbus_put_u32(packet + 24, buffer_bytes);
-    vmbus_put_u32(packet + 28, (uint32_t)(buffer_phys & 0xFFFu));
-    vmbus_put_u64(packet + 32, buffer_phys >> 12);
-    for (uint32_t i = 0; i < 64u; ++i)
-        packet[40u + i] = payload[i];
-
-    vmbus_put_u32(trailer + 0, write_index);
-    vmbus_put_u32(trailer + 4, read_index);
-    next = vmbus_ring_copy_to(G_storvsc_ring, write_index,
-                              packet, sizeof(packet));
-    next = vmbus_ring_copy_to(G_storvsc_ring, next,
-                              trailer, sizeof(trailer));
-    asm_dma_clean_range(buffer, buffer_bytes);
-    asm_dma_clean_range(G_storvsc_ring + 4096u, VMBUS_RING_DATA_SIZE);
-    vmbus_put_u32(G_storvsc_ring + 0, next);
-    asm_dma_clean_range(G_storvsc_ring, 16u);
-    return vmbus_storvsc_signal();
-}
-
-static int vmbus_storvsc_receive(uint8_t payload[64],
-                                 uint32_t *operation, uint32_t *status)
-{
-    uint8_t descriptor[16];
-    uint8_t packet[80];
-    uint8_t *ring = G_storvsc_ring + VMBUS_RING_DOWNSTREAM_OFFSET * 4096u;
-
-    for (uint32_t round = 0; round < VMBUS_POLL_ROUNDS; ++round)
-    {
-        uint32_t write_index;
-        uint32_t read_index;
-        uint32_t packet_bytes;
-        uint32_t payload_offset;
-        uint32_t next;
-
-        if ((round & 0x3FFFu) != 0u)
-        {
-            asm_relax();
-            continue;
-        }
-        asm_dma_invalidate_range(ring, 4u * 4096u);
-        write_index = vmbus_get_u32(ring + 0);
-        read_index = vmbus_get_u32(ring + 4);
-        if (write_index == read_index)
-            continue;
-        if (write_index >= VMBUS_RING_DATA_SIZE ||
-            read_index >= VMBUS_RING_DATA_SIZE)
-        {
-            terminal_error("vmbus: StorVSC inbound ring indices invalid");
-            return -1;
-        }
-
-        vmbus_ring_copy_from(ring, read_index,
-                             descriptor, sizeof(descriptor));
-        packet_bytes = (uint32_t)vmbus_get_u16(descriptor + 4) * 8u;
-        payload_offset = (uint32_t)vmbus_get_u16(descriptor + 2) * 8u;
-        if (packet_bytes < payload_offset + 64u ||
-            packet_bytes > sizeof(packet))
-        {
-            terminal_error("vmbus: StorVSC response packet length invalid=");
-            terminal_print_inline_hex32(packet_bytes);
-            return -1;
-        }
-
-        vmbus_ring_copy_from(ring, read_index, packet, packet_bytes);
-        for (uint32_t i = 0; i < 64u; ++i)
-            payload[i] = packet[payload_offset + i];
-        next = (read_index + packet_bytes + 8u) % VMBUS_RING_DATA_SIZE;
-        vmbus_put_u32(ring + 4, next);
-        asm_dma_clean_range(ring, 16u);
-        if (operation)
-            *operation = vmbus_get_u32(payload + 0);
-        if (status)
-            *status = vmbus_get_u32(payload + 8);
+    uint8_t packet[4608]; uint32_t size=0;
+    if (bytes) *bytes=0;
+    if (!G_mouse_ring || !payload || !capacity) return -1;
+    for (uint32_t n=0;n<16;++n) {
+        int rc=vmbus_ring_read(G_mouse_ring+VMBUS_RING_DOWNSTREAM_OFFSET*4096,G_mouse_connection_id,packet,sizeof(packet),&size);
+        if (rc) return rc;
+        if (hv_get16(packet)!=6) continue;
+        uint32_t offset=hv_get16(packet+2)*8u, count=size-offset;
+        if (count>capacity) return -1;
+        for (uint32_t i=0;i<count;++i) payload[i]=packet[offset+i];
+        if (bytes) *bytes=count;
         return 0;
     }
-    return -1;
+    return 1;
 }
 
-static int vmbus_storvsc_wait_completion(uint8_t payload[64],
-                                         uint32_t *operation,
-                                         uint32_t *status)
-{
-    for (uint32_t attempt = 0; attempt < 3u; ++attempt)
-    {
-        if (vmbus_storvsc_receive(payload, operation, status) == 0)
-            return 0;
-        if (attempt + 1u < 3u)
-        {
-            terminal_warn("storvsc: completion delayed; re-signalling attempt=");
-            terminal_print_inline_hex32(attempt + 1u);
-            if (vmbus_storvsc_signal() != 0)
-                return -1;
-        }
-    }
-    return -1;
-}
+#include "vmbus_storage_io.inc"
 
 int vmbus_storvsc_begin_initialization(void)
 {

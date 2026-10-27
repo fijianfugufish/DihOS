@@ -1,5 +1,6 @@
 #include "net/knet_usb.h"
-#include "usb/usb_ethernet.h"
+#include "net/knet_link.h"
+#include "system/kwork.h"
 #include "usb/usbh.h"
 #include "terminal/terminal_api.h"
 #include "kwrappers/string.h"
@@ -350,15 +351,15 @@ static void print_ip_inline(uint32_t ip)
 
 static int knet_refresh_link(void)
 {
-    g_knet.link_online = usb_ethernet_online() ? 1u : 0u;
+    g_knet.link_online = knet_link_online() ? 1u : 0u;
     if (!g_knet.link_online)
     {
-        knet_copy(g_knet.detail, sizeof(g_knet.detail), "USB Ethernet offline");
+        knet_copy(g_knet.detail, sizeof(g_knet.detail), "Ethernet offline");
         return -1;
     }
-    if (usb_ethernet_get_mac(g_knet.mac) != 0)
+    if (knet_link_get_mac(g_knet.mac) != 0)
     {
-        knet_copy(g_knet.detail, sizeof(g_knet.detail), "USB Ethernet MAC unavailable");
+        knet_copy(g_knet.detail, sizeof(g_knet.detail), "Ethernet MAC unavailable");
         return -1;
     }
     return 0;
@@ -483,7 +484,13 @@ typedef struct dhcp_parse_result
     uint32_t mask;
     uint32_t router;
     uint32_t dns;
+    uint32_t lease_seconds;
 } dhcp_parse_result;
+
+static uint32_t g_auto_job, g_auto_phase, g_auto_attempts;
+static uint64_t g_auto_deadline, g_auto_renew, g_auto_dispatch;
+static dhcp_parse_result g_auto_offer;
+
 
 static int parse_dhcp_packet(const uint8_t *frame, uint32_t len, dhcp_parse_result *out)
 {
@@ -537,6 +544,7 @@ static int parse_dhcp_packet(const uint8_t *frame, uint32_t len, dhcp_parse_resu
             out->router = get_be32(frame + opts);
         else if (opt == 6u && opt_len >= 4u)
             out->dns = get_be32(frame + opts);
+        if (opt == 51u && opt_len == 4u) out->lease_seconds = get_be32(frame + opts);
         opts += opt_len;
     }
     return out->msg_type ? 0 : -1;
@@ -550,7 +558,7 @@ static int dhcp_send(uint8_t msg_type, uint32_t requested_ip, uint32_t server_id
     uint32_t frame_len = build_udp_ipv4(g_tx, bcast, 0u, 0xFFFFFFFFu,
                                         KNET_DHCP_CLIENT_PORT, KNET_DHCP_SERVER_PORT,
                                         dhcp, (uint16_t)dhcp_len);
-    return usb_ethernet_send_frame(g_tx, frame_len);
+    return knet_link_send_frame(g_tx, frame_len);
 }
 
 static int dhcp_wait(uint8_t want_type, dhcp_parse_result *out, uint32_t rounds)
@@ -573,12 +581,15 @@ static int dhcp_wait(uint8_t want_type, dhcp_parse_result *out, uint32_t rounds)
     uint64_t wait_started = knet_now_ms();
     uint64_t deadline = wait_started + (uint64_t)(rounds ? rounds : 1u) * 1000u;
 
-    while (!knet_fetch_cancelled() && knet_now_ms() < deadline && scanned < 256u)
+    /* Synthetic receive is nonblocking: empty polls must not consume the USB
+     * poll budget before a response has had time to arrive. The wall-clock
+     * deadline and cancellation still bound every wait. */
+    while (!knet_fetch_cancelled() && knet_now_ms() < deadline && (knet_link_is_hyperv() || scanned < 256u))
     {
         uint32_t got = 0u;
-        uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
+        uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
         ++scanned;
-        if (usb_ethernet_recv_frame(g_rx, sizeof(g_rx), &got) == 0)
+        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) == 0)
         {
             dhcp_parse_result r;
             frames++;
@@ -678,7 +689,7 @@ static int arp_send_request(uint32_t target_ip)
     put_be32(g_tx + 38u, target_ip);
     for (uint32_t i = 42u; i < 60u; ++i)
         g_tx[i] = 0u;
-    return usb_ethernet_send_frame(g_tx, 60u);
+    return knet_link_send_frame(g_tx, 60u);
 }
 
 static int parse_arp_reply(const uint8_t *frame, uint32_t len, uint32_t target_ip, uint8_t out_mac[6])
@@ -715,10 +726,10 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
     if (arp_send_request(target_ip) != 0)
         return -1;
     retry_at = knet_now_ms() + 500u;
-    while (!knet_fetch_cancelled() && knet_now_ms() < deadline && scanned < 256u)
+    while (!knet_fetch_cancelled() && knet_now_ms() < deadline && (knet_link_is_hyperv() || scanned < 256u))
     {
         uint32_t got = 0u;
-        uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
+        uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
         if (!from_pending && retries < 3u && knet_now_ms() >= retry_at)
         {
             (void)arp_send_request(target_ip);
@@ -726,7 +737,7 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
             retry_at = knet_now_ms() + 500u;
         }
         ++scanned;
-        if (usb_ethernet_recv_frame(g_rx, sizeof(g_rx), &got) == 0 &&
+        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) == 0 &&
             parse_arp_reply(g_rx, got, target_ip, out_mac) == 0)
             return 0;
         if (!from_pending)
@@ -735,7 +746,7 @@ static int arp_resolve(uint32_t target_ip, uint8_t out_mac[6], uint32_t rounds)
     return -1;
 }
 
-int knet_usb_dhcp(uint32_t rounds)
+static int knet_dhcp_locked(uint32_t rounds)
 {
     dhcp_parse_result offer;
     dhcp_parse_result ack;
@@ -747,17 +758,19 @@ int knet_usb_dhcp(uint32_t rounds)
     if (rounds > 64u)
         rounds = 64u;
 
+    g_auto_phase = 0;
+    g_auto_renew = 0;
     memset(&g_knet, 0, sizeof(g_knet));
     memset(g_dns_cache, 0, sizeof(g_dns_cache));
     g_dns_cache_next = 0u;
     if (knet_refresh_link() != 0)
     {
-        terminal_warn("net: USB Ethernet link not ready");
+        terminal_warn("net: Ethernet link not ready");
         return -1;
     }
 
     g_dhcp_xid = KNET_DHCP_XID ^ (uint32_t)knet_now_ms();
-    if (usb_ethernet_prepare_receive() != 0)
+    if (knet_link_prepare_receive() != 0)
     {
         knet_copy(g_knet.detail, sizeof(g_knet.detail), "Ethernet receive preparation failed");
         terminal_warn(g_knet.detail);
@@ -784,6 +797,7 @@ int knet_usb_dhcp(uint32_t rounds)
     {
         knet_copy(g_knet.detail, sizeof(g_knet.detail), "DHCP offer timeout");
         terminal_warn(g_knet.detail);
+        knet_link_diag_print();
         return -1;
     }
 
@@ -835,20 +849,23 @@ int knet_usb_dhcp(uint32_t rounds)
     {
         terminal_warn("net: router ARP timeout");
     }
-    terminal_success("net: USB Ethernet IPv4 configured");
+    g_auto_renew = dihos_time_monotonic_ms() + (uint64_t)(ack.lease_seconds ? ack.lease_seconds : 3600)*500;
+    terminal_success("net: Ethernet IPv4 configured");
     return 0;
 }
 
 void knet_usb_get_status(knet_usb_status *out_status)
 {
-    if (!out_status)
-        return;
-    *out_status = g_knet;
-    if (!out_status->link_online)
-    {
-        (void)knet_refresh_link();
-        *out_status = g_knet;
+    /* Called by the UI core only. Keep its last coherent snapshot while a
+     * worker owns the mutable protocol state. Never poll a NIC from here. */
+    static knet_usb_status last;
+    uint32_t expected=0;
+    if (!out_status) return;
+    if (__atomic_compare_exchange_n(&g_fetch_busy,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+        last=g_knet;
+        __atomic_store_n(&g_fetch_busy,0,__ATOMIC_RELEASE);
     }
+    *out_status=last;
 }
 
 static int knet_usb_request_url(const char *url, uint32_t max_bytes,
@@ -952,7 +969,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
     if (max_bytes > (g_fetch_output ? g_fetch_capacity : 65536u))
         max_bytes = g_fetch_output ? g_fetch_capacity : 65536u;
     reused_configuration = g_knet.configured;
-    if (!g_knet.configured && knet_usb_dhcp(4u) != 0)
+    if (!g_knet.configured && knet_dhcp_locked(4u) != 0)
         return -1;
 
     /* A completed TLS connection can leave late ACK/FIN traffic queued in the
@@ -1075,7 +1092,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_flush_log();
         uint32_t dns_frame_len = build_udp_ipv4(g_tx, next_mac, g_knet.ip, g_knet.dns,
                                                 dns_port, 53u, dns, (uint16_t)d);
-        if (usb_ethernet_send_frame(g_tx, dns_frame_len) != 0)
+        if (knet_link_send_frame(g_tx, dns_frame_len) != 0)
         {
             terminal_error("net:get DNS transmit failed");
             return -1;
@@ -1086,7 +1103,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         uint64_t dns_deadline = knet_now_ms() + 8000u;
         uint64_t dns_retry_at = knet_now_ms() + 1000u;
         uint32_t dns_retries = 0u;
-        while (!knet_fetch_cancelled() && knet_now_ms() < dns_deadline && !server_ip && dns_scanned < 1024u)
+        while (!knet_fetch_cancelled() && knet_now_ms() < dns_deadline && !server_ip && (knet_link_is_hyperv() || dns_scanned < 1024u))
         {
             uint32_t got = 0u;
             uint32_t ip_off = 14u;
@@ -1096,17 +1113,17 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
             uint32_t off;
             uint16_t qd;
             uint16_t an;
-            uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
+            uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
             if (!from_pending && dns_retries < 4u && knet_now_ms() >= dns_retry_at)
             {
-                (void)usb_ethernet_send_frame(g_tx, dns_frame_len);
+                (void)knet_link_send_frame(g_tx, dns_frame_len);
                 ++dns_retries;
                 dns_retry_at = knet_now_ms() + 1000u;
             }
             ++dns_scanned;
             if (!from_pending)
                 ++dns_polls;
-            if (usb_ethernet_recv_frame(g_rx, sizeof(g_rx), &got) != 0 || got < 54u)
+            if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got) != 0 || got < 54u)
                 continue;
             if (get_be16(g_rx + 12u) != KNET_ETH_TYPE_IPV4 || g_rx[23u] != KNET_IP_PROTO_UDP)
                 continue;
@@ -1227,13 +1244,13 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         while (sum_ >> 16) sum_ = (sum_ & 0xFFFFu) + (sum_ >> 16); \
         put_be16(g_tx + 50u, (uint16_t)~sum_); \
         if (frame_len_ < 60u) { memset(g_tx + frame_len_, 0, 60u - frame_len_); frame_len_ = 60u; } \
-        if (usb_ethernet_send_frame(g_tx, frame_len_) != 0) { terminal_error("net:get TCP transmit failed"); return -1; } \
+        if (knet_link_send_frame(g_tx, frame_len_) != 0) { terminal_error("net:get TCP transmit failed"); return -1; } \
     } while (0)
 
 #define KNET_PARSE_TCP(packet_, ok_) do { \
         uint32_t got_ = 0u; uint32_t ihl_; uint32_t to_; uint32_t thl_; uint32_t total_; \
         (ok_) = 0u; \
-        if (usb_ethernet_recv_frame(g_rx, sizeof(g_rx), &got_) == 0 && got_ >= 54u && \
+        if (knet_link_recv_frame(g_rx, sizeof(g_rx), &got_) == 0 && got_ >= 54u && \
             get_be16(g_rx + 12u) == KNET_ETH_TYPE_IPV4 && g_rx[23u] == KNET_IP_PROTO_TCP && \
             get_be32(g_rx + 26u) == server_ip && get_be32(g_rx + 30u) == g_knet.ip) { \
             ihl_ = (uint32_t)(g_rx[14u] & 0x0Fu) * 4u; to_ = 14u + ihl_; total_ = get_be16(g_rx + 16u); \
@@ -1261,11 +1278,11 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
     uint64_t tcp_deadline = knet_now_ms() + 8000u;
     uint64_t tcp_retry_at = knet_now_ms() + 1000u;
     uint32_t tcp_retries = 0u;
-    while (!knet_fetch_cancelled() && knet_now_ms() < tcp_deadline && tcp_scanned < 1024u)
+    while (!knet_fetch_cancelled() && knet_now_ms() < tcp_deadline && (knet_link_is_hyperv() || tcp_scanned < 1024u))
     {
         tcp_packet packet;
         uint8_t ok;
-        uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
+        uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
         if (!from_pending && tcp_retries < 4u && knet_now_ms() >= tcp_retry_at)
         {
             KNET_SEND_TCP(tx_seq, 0u, tcp_syn, 0, 0u, 1u);
@@ -1360,11 +1377,19 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 
         terminal_warn("net: TLS root trust store not installed; chain and hostname checks only");
         terminal_warn("net: TLS entropy is provisional until a hardware RNG driver is available");
-        terminal_warn("net: TLS certificate time is temporarily pinned to 2026-08-05");
+        uint64_t utc_seconds;
+        if (dihos_time_utc(&utc_seconds)) {
+            terminal_error("net:get TLS clock unavailable; update stage2 and check VM firmware time");
+            KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
+            return -1;
+        }
+        terminal_print_inline("net: TLS UTC Unix seconds ");
+        terminal_print_inline_hex32((uint32_t)(utc_seconds>>32));
+        terminal_print_inline_hex32((uint32_t)utc_seconds);terminal_print("");
 
         br_ssl_client_init_full(&g_tls_client, &g_tls_x509, 0, 0u);
-        br_x509_minimal_set_time(&g_tls_x509, 740198u,
-                                 (uint32_t)(dihos_time_seconds() % 86400u));
+        br_x509_minimal_set_time(&g_tls_x509, 719528u+(uint32_t)(utc_seconds/86400),
+                                 (uint32_t)(utc_seconds%86400));
         g_tls_noanchor.vtable = &g_knet_x509_noanchor_vtable;
         g_tls_noanchor.inner = &g_tls_x509.vtable;
         br_ssl_engine_set_x509(&g_tls_client.eng, &g_tls_noanchor.vtable);
@@ -1383,7 +1408,10 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_print_inline("net: TLS 1.2 handshake ");
         terminal_print(host);
         terminal_flush_log();
-        for (uint32_t guard = 0u; !knet_fetch_cancelled() && guard < 8192u; ++guard)
+        /* Synthetic receive can return thousands of empty polls within one
+         * network round trip. Bound TLS by time, not polling speed. */
+        for (uint32_t guard = 0u; !knet_fetch_cancelled() &&
+             knet_now_ms() < tls_deadline && (knet_link_is_hyperv() || guard < 8192u); ++guard)
         {
             unsigned state = br_ssl_engine_current_state(&g_tls_client.eng);
             size_t tls_len = 0u;
@@ -1397,6 +1425,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                     terminal_print_inline("net:get TLS error ");
                     print_dec_inline((uint32_t)err);
                     terminal_print("");
+                    if (err==BR_ERR_X509_EXPIRED) terminal_error("net:get certificate expired or not yet valid; compare TLS UTC time with host");
                     KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
                     return -1;
                 }
@@ -1569,11 +1598,11 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
     uint32_t http_polls = 0u;
     uint32_t http_scanned = 0u;
     uint64_t http_deadline = knet_now_ms() + 30000u;
-    while (!knet_fetch_cancelled() && knet_now_ms() < http_deadline && http_scanned < 4096u)
+    while (!knet_fetch_cancelled() && knet_now_ms() < http_deadline && (knet_link_is_hyperv() || http_scanned < 4096u))
     {
         tcp_packet packet;
         uint8_t ok;
-        uint8_t from_pending = usb_ethernet_pending_frames() ? 1u : 0u;
+        uint8_t from_pending = knet_link_pending_frames() ? 1u : 0u;
         ++http_scanned;
         if (!from_pending)
             ++http_polls;
@@ -1631,7 +1660,11 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 
 int knet_usb_get_url(const char *url, uint32_t max_bytes)
 {
-    return knet_usb_request_url(url, max_bytes, "GET", 0, 0u, 0);
+    uint32_t expected=0;
+    if (!__atomic_compare_exchange_n(&g_fetch_busy,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return -2;
+    int rc=knet_usb_request_url(url, max_bytes, "GET", 0, 0u, 0);
+    __atomic_store_n(&g_fetch_busy,0,__ATOMIC_RELEASE);
+    return rc;
 }
 
 void knet_usb_set_worker_quiet(uint32_t quiet)
@@ -1666,7 +1699,7 @@ int knet_usb_fetch_request(const char *url, const char *method,
     g_fetch_truncated = 0u;
     g_fetch_cancelled = cancelled;
     g_fetch_deadline = knet_now_ms() + (uint64_t)(timeout_ms ? timeout_ms : 45000u);
-    usbh_background_network_set(1u);
+    if (!knet_link_is_hyperv()) usbh_background_network_set(1u);
     terminal_print("net: request begin");
     terminal_flush_log();
     rc = knet_usb_request_url(url, capacity, method, body, body_size, content_type);
@@ -1674,13 +1707,13 @@ int knet_usb_fetch_request(const char *url, const char *method,
     timed_out = !was_cancelled && g_fetch_deadline && knet_now_ms() >= g_fetch_deadline;
     if (rc != 0 || was_cancelled || timed_out)
     {
-        usb_ethernet_status eth_status;
-        usb_ethernet_get_status(&eth_status);
+        knet_link_status eth_status;
+        knet_link_get_status(&eth_status);
         terminal_print_inline("net: Ethernet failure diagnostics: ");
         terminal_print(eth_status.detail);
         memset(g_dns_cache, 0, sizeof(g_dns_cache));
         g_dns_cache_next = 0u;
-        usb_ethernet_discard_pending_frames();
+        knet_link_discard_pending_frames();
     }
     *out_size = g_fetch_size;
     if (out_truncated)
@@ -1690,7 +1723,7 @@ int knet_usb_fetch_request(const char *url, const char *method,
     g_fetch_size = 0u;
     g_fetch_cancelled = 0;
     g_fetch_deadline = 0u;
-    usbh_background_network_set(0u);
+    if (!knet_link_is_hyperv()) usbh_background_network_set(0u);
     __atomic_store_n(&g_fetch_busy, 0u, __ATOMIC_RELEASE);
     terminal_flush_log();
     return was_cancelled ? -3 : (timed_out ? -4 : rc);
@@ -1702,4 +1735,104 @@ int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
 {
     return knet_usb_fetch_request(url, "GET", 0, 0u, 0, response, capacity,
                                   out_size, out_truncated, cancelled, timeout_ms);
+}
+
+int knet_usb_dhcp(uint32_t rounds)
+{
+    uint32_t expected=0;
+    if (!__atomic_compare_exchange_n(&g_fetch_busy,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return -2;
+    int rc=knet_dhcp_locked(rounds);
+    __atomic_store_n(&g_fetch_busy,0,__ATOMIC_RELEASE);
+    return rc;
+}
+
+
+static void knet_idle_arp(void)
+{
+    uint32_t got=0;
+    for (uint32_t i=0;i<8;++i) {
+        if (knet_link_recv_frame(g_rx,sizeof(g_rx),&got)) break;
+        if (got < 42 || get_be16(g_rx+12) != 0x0806 ||
+            get_be16(g_rx+14) != 1 || get_be16(g_rx+16) != 0x0800 ||
+            g_rx[18] != 6 || g_rx[19] != 4 || get_be16(g_rx+20) != 1 ||
+            get_be32(g_rx+38) != g_knet.ip) continue;
+        memset(g_tx,0,60);
+        memcpy(g_tx,g_rx+22,6); memcpy(g_tx+6,g_knet.mac,6); put_be16(g_tx+12,0x0806);
+        put_be16(g_tx+14,1); put_be16(g_tx+16,0x0800); g_tx[18]=6; g_tx[19]=4;
+        put_be16(g_tx+20,2); memcpy(g_tx+22,g_knet.mac,6); put_be32(g_tx+28,g_knet.ip);
+        memcpy(g_tx+32,g_rx+22,6); memcpy(g_tx+38,g_rx+28,4);
+        (void)knet_link_send_frame(g_tx,60);
+    }
+}
+
+/* One bounded state-machine step. The ordinary fetch lock also protects the
+ * NIC rings and shared DHCP/DNS/TCP buffers against app/terminal requests. */
+static void knet_auto_step(void *ctx)
+{
+    (void)ctx;
+    uint32_t expected=0, got=0;
+    uint64_t now=dihos_time_monotonic_ms();
+    if (!__atomic_compare_exchange_n(&g_fetch_busy,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return;
+    if (!knet_link_online()) {
+        g_knet.link_online=g_knet.configured=g_knet.router_mac_valid=0;
+        g_auto_phase=0; g_auto_deadline=now+1000;
+        knet_copy(g_knet.detail,sizeof(g_knet.detail),"Ethernet disconnected; waiting for link");
+        goto done;
+    }
+    g_knet.link_online=1;
+    (void)knet_link_get_mac(g_knet.mac);
+    if (g_knet.configured && !g_auto_phase && (!g_auto_renew || now < g_auto_renew)) { knet_idle_arp(); goto done; }
+    if (!g_auto_phase && now >= g_auto_deadline) {
+        g_dhcp_xid=KNET_DHCP_XID^(uint32_t)now;
+        g_auto_phase=1; g_auto_attempts=0;
+        knet_copy(g_knet.detail,sizeof(g_knet.detail),"DHCP discovering");
+        (void)dhcp_send(1,0,0); g_auto_deadline=now+1000;
+    }
+    for (uint32_t i=0;i<32 && g_auto_phase;++i) {
+        dhcp_parse_result reply;
+        if (knet_link_recv_frame(g_rx,sizeof(g_rx),&got)) break;
+        if (parse_dhcp_packet(g_rx,got,&reply)) continue;
+        if (reply.msg_type == 6) { g_knet.configured=0; g_auto_phase=0; g_auto_deadline=now+1000; break; }
+        if (g_auto_phase == 1 && reply.msg_type == 2) {
+            g_auto_offer=reply; g_auto_phase=2; g_auto_attempts=0;
+            (void)dhcp_send(3,reply.yiaddr,reply.server_id); g_auto_deadline=now+1000;
+        } else if (g_auto_phase == 2 && reply.msg_type == 5) {
+            if (reply.server_id && reply.server_id != g_auto_offer.server_id) continue;
+            g_knet.ip=reply.yiaddr ? reply.yiaddr : g_auto_offer.yiaddr;
+            g_knet.mask=reply.mask ? reply.mask : g_auto_offer.mask;
+            g_knet.router=reply.router ? reply.router : g_auto_offer.router;
+            g_knet.dns=reply.dns ? reply.dns : g_auto_offer.dns;
+            g_knet.configured=1; g_knet.router_mac_valid=0;
+            memset(g_dns_cache,0,sizeof(g_dns_cache));
+            uint32_t lease=reply.lease_seconds ? reply.lease_seconds : 3600;
+            g_auto_renew=now+(uint64_t)lease*500; /* reacquire at T1, outside active requests */
+            g_auto_phase=0;
+            knet_copy(g_knet.detail,sizeof(g_knet.detail),"DHCP configured (Hyper-V)");
+        }
+    }
+    if (g_auto_phase && now >= g_auto_deadline) {
+        if (++g_auto_attempts >= 4) {
+            g_auto_phase=0; g_knet.configured=0; g_auto_deadline=now+30000;
+            knet_copy(g_knet.detail,sizeof(g_knet.detail),"DHCP timed out; retrying in 30 seconds");
+        } else {
+            (void)dhcp_send(g_auto_phase == 1 ? 1 : 3,g_auto_offer.yiaddr,g_auto_offer.server_id);
+            g_auto_deadline=now+1000;
+        }
+    }
+done:
+    __atomic_store_n(&g_fetch_busy,0,__ATOMIC_RELEASE);
+}
+
+void knet_usb_background_poll(void)
+{
+    if (!knet_link_is_hyperv()) return;
+    uint64_t now=dihos_time_monotonic_ms();
+    if (now < g_auto_dispatch) return;
+    if (g_auto_job) {
+        uint32_t status=kwork_status(g_auto_job);
+        if (status == KWORK_STATUS_QUEUED || status == KWORK_STATUS_RUNNING) return;
+    }
+    g_auto_dispatch=now+50;
+    /* Never run blocking driver work on the UI core if no worker exists. */
+    (void)kwork_submit(knet_auto_step,0,KWORK_SUBMIT_REQUIRE_REMOTE|KWORK_SUBMIT_QUIET,&g_auto_job);
 }

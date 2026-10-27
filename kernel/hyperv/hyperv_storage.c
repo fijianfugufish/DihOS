@@ -11,6 +11,7 @@ typedef struct
     uint32_t block_size;
     uint8_t target;
     uint8_t lun;
+    uint8_t failed;
     uint8_t *bounce;
 } hyperv_storage_ctx;
 
@@ -22,7 +23,7 @@ static int hyperv_storage_read(void *ctx, uint64_t lba,
     hyperv_storage_ctx *storage = (hyperv_storage_ctx *)ctx;
     uint8_t *destination = (uint8_t *)buffer;
 
-    if (!storage || !storage->bounce || !destination || !count ||
+    if (!storage || storage->failed || !storage->bounce || !destination || !count ||
         storage->block_size != 512u ||
         lba >= storage->block_count ||
         count > storage->block_count - lba)
@@ -33,26 +34,10 @@ static int hyperv_storage_read(void *ctx, uint64_t lba,
     {
         uint32_t chunk = count > 8u ? 8u : count;
         uint32_t bytes = chunk * storage->block_size;
-        int read_ok = 0;
-
-        if (lba > 0xFFFFFFFFull)
-            return -1;
-        for (uint32_t attempt = 0u; attempt < 4u; ++attempt)
-        {
-            if (vmbus_storvsc_read10(storage->target, storage->lun,
-                                     (uint32_t)lba, (uint16_t)chunk,
-                                     storage->bounce, bytes) == 0)
-            {
-                read_ok = 1;
-                break;
-            }
-        }
-        if (!read_ok)
-        {
-            terminal_error("storvsc: read failed lba=");
-            terminal_print_inline_hex64(lba);
-            terminal_print(" blocks=");
-            terminal_print_inline_hex32(chunk);
+        if (lba>0xffffffffull || vmbus_storvsc_read10(storage->target,storage->lun,
+                (uint32_t)lba,(uint16_t)chunk,storage->bounce,bytes)) {
+            storage->failed=1;
+            terminal_error("storvsc: storage read failed; further I/O disabled until reboot");
             return -1;
         }
         for (uint32_t i = 0; i < bytes; ++i)
@@ -71,7 +56,7 @@ static int hyperv_storage_write(void *ctx, uint64_t lba,
     hyperv_storage_ctx *storage = (hyperv_storage_ctx *)ctx;
     const uint8_t *source = (const uint8_t *)buffer;
 
-    if (!storage || !storage->bounce || !source || !count ||
+    if (!storage || storage->failed || !storage->bounce || !source || !count ||
         storage->block_size != 512u ||
         lba >= storage->block_count ||
         count > storage->block_count - lba)
@@ -82,7 +67,6 @@ static int hyperv_storage_write(void *ctx, uint64_t lba,
     {
         uint32_t chunk = count > 8u ? 8u : count;
         uint32_t bytes = chunk * storage->block_size;
-        int write_ok = 0;
 
         if (lba > 0xFFFFFFFFull)
             return -1;
@@ -90,22 +74,10 @@ static int hyperv_storage_write(void *ctx, uint64_t lba,
         for (uint32_t i = 0; i < bytes; ++i)
             storage->bounce[i] = source[i];
 
-        for (uint32_t attempt = 0u; attempt < 4u; ++attempt)
-        {
-            if (vmbus_storvsc_write10(storage->target, storage->lun,
-                                      (uint32_t)lba, (uint16_t)chunk,
-                                      storage->bounce, bytes) == 0)
-            {
-                write_ok = 1;
-                break;
-            }
-        }
-        if (!write_ok)
-        {
-            terminal_error("storvsc: write failed lba=");
-            terminal_print_inline_hex64(lba);
-            terminal_print(" blocks=");
-            terminal_print_inline_hex32(chunk);
+        if (vmbus_storvsc_write10(storage->target,storage->lun,(uint32_t)lba,
+                (uint16_t)chunk,storage->bounce,bytes)) {
+            storage->failed=1;
+            terminal_error("storvsc: storage write failed; further I/O disabled until reboot");
             return -1;
         }
 

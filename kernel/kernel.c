@@ -24,6 +24,10 @@
 #include "system/kcrash_map.h"
 #include "system/kcrash_map.h"
 #include "hyperv/hyperv.h"
+#include "hyperv/hyperv_diag.h"
+#include "hyperv/hyperv_video.h"
+#include "net/knet_link.h"
+#include "net/knet_usb.h"
 #include "hyperv/hyperv_storage.h"
 #include "apps/desktop_shell_api.h"
 #include "apps/screenshot_service.h"
@@ -166,19 +170,19 @@ void kmain(boot_info *bi)
     terminal_print("exception level: not applicable on x64");
 #endif
     if (image_decoder_reserved)
-        terminal_success("kimg: decoder arena reserved");
+        terminal_success("kimg: page-backed decoder ready");
     else
-        terminal_warn("kimg: decoder arena reserve failed");
+        terminal_warn("kimg: decoder initialization failed");
     if (!have_fallback_font)
         terminal_warn("embedded psf fallback unavailable; using block debug font");
 
     cpu_info_init(bi ? bi->acpi_rsdp : 0u);
 #if defined(DIHOS_ARCH_X64) || defined(KERNEL_ARCH_X64) || defined(__x86_64__) || defined(_M_X64)
-    terminal_print("kernel build: HYPERV-33 arch=x64");
+    terminal_print("kernel build: HYPERV-34 arch=x64");
 #elif defined(DIHOS_ARCH_AARCH64) || defined(KERNEL_ARCH_AA64) || defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
-    terminal_print("kernel build: HYPERV-33 arch=aa64");
+    terminal_print("kernel build: HYPERV-34 arch=aa64");
 #else
-    terminal_print("kernel build: HYPERV-33 arch=unknown");
+    terminal_print("kernel build: HYPERV-34 arch=unknown");
 #endif
 
     hyperv_info hv = (hyperv_info){0};
@@ -190,6 +194,8 @@ void kmain(boot_info *bi)
             terminal_error("hyperv: core init failed");
     }
 
+    dihos_time_init_utc(bi->version>=2 ? bi->boot_utc_seconds:0,
+                        bi->version>=2 ? bi->boot_time_flags:0);
     uint64_t xhci_mmio_order[BOOTINFO_XHCI_MMIO_MAX] = {0};
     uint32_t xhci_mmio_count =
         xhci_build_hint_order(bi, xhci_mmio_order, BOOTINFO_XHCI_MMIO_MAX);
@@ -305,6 +311,12 @@ void kmain(boot_info *bi)
             asm_wait();
     }
 
+    if (hyperv_present) {
+        kearly_console_end();
+        (void)hyperv_video_init(bi);
+        (void)kgfx_init(bi);
+        kgfx_set_coherent_cpu_present(1);
+    }
     // Prepare backbuffer/scene after breadcrumbs (they draw to front buffer)
     if (kgfx_scene_init() != 0)
     {
@@ -349,7 +361,8 @@ void kmain(boot_info *bi)
     /* Bring the device up and retain whether it is usable, but do not enable
      * GPU presentation yet.  KGFX must keep presenting through the CPU until
      * input and the desktop shell have produced a complete visible frame. */
-    int gpu_core_ready = (gpu_core_init(bi) == 0);
+    int gpu_core_ready = !hyperv_present && (gpu_core_init(bi) == 0);
+    if (hyperv_present) terminal_print("hyperv: software compositor selected");
     if (kcrash_map_load("0:/OS/aa64/KERNEL.CRASHMAP") == 0)
         terminal_success("crash map: source locations ready");
     else
@@ -390,7 +403,7 @@ void kmain(boot_info *bi)
         terminal_print("(empty)");
     terminal_print("[stage2_report] end");
 
-    kwifi_init(bi, mounted);
+    if (!hyperv_present) kwifi_init(bi, mounted);
 
     /*
     acpi_pci_print_ecams_from_rsdp(bi->acpi_rsdp);
@@ -445,7 +458,11 @@ void kmain(boot_info *bi)
             }
         }
 
-        if (usb_eth_hint_count)
+        if (hyperv_present)
+        {
+            terminal_print("usbnet: native USB Ethernet probe skipped; using NetVSC");
+        }
+        else if (usb_eth_hint_count)
         {
             terminal_print("usbnet: probing Ethernet adapters on xHCI A0 only");
             if (usb_ethernet_probe_multi(usb_eth_hints, usb_eth_hint_count, bi->acpi_rsdp) != 0)
@@ -461,22 +478,30 @@ void kmain(boot_info *bi)
     terminal_print("^^ i sure hope this log is good ^^");
     terminal_flush_log();
 
+    terminal_boot_progress_enable((uint8_t)hyperv_present);
     terminal_print("boot-ui: clearing diagnostic scene");
-    terminal_flush_log();
-    terminal_clear();
+    if (!hyperv_present) terminal_flush_log();
+    if (hyperv_present) terminal_clear_no_flush();
+    else terminal_clear();
     kgfx_render_all(black);
     terminal_print("boot-ui: diagnostic scene retired");
-    terminal_flush_log();
+    if (!hyperv_present) terminal_flush_log();
 
     if (mounted && font)
     {
         terminal_print("boot-ui: initializing desktop applications");
-        terminal_flush_log();
+        if (!hyperv_present) terminal_flush_log();
+        terminal_boot_progress("boot-ui: Explorer initialization starting");
         file_explorer_init(font);
+        terminal_boot_progress("boot-ui: Explorer initialization complete");
         terminal_success("file explorer online");
+        terminal_boot_progress("boot-ui: text editor initialization starting");
         text_editor_init(font);
+        terminal_boot_progress("boot-ui: text editor initialization complete");
         terminal_success("text editor online");
+        terminal_boot_progress("boot-ui: task manager initialization starting");
         task_manager_init(font);
+        terminal_boot_progress("boot-ui: task manager initialization complete");
         terminal_success("task manager online");
     }
     else
@@ -484,10 +509,17 @@ void kmain(boot_info *bi)
         terminal_warn("file explorer/editor skipped");
     }
 
-    desktop_shell_init(font);
-    terminal_success("desktop shell online");
-    terminal_flush_log();
+    terminal_boot_progress("boot-ui: network initialization starting");
+    knet_link_init(hyperv_present);
+    terminal_boot_progress("boot-ui: network initialization complete");
 
+    terminal_boot_progress("boot-ui: desktop and wallpaper initialization starting");
+    desktop_shell_init(font);
+    terminal_boot_progress("boot-ui: desktop and wallpaper initialization complete");
+    terminal_success("desktop shell online");
+    if (!hyperv_present) terminal_flush_log();
+
+    terminal_boot_progress("boot-ui: cursor initialization starting");
     if (kmouse_init() != 0)
     {
         terminal_warn("cursor not loaded");
@@ -496,10 +528,10 @@ void kmain(boot_info *bi)
     screenshot_service_init(font);
 
     terminal_print("boot-ui: rendering first complete desktop frame");
-    terminal_flush_log();
+    if (!hyperv_present) terminal_flush_log();
     kgfx_render_all(black);
     terminal_success("boot-ui: first complete desktop frame visible");
-    terminal_flush_log();
+    if (!hyperv_present) terminal_flush_log();
 
     /* The first complete desktop frame is now visible through the ordinary
      * CPU path.  Activating the experimental backend here means a wedged or
@@ -507,8 +539,19 @@ void kmain(boot_info *bi)
     if (gpu_core_ready)
         (void)gpu_compositor_init();
 
-    terminal_success("boot-ui: entering main loop");
-    terminal_flush_log();
+    if (hyperv_present)
+    {
+        terminal_boot_progress("boot-ui: persisting boot log");
+        terminal_flush_log();
+        terminal_boot_progress("boot-ui: boot log persisted; entering main loop");
+        terminal_boot_progress_enable(0);
+        terminal_success("boot-ui: entering main loop");
+    }
+    else
+    {
+        terminal_success("boot-ui: entering main loop");
+        terminal_flush_log();
+    }
 
     uint32_t frame = 0;
 
@@ -531,8 +574,11 @@ void kmain(boot_info *bi)
         task_accounting_frame_begin();
 
         task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
+        uint64_t ui_stage_started=hyperv_present ? dihos_time_monotonic_ms() : 0;
+        knet_usb_background_poll();
         kinput_poll();
         kmouse_update();
+        if (hyperv_present) { hyperv_timing_record(0,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
         if (!screenshot_service_update())
         {
             task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
@@ -546,9 +592,12 @@ void kmain(boot_info *bi)
             kui_update_all();
             ktextbox_update_all();
             task_accounting_add(TASK_ACCOUNT_TERMINAL, 1u);
+            if (hyperv_present) { hyperv_timing_record(1,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
             terminal_update_input();
+            if (hyperv_present) { hyperv_timing_record(2,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
         }
 
+        kmouse_commit_cursor();
         task_accounting_add(TASK_ACCOUNT_RENDER, 1u);
         /* Completion may have happened while input and UI code were running.
          * Observe it again here so the just-built scene can be submitted in
@@ -567,7 +616,10 @@ void kmain(boot_info *bi)
         dihos_shell_mesart_visual_submit_after_cpu();
         gpu_compositor_submit_kgfx_frame();
         task_accounting_add(TASK_ACCOUNT_SACX, 1u);
+        if (hyperv_present) { hyperv_timing_record(3,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
         sacx_runtime_update();
+        hyperv_video_present();
+        if (hyperv_present) hyperv_timing_record(4,ui_stage_started);
         frame++;
     }
 }

@@ -22,6 +22,8 @@
 #include "kwrappers/kfile.h"
 #include "kwrappers/string.h"
 #include "net/knet_usb.h"
+#include "net/knet_link.h"
+#include "hyperv/hyperv_diag.h"
 #include "system/dihos_time.h"
 #include "terminal/terminal_api.h"
 #include "usb/usb_ethernet.h"
@@ -194,6 +196,11 @@ static int dihos_cmd_wifi_supplicant(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_get(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_rx(dihos_shell_stage *stage);
 static int dihos_cmd_wifi_group(dihos_shell_stage *stage);
+static int dihos_cmd_hv_diag(dihos_shell_stage *stage) { (void)stage; hyperv_diag_print(); return 0; }
+static int dihos_cmd_hv_trace(dihos_shell_stage *stage) {
+    int enabled=stage->positional_count && strcmp(stage->positional[0],"on") == 0;
+    hyperv_trace_enable(enabled); terminal_print(enabled ? "Hyper-V input tracing on" : "Hyper-V input tracing off"); return 0;
+}
 static int dihos_cmd_net_status(dihos_shell_stage *stage);
 static int dihos_cmd_net_dhcp(dihos_shell_stage *stage);
 static int dihos_cmd_net_get(dihos_shell_stage *stage);
@@ -258,9 +265,11 @@ static const dihos_shell_command G_commands[] = {
     {"wifi:supplicant", "wifi:supplicant ready=yes|no", "Set enterprise supplicant readiness hint (does not by itself prove firmware key install).", 0u, dihos_cmd_wifi_supplicant},
     {"wifi:get", "wifi:get [url] [max=8192]", "Fetch file:// content or use USB Ethernet for HTTP/HTTPS.", 0u, dihos_cmd_wifi_get},
     {"wifi:rx", "wifi:rx [drain=yes|no] [max=4]", "Show WiFi RX queue state and optionally drain captured frames.", 0u, dihos_cmd_wifi_rx},
-    {"net:status", "net:status", "Show USB Ethernet IPv4 status.", 0u, dihos_cmd_net_status},
-    {"net:dhcp", "net:dhcp [rounds=4]", "Run DHCP over USB Ethernet.", 0u, dihos_cmd_net_dhcp},
-    {"net:get", "net:get [url] [max=8192]", "Fetch an HTTP or experimental HTTPS URL through USB Ethernet.", 0u, dihos_cmd_net_get},
+    {"hv:diag", "hv:diag", "Show VM build, display, storage, input, network and recent input trace.", 0u, dihos_cmd_hv_diag},
+    {"hv:trace", "hv:trace on|off", "Record bounded input trace in RAM.", 0u, dihos_cmd_hv_trace},
+    {"net:status", "net:status", "Show Ethernet IPv4 status.", 0u, dihos_cmd_net_status},
+    {"net:dhcp", "net:dhcp [rounds=4]", "Run DHCP over the selected Ethernet interface.", 0u, dihos_cmd_net_dhcp},
+    {"net:get", "net:get [url] [max=8192]", "Fetch an HTTP or experimental HTTPS URL through the selected Ethernet interface.", 0u, dihos_cmd_net_get},
     {"fs:pwd", "fs:pwd", "Print the current friendly working directory.", 0u, dihos_cmd_fs_pwd},
     {"fs:cd", "fs:cd [path]", "Change the current working directory.", 0u, dihos_cmd_fs_cd},
     {"fs:list", "fs:list [path] [view=long]", "List directory entries.", 0u, dihos_cmd_fs_list},
@@ -336,8 +345,8 @@ static const dihos_shell_command G_commands[] = {
     {"demo:installfx", "demo:installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"installfx", "installfx [fullscreen=yes]", "Show the terminal visual installer demo.", 0u, dihos_cmd_demo_installfx},
     {"wifi", "wifi scan|current|connect|supplicant|get|rx ...", "WiFi command group.", 0u, dihos_cmd_wifi_group},
-    {"net", "net status|dhcp|get ...", "USB Ethernet network command group.", 0u, dihos_cmd_net_group},
-    {"eth", "eth status|dhcp|get ...", "USB Ethernet network command group.", 0u, dihos_cmd_net_group},
+    {"net", "net status|dhcp|get ...", "Ethernet network command group.", 0u, dihos_cmd_net_group},
+    {"eth", "eth status|dhcp|get ...", "Ethernet network command group.", 0u, dihos_cmd_net_group},
     {"hw", "hw acpi|touchpad|gpio ...", "Hardware command group.", 0u, dihos_cmd_hw_group},
 };
 
@@ -2339,10 +2348,10 @@ static void dihos_print_ip32(uint32_t ip)
 static int dihos_cmd_net_status(dihos_shell_stage *stage)
 {
     knet_usb_status st;
-    usb_ethernet_status usb_st;
+    knet_link_status usb_st;
     (void)stage;
     knet_usb_get_status(&st);
-    usb_ethernet_get_status(&usb_st);
+    knet_link_get_status(&usb_st);
 
     terminal_print("net status:");
     if (usb_st.detail[0])

@@ -17,3 +17,7 @@ OS/Firmware/adreno-x1-85/oem/*.mbn
 efi_main.S
 main.c
 cmds.md
+
+!tools/hyperv.ps1
+!tools/test_hyperv.ps1
+!tools/test_hyperv_package.ps1

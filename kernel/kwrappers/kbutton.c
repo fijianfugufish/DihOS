@@ -1,4 +1,5 @@
 #include "kwrappers/kbutton.h"
+#include "hyperv/hyperv_diag.h"
 #include "kwrappers/kmouse.h"
 #include "kwrappers/kwindow.h"
 
@@ -320,6 +321,9 @@ void kbutton_update_all(void)
             hovered_z = G_resolved[i].z;
         }
     }
+
+    if (left_pressed || left_released)
+        hyperv_trace("button",mouse.x,mouse.y,hovered_idx,left_now);
 
     if (hovered_idx >= 0)
     {

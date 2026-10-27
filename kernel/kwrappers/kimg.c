@@ -6,17 +6,10 @@
 #include "terminal/terminal_api.h"
 
 #define KIMG_FILE_READ_CHUNK_BYTES (64u * 1024u)
-#define KIMG_STBI_TEMP_BYTES (16u * 1024u * 1024u)
-
-typedef struct
-{
-    uint8_t *base;
-    uint32_t cap;
-    uint32_t used;
-} kimg_stbi_arena_t;
-
-static kimg_stbi_arena_t g_kimg_stbi_arena;
-
+/* No contiguous 16 MiB reservation: allocate decoder buffers independently. */
+#define KIMG_STBI_ALLOCATION_MAX 128u
+typedef struct { void *ptr; uint32_t pages, bytes; } kimg_stbi_allocation;
+static kimg_stbi_allocation g_kimg_stbi_allocations[KIMG_STBI_ALLOCATION_MAX];
 static int kimg_stbi_arena_prepare(void);
 static void kimg_stbi_arena_reset(void);
 static void *kimg_stbi_malloc(size_t size);
@@ -47,93 +40,60 @@ extern volatile int g_disk_last_rc;
 
 uint64_t kfile_size(KFile *f);
 
-typedef struct
-{
-    uint32_t payload_size;
-} kimg_stbi_alloc_hdr_t;
-
-static uint32_t kimg_align_u32(uint32_t value, uint32_t align)
-{
-    return (value + align - 1u) & ~(align - 1u);
-}
-
-static int kimg_stbi_arena_prepare(void)
-{
-    if (g_kimg_stbi_arena.base)
-        return 0;
-
-    uint32_t pages = (KIMG_STBI_TEMP_BYTES + 4095u) >> 12;
-    uint8_t *base = (uint8_t *)pmem_alloc_pages((uint64_t)pages);
-    if (!base)
-        return -1;
-
-    g_kimg_stbi_arena.base = base;
-    g_kimg_stbi_arena.cap = pages << 12;
-    g_kimg_stbi_arena.used = 0u;
-    return 0;
-}
-
-int kimg_prepare_decoder(void)
-{
-    return kimg_stbi_arena_prepare();
-}
-
-static void kimg_stbi_arena_reset(void)
-{
-    g_kimg_stbi_arena.used = 0u;
-}
-
-static void *kimg_stbi_malloc(size_t size)
-{
-    uint32_t need = 0u;
-    uint32_t start = 0u;
-    kimg_stbi_alloc_hdr_t *hdr = 0;
-
-    if (size == 0u || size > 0x7FFFFFFFu)
-        return 0;
-    if (kimg_stbi_arena_prepare() != 0)
-        return 0;
-
-    need = kimg_align_u32((uint32_t)size + (uint32_t)sizeof(kimg_stbi_alloc_hdr_t), 8u);
-    start = kimg_align_u32(g_kimg_stbi_arena.used, 8u);
-    if (start > g_kimg_stbi_arena.cap || need > g_kimg_stbi_arena.cap - start)
-        return 0;
-
-    hdr = (kimg_stbi_alloc_hdr_t *)(g_kimg_stbi_arena.base + start);
-    hdr->payload_size = (uint32_t)size;
-    g_kimg_stbi_arena.used = start + need;
-    return (void *)(hdr + 1);
-}
-
-static void *kimg_stbi_realloc(void *ptr, size_t new_size)
-{
-    void *np = 0;
-    uint32_t old_size = 0u;
-    uint8_t *dst = 0;
-    const uint8_t *src = 0;
-    uint32_t copy_n = 0u;
-
-    if (!ptr)
-        return kimg_stbi_malloc(new_size);
-    if (new_size == 0u)
-        return 0;
-
-    np = kimg_stbi_malloc(new_size);
-    if (!np)
-        return 0;
-
-    old_size = ((kimg_stbi_alloc_hdr_t *)ptr - 1)->payload_size;
-    copy_n = old_size < (uint32_t)new_size ? old_size : (uint32_t)new_size;
-    dst = (uint8_t *)np;
-    src = (const uint8_t *)ptr;
-    memcpy(dst, src, copy_n);
-
-    return np;
-}
-
+static int kimg_stbi_arena_prepare(void) { return 0; }
+int kimg_prepare_decoder(void) { return kimg_stbi_arena_prepare(); }
 static void kimg_stbi_free(void *ptr)
 {
-    (void)ptr;
+    if (!ptr) return;
+    for (uint32_t i=0;i<KIMG_STBI_ALLOCATION_MAX;++i)
+        if (g_kimg_stbi_allocations[i].ptr==ptr) {
+            pmem_free_pages(ptr,g_kimg_stbi_allocations[i].pages);
+            g_kimg_stbi_allocations[i]=(kimg_stbi_allocation){0};
+            return;
+        }
+}
+static void kimg_stbi_arena_reset(void)
+{
+    for (uint32_t i=0;i<KIMG_STBI_ALLOCATION_MAX;++i)
+        kimg_stbi_free(g_kimg_stbi_allocations[i].ptr);
+}
+static void *kimg_stbi_malloc(size_t size)
+{
+    if (!size || size>0x7fffffff) return 0;
+    for (uint32_t i=0;i<KIMG_STBI_ALLOCATION_MAX;++i) {
+        if (g_kimg_stbi_allocations[i].ptr) continue;
+        uint32_t pages=(uint32_t)(((uint64_t)size+4095)/4096);
+        void *p=pmem_alloc_pages(pages);
+        if (!p) {
+            pmem_stats memory; pmem_get_stats(&memory);
+            terminal_warn("kimg: decoder scratch allocation failed");
+            terminal_print_inline("kimg: requested bytes/free ordinary bytes/largest run bytes=");
+            terminal_print_inline_hex64(size);
+            terminal_print_inline_hex64((memory.free_lowdma_pages+memory.free_high_pages)*4096);
+            terminal_print_inline_hex64(pmem_largest_free_pages()*4096);
+            terminal_print("");
+            return 0;
+        }
+        g_kimg_stbi_allocations[i]=(kimg_stbi_allocation){p,pages,(uint32_t)size};
+        return p;
+    }
+    return 0;
+}
+static void *kimg_stbi_realloc(void *ptr,size_t size)
+{
+    if (!ptr) return kimg_stbi_malloc(size);
+    if (!size) { kimg_stbi_free(ptr); return 0; }
+    for (uint32_t i=0;i<KIMG_STBI_ALLOCATION_MAX;++i) {
+        kimg_stbi_allocation old=g_kimg_stbi_allocations[i];
+        if (old.ptr!=ptr) continue;
+        if (size<=(uint64_t)old.pages*4096) { g_kimg_stbi_allocations[i].bytes=(uint32_t)size; return ptr; }
+        void *p=kimg_stbi_malloc(size);
+        if (!p) return 0;
+        memcpy(p,ptr,old.bytes<size ? old.bytes:size);
+        kimg_stbi_free(ptr);
+        return p;
+    }
+    return 0;
 }
 
 static uint16_t rd16le(const uint8_t *p)
@@ -617,6 +577,7 @@ static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags
     }
     kimg_stbi_arena_reset();
 
+    terminal_boot_progress("kimg: reading compressed image");
     if (kimg_read_file_to_pmem(path, &file_buf, &file_size) != 0)
     {
         terminal_print_inline("kimg: stbi file read failed rc=");
@@ -630,7 +591,9 @@ static int kimg_load_stbi_rgba_flags(kimg *out, const char *path, uint32_t flags
     terminal_print_inline_hex32(file_size);
     terminal_print("");
 
+    terminal_boot_progress("kimg: image read complete; decoding");
     decoded = stbi_load_from_memory(file_buf, (int)file_size, &w, &h, &comp, 4);
+    terminal_boot_progress("kimg: decoder returned");
     pmem_free_pages(file_buf, ((uint64_t)file_size + 4095ull) >> 12);
 
     if (!decoded || w <= 0 || h <= 0)

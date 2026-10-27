@@ -23,7 +23,7 @@ typedef struct
 
 typedef struct
 {
-    uint32_t version; // set to 1
+    uint32_t version; // 2 adds the boot UTC clock at the end
     uint32_t _pad;
     boot_fb fb;
     // (optional) UEFI memory map (raw copy)
@@ -83,4 +83,8 @@ typedef struct
 
     uint32_t stage2_report_len; /* bytes used in stage2_report[] (ASCII, NUL-terminated when possible) */
     char stage2_report[BOOTINFO_STAGE2_REPORT_MAX];
+    /* Version 2 extension. Read only when version >= 2. */
+    uint64_t boot_utc_seconds; /* Unix epoch, sampled before ExitBootServices */
+    uint32_t boot_time_flags; /* bit 0 valid; bit 1 RTC timezone assumed UTC */
+    uint32_t _pad_time;
 } boot_info;

@@ -14,6 +14,28 @@
 #endif
 
 static kfb FB;
+static gpu_render_rect g_cpu_damage[24];
+static uint32_t g_cpu_damage_count;
+static void cpu_damage_add(gpu_render_rect r)
+{
+    if (!r.width || !r.height) return;
+    for (uint32_t i=0;i<g_cpu_damage_count;++i) {
+        gpu_render_rect *p=&g_cpu_damage[i];
+        if (p->x<=r.x && p->y<=r.y && p->x+p->width>=r.x+r.width && p->y+p->height>=r.y+r.height) return;
+        if (p->x==r.x && p->width==r.width && p->y+p->height==r.y) { p->height+=r.height; return; }
+    }
+    if (g_cpu_damage_count==24) { g_cpu_damage[0]=(gpu_render_rect){0,0,FB.width,FB.height}; g_cpu_damage_count=1; }
+    else g_cpu_damage[g_cpu_damage_count++]=r;
+}
+uint32_t kgfx_cpu_present_damage(gpu_render_rect *out,uint32_t capacity)
+{
+    uint32_t count=g_cpu_damage_count<capacity ? g_cpu_damage_count:capacity;
+    if (!out) return 0;
+    for (uint32_t i=0;i<count;++i) out[i]=g_cpu_damage[i];
+    return count;
+}
+static uint8_t g_coherent_cpu_present;
+void kgfx_set_coherent_cpu_present(uint8_t enabled) { g_coherent_cpu_present = enabled != 0; }
 
 static uint32_t sR = 16, sG = 8, sB = 0; // defaults
 static uint32_t mR = 0x00FF0000, mG = 0x0000FF00, mB = 0x000000FF;
@@ -331,6 +353,7 @@ static uint32_t G_argb_target_stride = 0u;
 
 static uint8_t g_have_prev_frame = 0;
 
+#ifndef KGFX_COUNTER_OVERRIDE
 static uint64_t kgfx_counter_now(void)
 {
     uint64_t value;
@@ -344,6 +367,7 @@ static uint64_t kgfx_counter_frequency(void)
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(value));
     return value;
 }
+#endif
 
 typedef struct
 {
@@ -1743,6 +1767,7 @@ static void gpu_base_damage_add(gpu_render_rect rect)
 
 static void present_full(void)
 {
+    if (!g_gpu_present_enabled) cpu_damage_add((gpu_render_rect){0,0,FB.width,FB.height});
     if (g_gpu_present_enabled)
     {
         gpu_base_damage_add((gpu_render_rect){0u, 0u, FB.width, FB.height});
@@ -1801,6 +1826,9 @@ static uint8_t present_region_raw(const kgfx_clip_rect *clip)
     }
     if (!clip || !clip->enabled)
         return 0u;
+
+    cpu_damage_add((gpu_render_rect){(uint32_t)clip->x0,(uint32_t)clip->y0,
+        (uint32_t)(clip->x1-clip->x0),(uint32_t)(clip->y1-clip->y0)});
 
     uint32_t copy_bytes = (uint32_t)(clip->x1 - clip->x0) * 4u;
     uint8_t flushed = 0;
@@ -3415,8 +3443,14 @@ static kgfx_text_cache *kgfx_text_cache_ensure(uint16_t idx,
     if (cache->alloc_failed && cache->key == key)
         return 0;
 
-    kgfx_text_cache_invalidate(idx);
-    cache = &g_text_cache[idx];
+    /* Scrollback changes text in the same retained row objects repeatedly.
+     * Reuse their raster storage while it fits instead of freeing/allocating
+     * every visible line on each wheel event. Position changes need no raster. */
+    uint32_t *pixels = cache->pixels;
+    uint64_t capacity_pages = cache->pages;
+    *cache = (kgfx_text_cache){0};
+    cache->pixels = pixels;
+    cache->pages = capacity_pages;
     cache->key = key;
     cache->local_x = x0 - t->x;
     cache->local_y = y0 - t->y;
@@ -3429,13 +3463,16 @@ static kgfx_text_cache *kgfx_text_cache_ensure(uint16_t idx,
         return 0;
     }
     pages = (bytes + 4095ull) >> 12;
-    cache->pixels = (uint32_t *)pmem_alloc_pages(pages);
+    if (cache->pages < pages) {
+        if (cache->pixels) pmem_free_pages(cache->pixels, cache->pages);
+        cache->pixels = (uint32_t *)pmem_alloc_pages(pages);
+        cache->pages = cache->pixels ? pages : 0;
+    }
     if (!cache->pixels)
     {
         cache->alloc_failed = 1u;
         return 0;
     }
-    cache->pages = pages;
     for (uint64_t i = 0u; i < (uint64_t)cache->width * cache->height; ++i)
         cache->pixels[i] = 0u;
     if (kgfx_target_argb_begin(cache->pixels, cache->width, cache->height,
@@ -3883,6 +3920,10 @@ void kgfx_window_layers_prepare(const kgfx_obj_handle *roots,
 
 void kgfx_window_layers_disable(void)
 {
+    /* The software compositor calls this every frame. Only a transition out
+     * of layered composition invalidates the retained CPU frame. */
+    if (!g_window_layers_enabled)
+        return;
     g_window_layers_enabled = 0u;
     g_window_layer_root_count = 0u;
     g_window_layer_updates_allowed = 0u;
@@ -4427,11 +4468,26 @@ static void render_dirty_tile_runs(const kgfx_dirty_tiles *tiles,
                 continue;
 
             render_entries_in_region(entries, n, resolved, current, &region, clear_color);
-            if (present_region_raw(&region))
+            if (!g_coherent_cpu_present && present_region_raw(&region))
                 flushed = 1u;
         }
     }
 
+    if (g_coherent_cpu_present) {
+        /* Finish every damaged run offscreen before publishing any of them.
+         * Distant widget/cursor damage must not repaint the space between. */
+        for (uint32_t y=0;y<tiles->rows;++y) {
+            uint32_t x=0;
+            while (x<tiles->cols) {
+                while (x<tiles->cols && !dirty_tiles_bit(tiles,x,y)) ++x;
+                uint32_t start=x;
+                while (x<tiles->cols && dirty_tiles_bit(tiles,x,y)) ++x;
+                if (start==x) continue;
+                kgfx_clip_rect region=dirty_tile_run_clip(tiles,y,start,x);
+                if (present_region_raw(&region)) flushed=1;
+            }
+        }
+    }
     if (flushed)
         kgfx_flush_commit();
 }
@@ -4634,6 +4690,7 @@ static void store_prev_snapshots(const kgfx_obj_snapshot *current, uint16_t coun
 
 void kgfx_render_all(kcolor clear_color)
 {
+    g_cpu_damage_count=0;
     kgfx_resolved_obj *resolved = g_render_resolved;
     kgfx_render_entry *entries = g_render_entries;
     kgfx_obj_snapshot *current = g_render_current;

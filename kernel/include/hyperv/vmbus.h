@@ -38,6 +38,20 @@ extern "C"
     uint32_t vmbus_storvsc_relid(void);
     uint32_t vmbus_storvsc_connection_id(void);
 
+    enum { VMBUS_DEVICE_NET = 0, VMBUS_DEVICE_VIDEO = 1 };
+    enum { VMBUS_SEND_REQUEST_COMPLETION = 0x8000 };
+    /* Init/open/GPADL calls are serialized during boot. Each device owns its
+     * ring after open; a caller must serialize send/receive on that device. */
+    void vmbus_device_diag_print(uint32_t device);
+    int vmbus_device_open(uint32_t device);
+    int vmbus_device_send(uint32_t device, uint16_t type, uint64_t transaction,
+                          const void *payload, uint32_t bytes,
+                          const void *gpa, uint32_t gpa_bytes);
+    int vmbus_device_receive(uint32_t device, void *packet, uint32_t capacity,
+                             uint32_t *bytes);
+    int vmbus_device_share(uint32_t device, void *buffer, uint32_t pages,
+                           uint32_t *handle);
+
 #ifdef __cplusplus
 }
 #endif

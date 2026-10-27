@@ -139,6 +139,17 @@ static inline void range_add_to(range_t *dst, uint32_t *cnt, uint64_t base, uint
 {
     if (!len)
         return;
+    /* Rejoin adjacent free runs before consuming another range slot. */
+    for (uint32_t i=0;i<*cnt;) {
+        uint64_t end=base+len, other_end=dst[i].base+dst[i].len;
+        if (end==dst[i].base || other_end==base) {
+            uint64_t start=base<dst[i].base ? base:dst[i].base;
+            uint64_t finish=end>other_end ? end:other_end;
+            base=start; len=finish-start;
+            dst[i]=dst[--(*cnt)];
+            i=0;
+        } else ++i;
+    }
     if (*cnt < 256)
         dst[(*cnt)++] = (range_t){base, len};
 }
@@ -392,4 +403,14 @@ void pmem_get_stats(pmem_stats *out_stats)
     out_stats->free_executable_pages = pmem_count_pages(pool_exec, pool_exec_count);
     out_stats->free_pages = out_stats->free_lowdma_pages + out_stats->free_high_pages + out_stats->free_executable_pages;
     out_stats->page_size = PAGE_SIZE;
+}
+
+uint64_t pmem_largest_free_pages(void)
+{
+    uint64_t largest = 0;
+    for (uint32_t i=0;i<pool_lo_count;++i)
+        if (pool_lo[i].len>largest) largest=pool_lo[i].len;
+    for (uint32_t i=0;i<pool_hi_count;++i)
+        if (pool_hi[i].len>largest) largest=pool_hi[i].len;
+    return largest / PAGE_SIZE;
 }

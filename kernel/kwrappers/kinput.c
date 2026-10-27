@@ -1,10 +1,12 @@
 #include "kwrappers/kinput.h"
 #include "hyperv/hyperv_input.h"
+#include "hyperv/hyperv.h"
 #include "i2c/i2c1_hidi2c.h"
 #include "terminal/terminal_api.h"
 #include "usb/usb_hid.h"
 #include <stdint.h>
 
+static uint8_t g_hyperv_only;
 static uint8_t g_keys_now[256];
 static uint8_t g_keys_prev[256];
 static uint8_t g_i2c_kbd_keys[256];
@@ -1729,6 +1731,11 @@ void kinput_init_multi(const uint64_t *xhci_mmio_bases, uint32_t xhci_mmio_count
     g_usb.has_keyboard = 0;
     g_usb.has_mouse = 0;
 
+    g_hyperv_only = hyperv_core_ready() != 0;
+    if (g_hyperv_only) {
+        if (hyperv_input_init() != 0) terminal_warn("hypervinput: input channels unavailable");
+        return;
+    }
     /* Existing ACPI/I2C HID path */
     terminal_set_quiet();
     i2c1_hidi2c_init(rsdp_phys);
@@ -1800,6 +1807,7 @@ void kinput_poll(void)
         }
     }
 
+    if (!g_hyperv_only) {
     for (uint32_t usage = 0u; usage < 256u; ++usage)
         if (g_i2c_kbd_keys[usage])
         {
@@ -1845,6 +1853,7 @@ void kinput_poll(void)
             parse_usb_mouse_report(&g_usb.mouse, mouse_report, got);
     }
 
+    }
     g_mouse.buttons = (uint8_t)(g_tpd_buttons | g_tpd_synth_buttons | g_usb_mouse_buttons | g_hv_mouse_buttons);
     g_tpd_synth_buttons = 0u;
 

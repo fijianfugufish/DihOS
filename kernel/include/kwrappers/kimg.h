@@ -30,8 +30,7 @@ int kimg_load_memory(kimg *out, const void *data, uint32_t size);
 int kimg_load_webp_memory(kimg *out, const void *data, uint32_t size);
 int kimg_load_svg_memory(kimg *out, const void *data, uint32_t size);
 
-// Reserve decoder scratch memory early, before later DMA/ring allocations make
-// large contiguous allocations harder.
+// Prepare the page-backed decoder allocator (no monolithic scratch reservation).
 int kimg_prepare_decoder(void);
 
 enum

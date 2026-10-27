@@ -1,5 +1,7 @@
 #include "hyperv/hyperv_input.h"
 #include "hyperv/vmbus.h"
+#include "hyperv/hv_hid.h"
+#include "hyperv/hyperv_diag.h"
 #include "terminal/terminal_api.h"
 
 enum
@@ -31,11 +33,10 @@ static int32_t G_hv_mouse_dx;
 static int32_t G_hv_mouse_dy;
 static int32_t G_hv_mouse_wheel;
 static uint8_t G_hv_mouse_buttons;
-static uint8_t G_hv_mouse_physical_buttons;
-static uint8_t G_hv_mouse_short_press_buttons;
-static uint8_t G_hv_mouse_pending_press_buttons;
-static uint8_t G_hv_mouse_synth_release_buttons;
 static uint8_t G_hv_mouse_absolute;
+static hv_hid_layout G_mouse_layout;
+static hv_pointer_report G_pointer_queue[64];
+static uint32_t G_pointer_head, G_pointer_count, G_bad_reports;
 
 static uint32_t rd32(const uint8_t *p)
 {
@@ -186,15 +187,6 @@ static uint8_t set1_e0_to_hid(uint16_t sc)
     }
 }
 
-static void update_mouse_buttons(uint8_t buttons)
-{
-    uint8_t pressed = (uint8_t)(buttons & (uint8_t)~G_hv_mouse_physical_buttons);
-
-    if (pressed)
-        G_hv_mouse_short_press_buttons |= pressed;
-    G_hv_mouse_physical_buttons = buttons;
-}
-
 static void handle_keyboard_event(const uint8_t *payload, uint32_t bytes)
 {
     uint16_t sc;
@@ -221,76 +213,41 @@ static void handle_keyboard_event(const uint8_t *payload, uint32_t bytes)
         G_hv_keys[usage] = 1u;
 }
 
-static void handle_mouse_report_payload(const uint8_t *report, uint32_t bytes)
+static void handle_mouse_message(const uint8_t *payload, uint32_t bytes)
 {
-    uint32_t base = 0u;
-
-    if (!report || bytes < 3u)
-        return;
-
-    if (bytes >= 6u && report[0] <= 8u && (report[1] & 0xF8u) == 0u)
-        base = 1u;
-
-    if (bytes >= base + 5u)
-    {
-        uint8_t buttons = (uint8_t)(report[base] & 0x07u);
-        uint16_t x = rd16(report + base + 1u);
-        uint16_t y = rd16(report + base + 3u);
-
-        update_mouse_buttons(buttons);
-        G_hv_mouse_x = (int32_t)((x > 0x7FFFu) ? (x >> 1u) : x);
-        G_hv_mouse_y = (int32_t)((y > 0x7FFFu) ? (y >> 1u) : y);
-        G_hv_mouse_absolute = 1u;
-        if (bytes >= base + 6u)
-            G_hv_mouse_wheel += (int8_t)report[base + 5u];
+    uint32_t size = 0;
+    const uint8_t *data = mouse_pipe_data(payload, bytes, &size);
+    hv_pointer_report event;
+    if (!data || size < 8 || rd32(data) != SYNTH_HID_INPUT_REPORT || rd32(data+4) > size-8) return;
+    if (hv_hid_decode(&G_mouse_layout, data+8, rd32(data+4), &event) != 0) {
+        if (++G_bad_reports == 1) terminal_warn("hypervinput: invalid HID input report");
         return;
     }
-
-    if (bytes >= base + 3u)
-    {
-        update_mouse_buttons((uint8_t)(report[base] & 0x07u));
-        G_hv_mouse_dx += (int8_t)report[base + 1u];
-        G_hv_mouse_dy += (int8_t)report[base + 2u];
-        G_hv_mouse_absolute = 0u;
-        if (bytes >= base + 4u)
-            G_hv_mouse_wheel += (int8_t)report[base + 3u];
+    hyperv_trace("hid",event.x,event.y,event.buttons,event.absolute);
+    if (G_pointer_count < 64) {
+        G_pointer_queue[(G_pointer_head+G_pointer_count)%64] = event;
+        ++G_pointer_count;
     }
 }
 
-static void handle_mouse_message(const uint8_t *payload, uint32_t bytes)
+static int mouse_device_info(const uint8_t *data, uint32_t size)
 {
-    const uint8_t *pipe_data;
-    uint32_t pipe_bytes = 0u;
-    uint32_t type;
-    uint32_t size;
-
-    if (!payload || bytes == 0u)
-        return;
-
-    pipe_data = mouse_pipe_data(payload, bytes, &pipe_bytes);
-    if (pipe_data)
-    {
-        payload = pipe_data;
-        bytes = pipe_bytes;
-    }
-
-    if (bytes >= 8u)
-    {
-        type = rd32(payload + 0);
-        size = rd32(payload + 4);
-        if (type == SYNTH_HID_INPUT_REPORT && size <= bytes - 8u)
-        {
-            handle_mouse_report_payload(payload + 8u, size);
-            return;
-        }
-    }
-
-    handle_mouse_report_payload(payload, bytes);
+    uint8_t report[4096];
+    uint32_t length, offset;
+    /* synthhid header (8), hv_input_dev_info (32), HID descriptor (>=9). */
+    if (size < 49 || rd32(data+4) > size-8 || data[40] < 9 || data[40] > size-40 || data[46] != 0x22) return -1;
+    offset = 40+data[40];
+    length = rd16(data+47);
+    if (!length || length > sizeof(report) || length > size-offset) return -1;
+    for (uint32_t i = 0; i < length; ++i) report[i] = data[offset+i];
+    /* Hyper-V SA-167: button Usage Maximum tagged as Logical Maximum. */
+    if (length > 14 && report[14] == 0x25) report[14] = 0x29;
+    return hv_hid_parse(&G_mouse_layout, report, length);
 }
 
 static int wait_keyboard_protocol_response(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[4608];
     uint32_t bytes = 0;
 
     for (uint32_t round = 0; round < 10000000u; ++round)
@@ -308,7 +265,7 @@ static int wait_keyboard_protocol_response(void)
 
 static int wait_mouse_protocol(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[4608];
     uint8_t ack[24];
     const uint8_t *data;
     uint32_t bytes = 0;
@@ -337,6 +294,10 @@ static int wait_mouse_protocol(void)
         }
         else if (data_bytes >= 8u && rd32(data) == SYNTH_HID_INITIAL_DEVICE_INFO)
         {
+            if (mouse_device_info(data, data_bytes) != 0) {
+                terminal_error("hypervinput: unsupported/malformed mouse descriptor");
+                return -1;
+            }
             ack_bytes = build_mouse_pipe_device_info_ack(ack, sizeof(ack));
             if (ack_bytes)
                 (void)vmbus_mouse_send_inband(ack, ack_bytes);
@@ -362,11 +323,8 @@ int hyperv_input_init(void)
     G_hv_mouse_dy = 0;
     G_hv_mouse_wheel = 0;
     G_hv_mouse_buttons = 0u;
-    G_hv_mouse_physical_buttons = 0u;
-    G_hv_mouse_short_press_buttons = 0u;
-    G_hv_mouse_pending_press_buttons = 0u;
-    G_hv_mouse_synth_release_buttons = 0u;
     G_hv_mouse_absolute = 0u;
+    G_pointer_head = G_pointer_count = G_bad_reports = 0;
 
     if (vmbus_open_keyboard_channel() != 0)
     {
@@ -418,9 +376,8 @@ int hyperv_input_init(void)
 
 void hyperv_input_poll(void)
 {
-    uint8_t payload[256];
+    uint8_t payload[4608];
     uint32_t bytes = 0;
-    uint8_t short_presses = 0u;
 
     clear_frame_keys();
     merge_held_modifiers();
@@ -443,37 +400,38 @@ void hyperv_input_poll(void)
     G_hv_mouse_dy = 0;
     G_hv_mouse_wheel = 0;
     G_hv_mouse_absolute = 0u;
-    G_hv_mouse_short_press_buttons = 0u;
-    for (uint32_t i = 0; i < 16u; ++i)
-    {
+    /* Leave reports in the ring when full, preserving button ordering. */
+    for (uint32_t i = 0; i < 16 && G_pointer_count < 64; ++i) {
         int rc = vmbus_mouse_receive(payload, sizeof(payload), &bytes);
-        if (rc != 0)
+        if (rc == 1) break;
+        if (rc != 0) {
+            G_hv_mouse_buttons = 0;
+            G_pointer_count = 0;
+            G_hv_mouse_online = 0;
+            terminal_error("hypervinput: mouse transport lost; buttons released");
             break;
+        }
         handle_mouse_message(payload, bytes);
     }
-
-    short_presses =
-        (uint8_t)(G_hv_mouse_short_press_buttons & (uint8_t)~G_hv_mouse_physical_buttons);
-
-    if (G_hv_mouse_synth_release_buttons)
-    {
-        G_hv_mouse_buttons = G_hv_mouse_physical_buttons;
-        G_hv_mouse_synth_release_buttons = 0u;
-        G_hv_mouse_pending_press_buttons |= short_presses;
-    }
-    else
-    {
-        short_presses |= G_hv_mouse_pending_press_buttons;
-        G_hv_mouse_pending_press_buttons = 0u;
-        if (short_presses)
-        {
-            G_hv_mouse_buttons = (uint8_t)(G_hv_mouse_physical_buttons | short_presses);
-            G_hv_mouse_synth_release_buttons = short_presses;
+    if (G_pointer_count) {
+        hv_pointer_report event = G_pointer_queue[G_pointer_head];
+        G_pointer_head = (G_pointer_head+1)%64;
+        --G_pointer_count;
+        /* Deliver a transition at its own position, before later motion. */
+        if (event.buttons == G_hv_mouse_buttons && event.absolute) {
+            while (G_pointer_count) {
+                hv_pointer_report next = G_pointer_queue[G_pointer_head];
+                if (next.buttons != event.buttons || !next.absolute || next.wheel || event.wheel) break;
+                event = next;
+                G_pointer_head = (G_pointer_head+1)%64;
+                --G_pointer_count;
+            }
         }
-        else
-        {
-            G_hv_mouse_buttons = G_hv_mouse_physical_buttons;
-        }
+        G_hv_mouse_buttons = event.buttons;
+        G_hv_mouse_absolute = event.absolute;
+        if (event.absolute) { G_hv_mouse_x = event.x; G_hv_mouse_y = event.y; }
+        else { G_hv_mouse_dx = event.x; G_hv_mouse_dy = event.y; }
+        G_hv_mouse_wheel = event.wheel;
     }
 }
 

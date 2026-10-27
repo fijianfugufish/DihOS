@@ -1,4 +1,5 @@
 #include "system/dihos_time.h"
+#include "hyperv/hyperv.h"
 
 extern volatile uint64_t g_dihos_tick;
 
@@ -77,3 +78,28 @@ uint32_t dihos_time_fattime(void)
            ((minute & 0x3Fu) << 5) |
            ((second / 2u) & 0x1Fu);
 }
+
+uint64_t dihos_time_monotonic_ms(void)
+{
+#if defined(__aarch64__)
+    uint64_t counter, frequency;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(counter));
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(frequency));
+    if (frequency) return (counter/frequency)*1000 + (counter%frequency)*1000/frequency;
+#elif defined(__x86_64__)
+    /* Hyper-V's partition reference counter advances during boot waits too.
+     * Never use a frame counter as the timeout clock for a blocked driver. */
+    if (hyperv_core_ready()) {
+        uint32_t a,b,c,d;
+        __asm__ __volatile__("cpuid" : "=a"(a),"=b"(b),"=c"(c),"=d"(d) : "a"(0x40000003u),"c"(0));
+        if (a & 2u) {
+            uint32_t lo,hi;
+            __asm__ __volatile__("rdmsr" : "=a"(lo),"=d"(hi) : "c"(0x40000020u));
+            return (((uint64_t)hi<<32)|lo)/10000u;
+        }
+    }
+#endif
+    return dihos_time_ticks()*1000/DIHOS_TIME_TICKS_PER_SECOND;
+}
+
+#include "dihos_wallclock.inc"

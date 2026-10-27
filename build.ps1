@@ -17,6 +17,11 @@ param(
   [string]$Config = "Release",
 
   [switch]$ArmOnly,
+  [switch]$DeployUsb,
+  [switch]$DeployHyperV,
+  [string]$VMName = "DihOS",
+  [string]$VhdPath = "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\DihOS.vhdx",
+  [string]$AssetSource = "",
 
   # Crash maps are useful for symbolised panic reports but expensive to
   # regenerate.  Opt in when investigating a crash; normal builds remove any
@@ -438,7 +443,7 @@ function Copy-DihosMesaRuntime {
 }
 
 $UsbRoot = "U:\"
-if (Test-Path $UsbRoot) {
+if ($DeployUsb -and (Test-Path $UsbRoot)) {
   $destBoot = Join-Path $UsbRoot "EFI\BOOT"
   $destAA64 = Join-Path $UsbRoot "OS\aa64"
   $destX64  = Join-Path $UsbRoot "OS\x64"
@@ -477,7 +482,7 @@ if (Test-Path $UsbRoot) {
     Write-Host "  U:\OS\x64\KERNEL.ELF"
   }
 } else {
-  Write-Host "USB drive U:\ not found. Skipping copy." -ForegroundColor Yellow
+  Write-Host "USB deployment skipped (requires -DeployUsb and drive U:\)." -ForegroundColor DarkGray
   Write-Host ""
   Write-Host "Copy to USB:" -ForegroundColor Yellow
   Write-Host ("  \EFI\BOOT\BOOTAA64.EFI   <= " + $BootOutFull)
@@ -491,65 +496,9 @@ if (Test-Path $UsbRoot) {
   }
 }
 
-# ---- Hyper-V VHDX copy ----
-$VhdPath = "C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\DihOS.vhdx"
-$VhdAccessible = $false
-try {
-  $VhdAccessible = Test-Path -LiteralPath $VhdPath -ErrorAction Stop
-}
-catch {
-  Write-Host "Cannot access the Hyper-V VHDX. Re-run this build from an Administrator PowerShell." -ForegroundColor Red
-  Write-Host "Hyper-V will continue booting its previous kernel until the VHDX copy succeeds." -ForegroundColor Red
-}
-
-if ($VhdAccessible) {
-  Write-Host "Mounting DihOS VHDX..." -ForegroundColor Cyan
-
-  Mount-VHD -Path $VhdPath -ErrorAction Stop | Out-Null
-  Start-Sleep -Seconds 1
-
-  try {
-    $disk = Get-DiskImage -ImagePath $VhdPath | Get-Disk
-    $vol = $disk | Get-Partition | Get-Volume | Where-Object DriveLetter | Select-Object -First 1
-
-    if (-not $vol -or -not $vol.DriveLetter) {
-      throw "Mounted VHDX but could not find a drive letter."
-    }
-
-    $VhdRoot = "$($vol.DriveLetter):\"
-
-    $destBoot = Join-Path $VhdRoot "EFI\BOOT"
-    $destAA64 = Join-Path $VhdRoot "OS\aa64"
-    $destX64  = Join-Path $VhdRoot "OS\x64"
-    $destFirmware = Join-Path $VhdRoot "OS\Firmware"
-    $destMesaRuntime = Join-Path $VhdRoot "OS\MesaRuntime"
-    $destImageEditor = Join-Path $VhdRoot "OS\System\Programs\Image Viewer"
-
-    New-Item -Force -ItemType Directory -Path $destBoot,$destAA64,$destX64,$destImageEditor | Out-Null
-
-    Copy-Item -Force $BootOutFull       (Join-Path $destBoot "BOOTAA64.EFI")
-    Copy-Item -Force $Stage2OutFull     (Join-Path $destAA64 "STAGE2.EFI")
-    Copy-Item -Force $KernelAa64OutFull (Join-Path $destAA64 "KERNEL.ELF")
-    if ($CrashMap) {
-      Copy-Item -Force $CrashMapAa64 (Join-Path $destAA64 "KERNEL.CRASHMAP")
-    } else {
-      Remove-Item -LiteralPath (Join-Path $destAA64 "KERNEL.CRASHMAP") -Force -ErrorAction SilentlyContinue
-    }
-    Copy-Item -Force $imageEditorOut    (Join-Path $destImageEditor "image_viewer.sacx")
-    Copy-DihosFirmware -Destination $destFirmware
-    Copy-DihosMesaRuntime -Destination $destMesaRuntime
-    if (!$ArmOnly) {
-      Copy-Item -Force $BootX64OutFull (Join-Path $destBoot "BOOTX64.EFI")
-      Copy-Item -Force $Stage2X64OutFull (Join-Path $destX64 "STAGE2.EFI")
-      Copy-Item -Force $KernelX64OutFull (Join-Path $destX64 "KERNEL.ELF")
-    }
-
-    Write-Host "Copied outputs to DihOS VHDX at $VhdRoot successfully." -ForegroundColor Green
-  }
-  finally {
-    Write-Host "Dismounting DihOS VHDX..." -ForegroundColor Cyan
-    Dismount-VHD -Path $VhdPath -ErrorAction SilentlyContinue | Out-Null
-  }
-} else {
-  Write-Host "DihOS VHDX not found at $VhdPath. Skipping VHDX copy." -ForegroundColor Yellow
+# Compilation never mounts a disk or changes a VM unless explicitly requested.
+if ($DeployHyperV) {
+  $package = Join-Path $BuildDir ("hyperv-package-" + [DateTime]::UtcNow.ToString('yyyyMMddHHmmssfff'))
+  & (Join-Path $ProjectRoot 'tools\hyperv.ps1') -Action Package -ProjectRoot $ProjectRoot -AssetSource $AssetSource -PackagePath $package
+  & (Join-Path $ProjectRoot 'tools\hyperv.ps1') -Action Update -ProjectRoot $ProjectRoot -PackagePath $package -VMName $VMName -VhdPath $VhdPath
 }

@@ -47,6 +47,7 @@ extern "C"
     uint32_t kmouse_sensitivity_pct(void);
     void kmouse_set_visible(uint8_t visible);
     void kmouse_update(void);
+    void kmouse_commit_cursor(void);
 
     int32_t kmouse_x(void);
     int32_t kmouse_y(void);

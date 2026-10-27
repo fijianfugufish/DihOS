@@ -145,6 +145,7 @@ namespace
             terminal_print("");
         }
 
+        terminal_boot_progress("desktop: wallpaper file probe finished; loading image");
         if (kimg_load(out, path) == 0)
         {
             terminal_print_inline("desktop: wallpaper loaded w=");

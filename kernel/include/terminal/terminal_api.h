@@ -20,6 +20,9 @@ extern "C"
     void terminal_clear(void);
     void terminal_clear_no_flush(void);
     void terminal_flush_log(void);
+    /* Screen-only checkpoints: do not issue filesystem I/O while diagnosing it. */
+    void terminal_boot_progress_enable(uint8_t enabled);
+    void terminal_boot_progress(const char *stage);
 
     void terminal_print(const char *s);
     void terminal_print_inline(const char *s);

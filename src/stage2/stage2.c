@@ -50,6 +50,8 @@ typedef struct EFI_SYSTEM_TABLE
     void *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
+#include "stage2_clock.inc"
+
 static boot_info *g_stage2_report_bi = 0;
 
 static void stage2_report_append_wide(const wchar_t *s)
@@ -1980,7 +1982,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         W(0, 0, 0, 0);
 
     boot_info bi = (boot_info){0};
-    bi.version = 1;
+    bi.version = 2;
     bi.stage2_report_len = 0;
     bi.stage2_report[0] = 0;
     g_stage2_report_bi = &bi;
@@ -2101,6 +2103,8 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     stage2_snapshot_boot_volume(st, image, &bi);
 
+    stage2_capture_clock(st,&bi);
+    println(st, bi.boot_time_flags ? L"[CLOCK] firmware RTC captured" : L"[CLOCK] firmware RTC unavailable");
     println(st, L"[CHAIN] ExitBootServices -> kernel");
     exit_boot_and_jump(st, image, &bi, entry);
 

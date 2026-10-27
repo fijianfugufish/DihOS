@@ -7,10 +7,13 @@ extern "C"
 #include "kwrappers/ktext.h"
 #include "kwrappers/string.h"
 #include "system/dihos_time.h"
+#include "hyperv/hyperv_video.h"
+#include "kwrappers/kgfx.h"
+#include "memory/pmem.h"
 }
 
 static const int MAX_TERMINALS = 6;
-static Terminal g_terminals[MAX_TERMINALS];
+#include "terminal_slots.inc"
 static kfont *g_terminal_font = 0;
 static terminal_capture_sink_fn g_capture_sink = 0;
 static void *g_capture_user = 0;
@@ -205,22 +208,35 @@ static void terminal_capture_feed(const char *prefix, const char *text, uint8_t 
 extern "C" void terminal_initialize(kfont *font)
 {
     g_terminal_font = font;
-    g_terminals[0].Initialize(font, "Terminal", 0);
+    g_terminals[0]->Initialize(font, "Terminal", 0);
 }
 
 extern "C" void terminal_clear(void)
 {
-    g_terminals[0].Clear();
+    g_terminals[0]->Clear();
 }
 
 extern "C" void terminal_clear_no_flush(void)
 {
-    g_terminals[0].ClearNoFlush();
+    g_terminals[0]->ClearNoFlush();
+}
+
+static uint8_t g_boot_progress_enabled;
+extern "C" void terminal_boot_progress_enable(uint8_t enabled)
+{
+    g_boot_progress_enabled = enabled;
+}
+extern "C" void terminal_boot_progress(const char *stage)
+{
+    if (!g_boot_progress_enabled) return;
+    terminal_print(stage);
+    kgfx_render_all(black);
+    hyperv_video_present_now();
 }
 
 extern "C" void terminal_flush_log(void)
 {
-    g_terminals[0].FlushLog();
+    g_terminals[0]->FlushLog();
 }
 
 extern "C" void terminal_print(const char *s)
@@ -228,7 +244,7 @@ extern "C" void terminal_print(const char *s)
     terminal_capture_feed("", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminals[0].Print(s);
+    g_terminals[0]->Print(s);
 }
 
 extern "C" void terminal_print_inline(const char *s)
@@ -236,7 +252,7 @@ extern "C" void terminal_print_inline(const char *s)
     terminal_capture_feed("", s, 0u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminals[0].PrintInline(s);
+    g_terminals[0]->PrintInline(s);
 }
 
 extern "C" void terminal_warn(const char *s)
@@ -244,7 +260,7 @@ extern "C" void terminal_warn(const char *s)
     terminal_capture_feed("[WARN] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminals[0].Warn(s);
+    g_terminals[0]->Warn(s);
 }
 
 extern "C" void terminal_error(const char *s)
@@ -252,7 +268,7 @@ extern "C" void terminal_error(const char *s)
     terminal_capture_feed("[ERROR] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminals[0].Error(s);
+    g_terminals[0]->Error(s);
 }
 
 extern "C" void terminal_success(const char *s)
@@ -260,7 +276,7 @@ extern "C" void terminal_success(const char *s)
     terminal_capture_feed("[SUCCESS] ", s, 1u);
     if (g_capture_sink && !g_capture_mirror)
         return;
-    g_terminals[0].Success(s);
+    g_terminals[0]->Success(s);
 }
 
 extern "C" void terminal_update_input(void)
@@ -269,42 +285,42 @@ extern "C" void terminal_update_input(void)
 
     for (int i = 0; i < MAX_TERMINALS; ++i)
     {
-        if (!g_terminals[i].Initialized())
+        if (!g_terminals[i] || !g_terminals[i]->Initialized())
             continue;
-        g_terminals[i].UpdateScript();
-        g_terminals[i].UpdateSacx();
-        g_terminals[i].UpdateInput();
+        g_terminals[i]->UpdateScript();
+        g_terminals[i]->UpdateSacx();
+        g_terminals[i]->UpdateInput();
     }
 }
 
 extern "C" void terminal_toggle_quiet()
 {
-    g_terminals[0].ToggleQuiet();
+    g_terminals[0]->ToggleQuiet();
 }
 
 extern "C" void terminal_set_quiet()
 {
-    g_terminals[0].SetQuiet();
+    g_terminals[0]->SetQuiet();
 }
 
 extern "C" void terminal_set_loud()
 {
-    g_terminals[0].SetLoud();
+    g_terminals[0]->SetLoud();
 }
 
 extern "C" void terminal_activate(void)
 {
-    g_terminals[0].Activate();
+    g_terminals[0]->Activate();
 }
 
 extern "C" void terminal_set_visible(uint32_t visible)
 {
-    g_terminals[0].SetWindowVisible(visible ? 1u : 0u);
+    g_terminals[0]->SetWindowVisible(visible ? 1u : 0u);
 }
 
 extern "C" int terminal_visible(void)
 {
-    return g_terminals[0].Visible();
+    return g_terminals[0]->Visible();
 }
 
 static int terminal_open_script_internal(const char *raw_path, const char *friendly_path,
@@ -318,34 +334,39 @@ static int terminal_open_script_internal(const char *raw_path, const char *frien
 
     for (int i = 1; i < MAX_TERMINALS; ++i)
     {
-        if (!g_terminals[i].Initialized())
+        if (!g_terminals[i] || !g_terminals[i]->Initialized())
             continue;
 
-        (void)g_terminals[i].CancelProgramIfClosed();
-        if (g_terminals[i].ProgramActive())
+        (void)g_terminals[i]->CancelProgramIfClosed();
+        if (g_terminals[i]->ProgramActive())
             continue;
 
         saw_launchable_slot = 1u;
-        if (g_terminals[i].StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
+        if (g_terminals[i]->StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
             return 0;
     }
 
     for (int i = 1; i < MAX_TERMINALS; ++i)
     {
-        if (g_terminals[i].Initialized())
-            (void)g_terminals[i].CancelProgramIfClosed();
+        if (g_terminals[i] && g_terminals[i]->Initialized())
+            (void)g_terminals[i]->CancelProgramIfClosed();
 
-        if (!g_terminals[i].Initialized())
+        if (!g_terminals[i] || !g_terminals[i]->Initialized())
         {
-            g_terminals[i].Initialize(g_terminal_font, "SAC Script", i);
+            if (!terminal_slot_create((uint32_t)i))
+            {
+                g_terminals[0]->Error("not enough memory for another app terminal");
+                return -1;
+            }
+            g_terminals[i]->Initialize(g_terminal_font, "SAC Script", i);
             saw_launchable_slot = 1u;
-            if (g_terminals[i].Initialized() &&
-                g_terminals[i].StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
+            if (g_terminals[i]->Initialized() &&
+                g_terminals[i]->StartProgramWithArg(raw_path, friendly_path, arg_raw_path, arg_friendly_path, flags) == 0)
                 return 0;
         }
     }
 
-    g_terminals[0].Error(saw_launchable_slot ? "app launch failed" : "no free app terminals");
+    g_terminals[0]->Error(saw_launchable_slot ? "app launch failed" : "no free app terminals");
 
     return -1;
 }
@@ -400,63 +421,63 @@ extern "C" void terminal_capture_end(void)
 
 extern "C" void terminal_visual_begin(const char *title)
 {
-    g_terminals[0].VisualBegin(title);
+    g_terminals[0]->VisualBegin(title);
 }
 
 extern "C" void terminal_visual_begin_ex(const char *title, uint32_t flags, uint32_t rows)
 {
-    g_terminals[0].VisualBeginEx(title, flags, rows);
+    g_terminals[0]->VisualBeginEx(title, flags, rows);
 }
 
 extern "C" void terminal_visual_end(void)
 {
-    g_terminals[0].VisualEnd();
+    g_terminals[0]->VisualEnd();
 }
 
 extern "C" void terminal_visual_clear(void)
 {
-    g_terminals[0].VisualClear();
+    g_terminals[0]->VisualClear();
 }
 
 extern "C" void terminal_visual_put(int32_t x, int32_t y, char ch, kcolor fg, kcolor bg)
 {
-    g_terminals[0].VisualPut(x, y, ch, fg, bg);
+    g_terminals[0]->VisualPut(x, y, ch, fg, bg);
 }
 
 extern "C" void terminal_visual_text(int32_t x, int32_t y, const char *text, kcolor fg, kcolor bg)
 {
-    g_terminals[0].VisualText(x, y, text, fg, bg);
+    g_terminals[0]->VisualText(x, y, text, fg, bg);
 }
 
 extern "C" void terminal_visual_progress(uint32_t id, int32_t x, int32_t y, int32_t w,
                                          uint32_t percent, uint32_t style)
 {
-    g_terminals[0].VisualProgress(id, x, y, w, percent, style);
+    g_terminals[0]->VisualProgress(id, x, y, w, percent, style);
 }
 
 extern "C" void terminal_visual_spinner(uint32_t id, int32_t x, int32_t y, uint32_t frame)
 {
-    g_terminals[0].VisualSpinner(id, x, y, frame);
+    g_terminals[0]->VisualSpinner(id, x, y, frame);
 }
 
 extern "C" void terminal_visual_present(void)
 {
-    g_terminals[0].VisualPresent();
+    g_terminals[0]->VisualPresent();
 }
 
 extern "C" int32_t terminal_visual_cols(void)
 {
-    return g_terminals[0].VisualCols();
+    return g_terminals[0]->VisualCols();
 }
 
 extern "C" int32_t terminal_visual_rows(void)
 {
-    return g_terminals[0].VisualRows();
+    return g_terminals[0]->VisualRows();
 }
 
 extern "C" int terminal_demo_installfx_start(uint32_t flags)
 {
-    if (!g_terminals[0].Initialized())
+    if (!g_terminals[0]->Initialized())
         return -1;
 
     g_installfx_active = 1u;

@@ -22,6 +22,8 @@ typedef struct knet_usb_status
 } knet_usb_status;
 
 int knet_usb_dhcp(uint32_t rounds);
+/* Bounded dispatch from the UI thread; DHCP work runs on a remote worker. */
+void knet_usb_background_poll(void);
 void knet_usb_get_status(knet_usb_status *out_status);
 /* Suppress terminal/UI logging while a request runs on a worker core. */
 void knet_usb_set_worker_quiet(uint32_t quiet);

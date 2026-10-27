@@ -15,6 +15,8 @@ extern "C"
 #include "kwrappers/kwindow.h"
 #include "kwrappers/string.h"
 #include "system/kbusy.h"
+#include "hyperv/hyperv_diag.h"
+#include "system/dihos_time.h"
 }
 
 namespace
@@ -235,7 +237,7 @@ namespace
             MODAL_TEXT_CAP = 256,
             MODAL_TITLE_CAP = 64,
             MODAL_LABEL_CAP = 24,
-            DOUBLE_CLICK_FRAMES = 180,
+            DOUBLE_CLICK_MS = 500,
             SCROLL_LINES_PER_WHEEL = 3
         };
 
@@ -400,7 +402,7 @@ namespace
         int scroll_top_;
         int visible_rows_;
         int last_click_index_;
-        uint32_t last_click_frame_;
+        uint64_t last_click_frame_;
         uint8_t truncated_;
         BusyMode busy_mode_;
         uint8_t busy_phase_;
@@ -546,20 +548,26 @@ namespace
             rows_[i].entry_index = -1;
         }
 
+        terminal_boot_progress(dialog_host_ ? "explorer: dialog window starting" : "explorer: main window starting");
         CreateWindow();
         if (window_.idx < 0)
             return;
 
+        terminal_boot_progress("explorer: creating buttons");
         CreateButtons();
+        terminal_boot_progress("explorer: creating rows");
         CreateRows();
+        terminal_boot_progress("explorer: creating dialog controls");
         CreateModal();
         Layout();
 
+        terminal_boot_progress("explorer: reading root directory");
         if (ReloadDirectory(0) != 0)
             SetFsErrorStatus("unable to read /");
         else
             ShowDefaultStatus();
 
+        terminal_boot_progress("explorer: root directory read finished");
         ktextbox_set_text(path_box_, current_dir_);
         initialized_ = 1u;
         if (dialog_host_)
@@ -2727,8 +2735,9 @@ namespace
         if (!self || !row || row->entry_index < 0 || row->entry_index >= self->entry_count_)
             return;
 
+        hyperv_trace("explorer-row",row->entry_index,self->selected_index_,self->busy_mode_,self->modal_mode_);
         if (self->last_click_index_ == row->entry_index &&
-            self->frame_counter_ - self->last_click_frame_ <= DOUBLE_CLICK_FRAMES)
+            dihos_time_monotonic_ms() - self->last_click_frame_ <= DOUBLE_CLICK_MS)
         {
             self->SelectEntry(row->entry_index);
             self->ResetDoubleClick();
@@ -2745,7 +2754,7 @@ namespace
         }
 
         self->last_click_index_ = row->entry_index;
-        self->last_click_frame_ = self->frame_counter_;
+        self->last_click_frame_ = dihos_time_monotonic_ms();
     }
 
     void FileExplorer::UpClickThunk(kbutton_handle button, void *user)

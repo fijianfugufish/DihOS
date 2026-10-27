@@ -19,7 +19,9 @@ extern "C"
     } kfb;
 
     int kgfx_init(const boot_info *bi);
+    void kgfx_set_coherent_cpu_present(uint8_t enabled);
     const kfb *kgfx_info(void);
+    uint32_t kgfx_cpu_present_damage(gpu_render_rect *out, uint32_t capacity);
     void kgfx_fill(kcolor c);
     void kgfx_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, kcolor c);
     void kgfx_flush(void);

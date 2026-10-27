@@ -16,6 +16,7 @@ typedef struct
     kmouse_state state;
     kgfx_obj_handle cursor_handle;
     kmouse_cursor active_cursor;
+    kmouse_cursor applied_cursor;
     kmouse_cursor_asset_t cursors[KMOUSE_CURSOR_COUNT];
     uint32_t sensitivity_pct;
     uint8_t initialized;
@@ -810,6 +811,7 @@ int kmouse_init(void)
     if (!G.cursors[(uint32_t)default_cursor].loaded)
         default_cursor = first_loaded;
     G.active_cursor = default_cursor;
+    G.applied_cursor = default_cursor;
 
     {
         kmouse_cursor_asset_t *asset = kmouse_active_asset();
@@ -851,8 +853,6 @@ int kmouse_set_cursor(kmouse_cursor cursor)
         return 0;
 
     G.active_cursor = cursor;
-    kmouse_apply_active_cursor_image();
-    kmouse_sync_cursor();
     return 0;
 }
 
@@ -939,4 +939,15 @@ void kmouse_get_state(kmouse_state *out)
 kgfx_obj_handle kmouse_cursor_object(void)
 {
     return G.cursor_handle;
+}
+
+/* Apply only the final shape chosen by this frame's hover handlers. */
+void kmouse_commit_cursor(void)
+{
+    if (!G.initialized) return;
+    if (G.applied_cursor != G.active_cursor) {
+        kmouse_apply_active_cursor_image();
+        G.applied_cursor = G.active_cursor;
+    }
+    kmouse_sync_cursor();
 }
