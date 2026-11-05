@@ -1,0 +1,202 @@
+{
+  "source_version": "2.54.2",
+  "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+  "port_edits_sha256": "56a60109072fcec42125b3f1dafa520c9756ae6095c6734aa44945cd93f3c868",
+  "probe_sha256": "d3c71df4b8484daec6b6d154b7617c9cd24704bc2d1e572bcdf18efcd383444c",
+  "runtime_archive": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/runtime/libdihos-runtime.a",
+    "sha256": "861c786297e735e8d6989bd8cb139cecfe43fa01c263560bd5b59190677423a6"
+  },
+  "support_library": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/build-207f2e9c9649/lib/libWTF.a",
+    "sha256": "8dc04a85c84b753e324f81dd607f7047c8a746e95ec2466f2a5a304bf0e6ddf9",
+    "bytes": 242624
+  },
+  "support_library_built": true,
+  "engine_built": false,
+  "engine_library_built": false,
+  "fresh_reconfiguration": true,
+  "native_source_checks": [
+    {
+      "unit": "native-vm",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/OSAllocatorDihOS.cpp",
+      "source_sha256": "63b238031efff018d25be6d9dd694e93faf991a90883d0b9fc11eb028448773e",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "b15fd1cdd189a3fa320db254d5b167a47ffdcb91ba29768ae0cbcc1d3165d4e5",
+      "undefined_symbols": [
+        "dihos_user_vm_commit",
+        "dihos_user_vm_decommit",
+        "dihos_user_vm_protect",
+        "dihos_user_vm_release",
+        "dihos_user_vm_reserve",
+        "memset"
+      ]
+    },
+    {
+      "unit": "native-random",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/RandomDihOS.cpp",
+      "source_sha256": "4cf8e508d2ab4acddb30c3807cf2da05661ea7f1eea343af85e7714398624f20",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "7c674e98f1f33d51cce997523d02fd00b634b39f8b5c12f65be613571e3d5403",
+      "undefined_symbols": []
+    },
+    {
+      "unit": "native-bmalloc-random",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/BmallocRandomDihOS.cpp",
+      "source_sha256": "7e951b2d31a8c7b20a13caf2af73522d0644227b39c71999827c047ae27620f3",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "54b7bab4f3d2d7df822feca2e07ab6be3978f5f29be259ee0b3df1aa5436538b",
+      "undefined_symbols": []
+    },
+    {
+      "unit": "native-random-device",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/RandomDeviceDihOS.cpp",
+      "source_sha256": "48dc70963ef1ce76d10f1e76cc22d7ee64b9b132e1f6c96b33690f3891aead48",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "d570a6514106ba2aa8319acaaa11928b32ac7a94d1fd05fd38f25c5bf2d0f5ca",
+      "undefined_symbols": []
+    },
+    {
+      "unit": "native-platform",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/PlatformDihOS.cpp",
+      "source_sha256": "43732fd579e175338f8f07d2bf1670ae4ac6f8c0ff0490150938f7789b1f97a1",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "2bcc69716a688c23516d0f9c19660464e35f51069b48167a5d91c5bb63f8a270",
+      "undefined_symbols": [
+        "_ZN3WTF10StringImpl17s_emptyAtomStringE",
+        "_ZN3WTF10StringImpl28createWithoutCopyingNonEmptyENSt3__14spanIKhLm18446744073709551615EEE",
+        "_ZN3WTF10StringImpl7destroyEPS0_",
+        "_ZN3WTF10fastMallocEm",
+        "_ZN3WTF20tryFastCompactMallocEm",
+        "_ZNK3WTF6String4utf8ENS_14ConversionModeE",
+        "abort",
+        "dihos_user_libcxx_abort",
+        "memcpy",
+        "strlen"
+      ]
+    },
+    {
+      "unit": "native-resources",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/ResourcesDihOS.cpp",
+      "source_sha256": "59f038f9afff93a82c3f90c180e93321a80dfed250b1bc564fba74a5d62222ad",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "f3d0fb3aac9e8156585853bf7e687669c804fcbb569ef9cf17f4fdac4344f62b",
+      "undefined_symbols": [
+        "_ZN3WTF13MonotonicTime3nowEv"
+      ]
+    },
+    {
+      "unit": "native-thread-primitives",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp",
+      "source_sha256": "b3b2c56f2cbfe3e3a6e39c085307f31d9b7183b0308df75844ef445abfe98d46",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "b5f3f1aa6383a0c4e9b1a27530861a5f1b4a45ec2908478e0df14ef95656d199",
+      "undefined_symbols": [
+        "_ZN3WTF8WallTime3nowEv"
+      ]
+    },
+    {
+      "unit": "native-threads",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/ThreadingDihOS.cpp",
+      "source_sha256": "1afd7992f118bde32ff30ec147b51b9046260c285ab52ff7ab735e6b3574feb4",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "247e8f0e9fafb560296cf79155dd38d6a7b07690f59ca62d012fe94b9b4db6b1",
+      "undefined_symbols": [
+        "_ZN3WTF10ThreadLike5s_uidE",
+        "_ZN3WTF10fastMallocEm",
+        "_ZN3WTF10initializeEv",
+        "_ZN3WTF6Thread10entryPointEPNS0_16NewThreadContextE",
+        "_ZN3WTF6Thread18initializeInThreadEv",
+        "_ZN3WTF6Thread5s_keyE",
+        "_ZN3WTF6Thread7didExitEv",
+        "_ZN3WTF6ThreadD1Ev",
+        "_ZN3WTF8WordLock10unlockSlowEv",
+        "_ZN3WTF8WordLock8lockSlowEv",
+        "_ZN3WTF8fastFreeEPv",
+        "dihos_user_thread_finalize",
+        "memcpy",
+        "memset",
+        "sacx_user_key_create",
+        "sacx_user_key_set"
+      ]
+    },
+    {
+      "unit": "native-time",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/CurrentTimeDihOS.cpp",
+      "source_sha256": "3254646bc98eed2b4241ec912a376359745fb5089a6adab8f039c8588427eb7e",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "e594ed6156850d90946b5a5acf41066dc425f34d4a905389c0fb5bb97c222dda",
+      "undefined_symbols": []
+    },
+    {
+      "unit": "native-file-denial",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/tools/jsc_dihos/FileSystemDihOS.cpp",
+      "source_sha256": "e2d4c0382b3cea54b33a12b18505ba46049336b711d56a89a803b26750878e52",
+      "compiled": true,
+      "errors": [],
+      "flags_origin": "actual CMake target command",
+      "object_sha256": "d2ac4ff1edd911481df820ad082e68230bb933a14d05aaf7642427601f213a1d",
+      "undefined_symbols": [
+        "_ZN3WTF10StringImpl11reverseFindEDsm",
+        "_ZN3WTF10StringImpl17s_emptyAtomStringE",
+        "_ZN3WTF10StringImpl7destroyEPS0_",
+        "_ZN3WTF10StringImpl9substringEjj",
+        "_ZN3WTF14FileSystemImpl10FileHandleC1EOS1_",
+        "_ZN3WTF14FileSystemImpl10FileHandleC1Ev",
+        "_ZN3WTF14FileSystemImpl10FileHandleD1Ev",
+        "_ZN3WTF14FileSystemImpl40lastComponentOfPathIgnoringTrailingSlashERKNS_6StringE",
+        "_ZN3WTF20tryFastCompactMallocEm",
+        "_ZN3WTF6StringC1ENSt3__14spanIKDsLm18446744073709551615EEE",
+        "_ZN3WTF6StringC1ENSt3__14spanIKDuLm18446744073709551615EEE",
+        "_ZN3WTF6StringC1ENSt3__14spanIKhLm18446744073709551615EEE",
+        "_ZNK3WTF10StringView8endsWithEDs",
+        "_ZNK3WTF6String4utf8ENS_14ConversionModeE",
+        "abort",
+        "dihos_user_libcxx_abort",
+        "memchr",
+        "memcpy",
+        "strlen"
+      ]
+    }
+  ],
+  "build_step": {
+    "label": "engine-build",
+    "argv": [
+      "cmake",
+      "--build",
+      "/home/joshu/.cache/dihos-jsc-target/build-207f2e9c9649",
+      "--target",
+      "WTF",
+      "--parallel",
+      "2",
+      "--",
+      "-k",
+      "0"
+    ],
+    "exit_code": 0,
+    "seconds": 0.248,
+    "log": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/jsc-dihos/engine-build.log",
+    "log_sha256": "8c35b1682f73592d30612d7b0fabdb384fcfff35cb5a076cb48b85b1368aa794"
+  },
+  "date": "2026-10-30",
+  "guest_validated": false,
+  "scope": "Complete native WTF support-library compilation; not a JSC executable or whole-library runtime test"
+}

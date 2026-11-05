@@ -1,0 +1,40 @@
+<div id="css-allocation-result" style="position:absolute;left:600px;top:330px;width:20px;height:20px;background:#ff0000"></div>
+<svg id="css-size-icon" viewBox="0 0 24 24" style="position:absolute;left:560px;top:380px;width:100%;height:auto"><path d="M2 2H22V22H2Z"/></svg>
+<div id="css-size-menu" style="position:absolute;left:560px;top:410px">Language menu</div>
+<script>
+addEventListener('load', function () {
+    const result = document.getElementById('css-allocation-result');
+    try {
+        // Larger than the captured 3.8 MB YouTube sheet. Its pessimistic token
+        // reservation exceeds the old 16 MiB guard but fits the bounded update.
+        const supported = document.createElement('style');
+        supported.textContent = ' '.repeat(4 * 1024 * 1024) + '#css-allocation-result{background:#24ac68 !important}#css-size-icon{width:24px!important;height:24px!important}#css-size-menu{display:none}';
+        document.head.appendChild(supported);
+        if (getComputedStyle(result).backgroundColor !== 'rgb(36, 172, 104)') throw Error('larger CSS allocation failed');
+        const icon = document.getElementById('css-size-icon').getBoundingClientRect();
+        if (Math.abs(icon.width - 24) > 0.01 || Math.abs(icon.height - 24) > 0.01) throw Error('large stylesheet SVG sizing failed');
+        if (getComputedStyle(document.getElementById('css-size-menu')).display !== 'none') throw Error('large stylesheet menu visibility failed');
+        // The token reservation now exceeds the explicit parser allowance.
+        // It must reject this input, not dereference a null tokenizer.
+        const huge = ' '.repeat(7 * 1024 * 1024);
+        const rejected = document.createElement('style');
+        rejected.textContent = huge + '#css-allocation-result{background:red !important}';
+        document.head.appendChild(rejected);
+        const detached = document.createElement('div');
+        detached.setAttribute('style', huge + 'color:red');
+        detached.style.cssText = huge + 'color:red';
+        detached.style.setProperty('--oversized', huge + 'red');
+        detached.style.setProperty('background-image', huge + 'url(example.invalid)');
+        let rejectedRule = false;
+        try { supported.sheet.insertRule(huge + '.ignored{color:red}', 0); } catch (e) { rejectedRule = e.name === 'SyntaxError'; }
+        if (!rejectedRule) throw Error('oversized rule admitted');
+        if (getComputedStyle(result).backgroundColor !== 'rgb(36, 172, 104)') throw Error('rejected sheet changed prior style');
+        window.cssAllocationPassed = true;
+        console.error('CSS large sheet: 4 MiB rules, 24px SVG, hidden menu and bounded rejection OK');
+        console.error('CSS allocation fixture passed');
+    } catch (e) {
+        result.style.setProperty('background', 'red', 'important');
+        console.error('CSS allocation fixture: ' + e.message);
+    }
+});
+</script>

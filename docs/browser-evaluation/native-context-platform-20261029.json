@@ -1,0 +1,201 @@
+{
+  "date": "2026-10-29",
+  "scope": "Owned native thread-context/platform services and actual WTF clocks/synchronization; not a runnable JS engine",
+  "qemu_validated": true,
+  "hyperv_validated": false,
+  "engine_built": false,
+  "full_wtf_thread_object_runtime_validated": false,
+  "guest_updated": false,
+  "sources": {
+    "kernel/process/dihos_user_runtime.c": "3be8d766ace2c66641010de5c343eafa6ffc9495c6ff248d0cf98c0fe4da7466",
+    "kernel/process/dihos_user_threads.inc": "f059d9040d3b444fa9c1de8289830c14ac9744dbcb32be475a140be61445c59e",
+    "kernel/include/process/dihos_user_runtime.h": "a537ecff39a81e5747c5001dfe4307496f43b52367ae3f5cc2582282a9277b16",
+    "kernel/process/dihos_user_sacx.c": "65144fd631a9fd4b617de05a6cb2d40debc92bb2d5c93a6ddaab2cdb63df869a",
+    "kernel/system/dihos_wallclock.inc": "22fe234f01b9cbd9693f950dc6b57df1b79c6d5b019d4f1aaed036d00d2b0347",
+    "kernel/include/system/dihos_time.h": "30ee5e6ce187e2a1e58b70eb99b3fd0ca5bd3d955222db2e8e0d79a6419a3a9f",
+    "sdk/sacx/include/sacx_user_syscall.h": "c0589121d7c5da8605224915af528ff49a58eae3800e7c59c64c83b48e3022a3",
+    "sdk/sacx/include/sacx_user_thread_context.h": "e1a9c439ac0a34e6a1c36b1a43c00d48ebe19c8e3301ed327889b2f9c2f7f621",
+    "sdk/sacx/include/sacx_user_threads.h": "3f1f59aad6a9c1c6dc91512e604855bdb6ee46b6335ce5b8767d86bc6d89e0c3",
+    "sdk/sacx/user_runtime/fenv.cpp": "56e86a157bce079331e6b89f22c8b92e57170c8a82aa37700e13c9068f82320a",
+    "sdk/sacx/freestanding/include/fenv.h": "74155d979476954c7f6366bbd3bf395fe201c35f7edb90ee373c8e70de3b2019",
+    "sdk/sacx/user_runtime/runtime.cpp": "f17ac7941fc0b7889c34e36b0fbb24689a9a5fd5408476321b85addf39b65785",
+    "tools/user_context_program.cpp": "914d092fa70aa56c12457c28426759f2115cfa436c4579f142832aed498e6c6e",
+    "tools/user_platform_program.cpp": "dc5d5bfb3c4e66e7d38b718f46985eb81bd028be81ee611ed995a93a6cbe841a",
+    "tools/user_runtime_qemu_tests.c": "464265ec029f129e3118354350c5a56d152791461b74695194f8f1fdd2f1a4f8",
+    "tools/jsc_dihos/feature-main.cpp": "304867b45968d86e5307582a2b9990d403501cb1741af2e725b618fba858ad11",
+    "sdk/sacx/user_runtime/time.cpp": "70523e9fc67990c2955ca6892074e63bcf3e5075dcdbf4bf5f25b855890c565d",
+    "tools/user_calendar_program.cpp": "19bcabbc8b1a620b67153b8980feff800b5925bb71bce93b50852464181f6ec4",
+    "tools/user_calendar_vectors.inc": "fad35d8598046b0c271f39f68efe33ec57d6a4684dc53e43fd144fda595f591c",
+    "tools/generate_user_calendar_vectors.py": "bdd125103020b130f62418c99b0137dd818cdeb68b8fcdcb50ccdd314c41755f",
+    "tools/user_webkit_sync_program.cpp": "06cd469a1f84e5e3ac2e3a73d5f1a9100e4198ae9fcf950e6e0af6b6f3635999",
+    "tools/build_webkit_sync_test.py": "6a5e9dcc493e4076e4560e237a8ecfa4fc5e40854086b3ce93a3162453e55a3d"
+  },
+  "qemu_log_sha256": "0e93e544f49bf802656c1d3f0a4d7cc89492cdab7c9a55bf6d2a0eb7fe7c44a8",
+  "qemu_kernel_sha256": "b62c4cda66eaf7275438ae68d30ccd5434beee290f4621d112ddda12d26c4f41",
+  "passes": [
+    "PASS: 100 timer preemptions of an API-free EL0 loop; GPR/SIMD/FP/TLS and kernel root restored",
+    "PASS: existing synchronous EL0 entry/exit uses the shared vector correctly",
+    "PASS: user exit, guard fault, kernel access fault and resumable sleep syscall",
+    "PASS: all owned process pages reclaimed; kernel remains running after user faults",
+    "PASS: owned backing RX/RW protection, both stack guards and unchanged kernel mappings",
+    "PASS: owned heap quota, zeroing, guards, foreign/interior/double free rejection, transactional failures and hardware NX",
+    "PASS: userspace SACX function table crosses versioned syscall boundary; checked buffers, clock, log, yield, sleep and exit",
+    "PASS: EL0 SACX heap wrappers, page protection, repeated zeroed reuse, exit/fault/cancel cleanup",
+    "PASS: freestanding C++ startup, RELATIVE relocations into RO data, constructors/destructors, initialized pointers, virtual dispatch and SACX new/delete",
+    "PASS: userspace TLSF arena: 1024 objects in one pool, aligned new/alloc, calloc/realloc, eight-pool exhaustion and trim",
+    "PASS: pinned target libc++ containers, strings, algorithms, ownership, bounds hardening and isolated abort cleanup",
+    "PASS: native threads/TLS, process-local timed join/wait/wake, shared allocator contention, worker faults, parked cancellation and OOM cleanup",
+    "PASS: three API-free worker loops preempt while main sleeps, resumes and joins; kernel regains control",
+    "PASS: C++ local static contention, guard abort/retry, recursive-init isolation, TLS destructor ordering/re-registration, explicit thread exit, bounded overflow and concurrent finalization",
+    "PASS: standard synchronization completes with fast and guest-frame-paced syscall scheduling",
+    "PASS: libc++ SACX mutex/recursive mutex/call_once, multi-lock contention, condition broadcast/timeout/relock and invalid-operation isolation",
+    "PASS: standard C++ threads, owned callbacks/arguments, moves, IDs, sleep/clock, TLS keys/destructors, exit notifications, generation reuse and isolated lifecycle failures",
+    "PASS: nonblocking entropy syscall, consumed test-only boot seed, protected output rejection and repeated EL0 cleanup",
+    "PASS: actual native bmalloc/WTF random adapters: fail-closed unseeded, seeded output and isolated cleanup",
+    "PASS: native VM alignment/guards, zeroing, decommit/recommit, protection, concurrent registry and isolated hardware faults",
+    "PASS: firmware-anchored UTC, FP rounding inheritance/isolation, 1 MiB guarded stacks and 100 detached-thread reclaims",
+    "PASS: actual C, C++ main() and C++ main(argc,argv) bridge entry points execute in EL0",
+    "PASS: real stopped-thread contexts, owned inspection, wait/notification recovery, inspector exit and cancellation",
+    "PASS: actual native WTF synchronization, TLS destructors, timed waits, six joins and invalid-unlock containment",
+    "PASS: actual pinned bmalloc and native WTF OSAllocator adapters execute in EL0 with repeated cleanup",
+    "PASS: native libc++abi RTTI in EL0: virtual diamond, cross-cast, null/private rejection, type identity and repeated cleanup",
+    "PASS: incremental 20 MiB ELF, indexed relocations, large zeroed BSS/heap, 8 MiB malloc, RO protection and cancellation in every admission phase",
+    "PASS: compiled ELF programs: initialized data/BSS, owned bytes, preemption, sleep, fault isolation and allocation failure cleanup",
+    "PASS: fully mapped firmware admission with owned backing aliases",
+    "PASS: round-robin tasks, nonblocking sleep, fault isolation, loop cancellation, exhausted slots, allocation failures and 100 create/close cycles"
+  ],
+  "programs": {
+    "context": {
+      "bytes": 50376,
+      "sha256": "4f7765b965ec38feea1f7d8b9ef620ca0021df8397b373a14cf7961f3cb8650e"
+    },
+    "context_cancel": {
+      "bytes": 45984,
+      "sha256": "322e9d0bb7aaaab87253b2c8b925511571db9881194fd5d8f046332db85e37c3"
+    },
+    "platform": {
+      "bytes": 45896,
+      "sha256": "41bd7a33547aec10b98d162c3c9f2875282a48879297dff0356c73c0f3e944a0"
+    },
+    "calendar": {
+      "bytes": 86928,
+      "sha256": "12eed8e825b0d8027415630b1d7a2ea2d45cadb4ca89aafd4dbf29a7ffd54450"
+    },
+    "feature-main-c": {
+      "bytes": 35960,
+      "sha256": "526c3d5f28f556bd458b677f4ac49539a0507e67940e869386053ceab205d354"
+    },
+    "feature-main-cpp0": {
+      "bytes": 35960,
+      "sha256": "8ba2fe3e737dbb534b5af23b3b8fa8060cf93d902d22b3e9af4de9c700234010"
+    },
+    "feature-main-cpp2": {
+      "bytes": 35960,
+      "sha256": "2825a55fe19511e1a4e3000656f30f5bfb805e81ac8532a271d3cf3801802ff6"
+    }
+  },
+  "real_utc_backend_in_webkit_fixture": true,
+  "missing_utc_exit": 193,
+  "context_repeats": 4,
+  "platform_repeats": 4,
+  "detached_reclaims_per_platform_run": 100,
+  "bridge_entry_statuses": [
+    98,
+    99,
+    100
+  ],
+  "webkit_adapters": {
+    "native_sources": {
+      "tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp": "714efb126f02782e650fd079c1b7e1ffd37f4426679b4141e49dc7d7b2e9410c",
+      "tools/jsc_dihos/ThreadingDihOS.cpp": "cadf8430267762f1d84fd59aeda8067dc11a681fce680d8d075f72397f6a4b38",
+      "tools/jsc_dihos/CurrentTimeDihOS.cpp": "d0730969aceb2a0729fc72cdb204b5353866bf111f5b18b421dcb3eb5be873b4"
+    },
+    "runtime_sha256": "cf404d328832cfd8d0f4c86efe6ca9c6b11587dad9e047a389757786217b17fd",
+    "pinned_header_sha256": "ff05611b4f981a7b0fc7adec7eaf49f9749d55340f19cc33d3d50a0247d1aa47",
+    "fixture_wall_clock_only": false,
+    "executed_adapters": [
+      "ThreadingPrimitivesDihOS",
+      "CurrentTimeDihOS"
+    ],
+    "full_wtf_thread_object_tested": false,
+    "fixture_source_sha256": "93fded9bb912f5f16d8a1c252bc9500cd6f3c8efb423632dcf52fc8302ed26b3",
+    "builder_sha256": "d65bb093b99f0be4ed1562c22744e82b7675795744b59767cb24480e3e7879f9",
+    "port_edits_sha256": "73b1bb535879962f6d5f89a758fddb54a97d987a632f8befa77ead192bb9f64b",
+    "source_version": "2.54.2",
+    "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+    "qemu_validated": true,
+    "guest_validated": false,
+    "programs": {
+      "sync": {
+        "sha256": "3f434eb69d70a9fcf26129830652f190f20cc4753abeed48e8d5b86986cf172a",
+        "bytes": 42656,
+        "undefined_symbols": []
+      },
+      "invalid": {
+        "sha256": "125b9ca53bd2e3993730d1ccaa9b5d38b4ac8edc5a1c164f95047b053d3e4d22",
+        "bytes": 37440,
+        "undefined_symbols": []
+      },
+      "invalid_key": {
+        "sha256": "4aabd394ef1b7e636e6460ed2bffdcac57a4e0864c6f36e70c1aa145340e3637",
+        "bytes": 37352,
+        "undefined_symbols": []
+      }
+    }
+  },
+  "negative_main_dependency_log_sha256": "b7ca11780e173abae97e742ce076917511218d0fbff61dc76dd6274ca26dddeb",
+  "webkit_sync": {
+    "native_sources": {
+      "tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp": "b3b2c56f2cbfe3e3a6e39c085307f31d9b7183b0308df75844ef445abfe98d46",
+      "tools/jsc_dihos/ThreadingDihOS.cpp": "1afd7992f118bde32ff30ec147b51b9046260c285ab52ff7ab735e6b3574feb4",
+      "tools/jsc_dihos/CurrentTimeDihOS.cpp": "3254646bc98eed2b4241ec912a376359745fb5089a6adab8f039c8588427eb7e"
+    },
+    "runtime_sha256": "b63e1c578b2f0f65fe1e9c9bd1e99c87426e751c391552cbb1e50e077e86e4af",
+    "pinned_header_sha256": "ff05611b4f981a7b0fc7adec7eaf49f9749d55340f19cc33d3d50a0247d1aa47",
+    "fixture_wall_clock_only": false,
+    "identity_header_sha256": "8ac5120f5bfef8dcccc7c1ad2e36ec983da5e3066404a53961a8b5c60e71218a",
+    "executed_adapters": [
+      "ThreadingPrimitivesDihOS",
+      "CurrentTimeDihOS",
+      "FileSystemDihOS",
+      "FileHandle"
+    ],
+    "native_file_sources": {
+      "tools/jsc_dihos/FileSystemDihOS.cpp": "e2d4c0382b3cea54b33a12b18505ba46049336b711d56a89a803b26750878e52"
+    },
+    "file_handle_source_sha256": "db19c0afdbe371a0549a5c5c3d955b9234a46f61e19f3189b55d272d11ab5381",
+    "full_wtf_thread_object_tested": false,
+    "fixture_source_sha256": "06cd469a1f84e5e3ac2e3a73d5f1a9100e4198ae9fcf950e6e0af6b6f3635999",
+    "builder_sha256": "6a5e9dcc493e4076e4560e237a8ecfa4fc5e40854086b3ce93a3162453e55a3d",
+    "port_edits_sha256": "711768d0422e80f361ec12dd7878b6178a9f0eb5cfd96ab6d6001ada0252bc66",
+    "source_version": "2.54.2",
+    "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+    "qemu_validated": true,
+    "guest_validated": false,
+    "programs": {
+      "sync": {
+        "sha256": "899672268610f988f3136caee16685d9537c89bfea57e81534bbcc57cfa17ba2",
+        "bytes": 45008,
+        "undefined_symbols": []
+      },
+      "invalid": {
+        "sha256": "e90b70af6e324f80d9b9c1fbfa83750003453e0035247b93dd3da186eb08d792",
+        "bytes": 39728,
+        "undefined_symbols": []
+      },
+      "invalid_key": {
+        "sha256": "761df0b747f4be85099d8b62ad3eea57884d867ad3a2c306bf8ad89d3e541b5a",
+        "bytes": 39640,
+        "undefined_symbols": []
+      }
+    }
+  },
+  "calendar_vectors": 1084,
+  "calendar_repeats": 4,
+  "simultaneously_stopped_mutators": 2,
+  "actual_file_handle_denial_tested": true,
+  "own_process_identity_tested": true,
+  "protected_working_kernel_sha256": "5ad373f3bab1d2346bdbf3ac096c128012be3842cd25fc1305bbc109ff01fc9d",
+  "rebuild_byte_identical_to_executed_fixture": true,
+  "rebuild_note": "Configuration-header correction rebuilt all three fixture ELFs byte-identically to the binaries embedded in the recorded passing QEMU kernel; no redundant execution was needed."
+}

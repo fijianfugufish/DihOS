@@ -1,0 +1,14 @@
+{
+  "purpose": "Test-only certificate chains; not trusted by production",
+  "valid_time": 1793653059,
+  "expired_time": 1825189059,
+  "not_yet_valid_time": 1793480259,
+  "files": {
+    "rsa-root.der": "c667fcadc8d091a971c51fecd44a1f2be369c69c6e4c6836437f62ffc4125700",
+    "ec-root.der": "6ef6695e5d87a92c778b66c3f9231b89e7487a2177b64ff093bd78eed363a22b",
+    "intermediate.der": "2bd50c6b693131bc34fe9d59aca4ff8361307787ad2ce48588a4e0a356ab46da",
+    "rsa-leaf.der": "48e42bcee126d609591bc47fc1f75507911972cf3e004812b3e37a7cd762d2a1",
+    "ec-leaf.der": "f5dbbf8183c31350fefc8caeca67a00dfc39c86d0ee9ea5b1185fa416a64af5c",
+    "test-roots.inc": "2e2fa124af2925e198b7b16d04855d6a1b271bbfc9933342041a98d4f39d5a91"
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "date": "2026-10-30",
+  "scope": "Native EL0 resource service and selected actual WebKit platform adapters",
+  "qemu_validated": true,
+  "hyperv_validated": false,
+  "native_hardware_validated": false,
+  "engine_executed": false,
+  "full_wtf_thread_object_runtime_validated": false,
+  "guest_updated": false,
+  "passes": [
+    "PASS: 100 timer preemptions of an API-free EL0 loop; GPR/SIMD/FP/TLS and kernel root restored",
+    "PASS: existing synchronous EL0 entry/exit uses the shared vector correctly",
+    "PASS: user exit, guard fault, kernel access fault and resumable sleep syscall",
+    "PASS: all owned process pages reclaimed; kernel remains running after user faults",
+    "PASS: owned backing RX/RW protection, both stack guards and unchanged kernel mappings",
+    "PASS: owned heap quota, zeroing, guards, foreign/interior/double free rejection, transactional failures and hardware NX",
+    "PASS: userspace SACX function table crosses versioned syscall boundary; checked buffers, clock, log, yield, sleep and exit",
+    "PASS: EL0 SACX heap wrappers, page protection, repeated zeroed reuse, exit/fault/cancel cleanup",
+    "PASS: freestanding C++ startup, RELATIVE relocations into RO data, constructors/destructors, initialized pointers, virtual dispatch and SACX new/delete",
+    "PASS: userspace TLSF arena: 1024 objects in one pool, aligned new/alloc, calloc/realloc, eight-pool exhaustion and trim",
+    "PASS: pinned target libc++ containers, strings, algorithms, ownership, bounds hardening and isolated abort cleanup",
+    "PASS: native threads/TLS, process-local timed join/wait/wake, shared allocator contention, worker faults, parked cancellation and OOM cleanup",
+    "PASS: three API-free worker loops preempt while main sleeps, resumes and joins; kernel regains control",
+    "PASS: C++ local static contention, guard abort/retry, recursive-init isolation, TLS destructor ordering/re-registration, explicit thread exit, bounded overflow and concurrent finalization",
+    "PASS: standard synchronization completes with fast and guest-frame-paced syscall scheduling",
+    "PASS: libc++ SACX mutex/recursive mutex/call_once, multi-lock contention, condition broadcast/timeout/relock and invalid-operation isolation",
+    "PASS: standard C++ threads, owned callbacks/arguments, moves, IDs, sleep/clock, TLS keys/destructors, exit notifications, generation reuse and isolated lifecycle failures",
+    "PASS: nonblocking entropy syscall, consumed test-only boot seed, protected output rejection and repeated EL0 cleanup",
+    "PASS: actual native bmalloc/WTF random adapters: fail-closed unseeded, seeded output and isolated cleanup",
+    "PASS: native VM alignment/guards, zeroing, decommit/recommit, protection, concurrent registry and isolated hardware faults",
+    "PASS: firmware-anchored UTC, FP rounding inheritance/isolation, 1 MiB guarded stacks and 100 detached-thread reclaims",
+    "PASS: actual C, C++ main() and C++ main(argc,argv) bridge entry points execute in EL0",
+    "PASS: real stopped-thread contexts, owned inspection, wait/notification recovery, inspector exit and cancellation",
+    "PASS: actual native WTF synchronization, TLS destructors, timed waits, six joins and invalid-unlock containment",
+    "PASS: actual pinned bmalloc and native WTF OSAllocator adapters execute in EL0 with repeated cleanup",
+    "PASS: native libc++abi RTTI in EL0: virtual diamond, cross-cast, null/private rejection, type identity and repeated cleanup",
+    "PASS: incremental 20 MiB ELF, indexed relocations, large zeroed BSS/heap, 8 MiB malloc, RO protection and cancellation in every admission phase",
+    "PASS: compiled ELF programs: initialized data/BSS, owned bytes, preemption, sleep, fault isolation and allocation failure cleanup",
+    "PASS: fully mapped firmware admission with owned backing aliases",
+    "PASS: round-robin tasks, nonblocking sleep, fault isolation, loop cancellation, exhausted slots, allocation failures and 100 create/close cycles"
+  ],
+  "qemu_log_sha256": "0e93e544f49bf802656c1d3f0a4d7cc89492cdab7c9a55bf6d2a0eb7fe7c44a8",
+  "qemu_kernel_sha256": "5bd94aa3ff2888d403a335beddcf308f28d9469729c691b7d44b492c6ca54680",
+  "sources": {
+    "sdk/sacx/include/sacx_user_resources.h": "25ee1df53f50592f2b123a9e67c54956b117ad6df7c126fca0097d2a74e98ce8",
+    "sdk/sacx/include/sacx_user_syscall.h": "5fa5202136dc38e08f94f029d0a547735fc1a6e375f20d6856daad80f531ef3f",
+    "sdk/sacx/user_runtime/runtime.cpp": "6e38b8838fbb620a20ce8ddbf22ee23438a16147af6c2acc4a5716a3cece2cc6",
+    "kernel/process/dihos_user_runtime.c": "b891006889407ef598123a34d72beafb2dc12a48fdeffe99a8c82f9bc1283fdf",
+    "kernel/process/dihos_user_sacx.c": "314777d6e68c1153e782ca5ae1bf6114669030142c1d967834500b290903f528",
+    "kernel/include/process/dihos_user_sacx.h": "7be07ba18d0ad5271db6b68c0996d9c35340fde7c0683641ae2ae7e2a350767b",
+    "kernel/process/dihos_user_memory.c": "7e2fd22095d9282a9af0bb778799c64c59fe199544bc9649ca639bd4d4b2ca92",
+    "tools/user_platform_program.cpp": "0dc4d871ac712dbc38256dfe1056ed89ab37c23498d5074429dd904a81b62c8f",
+    "tools/user_webkit_sync_program.cpp": "7c0c955859b63087171e5c799cf453c6b8efc9a83aa041cd4041031ad6a51340",
+    "tools/user_webkit_random_program.cpp": "fd133dc72e473b094507c032b7993fd7765e3c0bf0907709124acf21013035de",
+    "tools/user_runtime_qemu_tests.c": "464265ec029f129e3118354350c5a56d152791461b74695194f8f1fdd2f1a4f8",
+    "tools/jsc_dihos/PlatformDihOS.cpp": "43732fd579e175338f8f07d2bf1670ae4ac6f8c0ff0490150938f7789b1f97a1",
+    "tools/jsc_dihos/ResourcesDihOS.cpp": "59f038f9afff93a82c3f90c180e93321a80dfed250b1bc564fba74a5d62222ad",
+    "tools/jsc_dihos/RandomDeviceDihOS.cpp": "48dc70963ef1ce76d10f1e76cc22d7ee64b9b132e1f6c96b33690f3891aead48"
+  },
+  "programs": {
+    "context": {
+      "sha256": "c6f3198caeab9a01668aa953c50a85a9355db39c341a087d621dc09fe7e16306",
+      "bytes": 50408
+    },
+    "context_cancel": {
+      "sha256": "6f93356ba2a879c593fd695de139bd699e9e9eade66775b546dce8fb2a1e258c",
+      "bytes": 46016
+    },
+    "platform": {
+      "sha256": "393eea1aeddcf0b106e76a19d16c76fa2b224ed118451a150f885fc277d7a9fa",
+      "bytes": 50112
+    },
+    "calendar": {
+      "sha256": "8979c2b5180797d89daf764a31539e6c00fdc8b2b5522864bbd90aba56ea80ce",
+      "bytes": 86960
+    }
+  },
+  "user-webkit-sync": {
+    "native_sources": {
+      "tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp": "b3b2c56f2cbfe3e3a6e39c085307f31d9b7183b0308df75844ef445abfe98d46",
+      "tools/jsc_dihos/ThreadingDihOS.cpp": "1afd7992f118bde32ff30ec147b51b9046260c285ab52ff7ab735e6b3574feb4",
+      "tools/jsc_dihos/CurrentTimeDihOS.cpp": "3254646bc98eed2b4241ec912a376359745fb5089a6adab8f039c8588427eb7e"
+    },
+    "runtime_sha256": "861c786297e735e8d6989bd8cb139cecfe43fa01c263560bd5b59190677423a6",
+    "pinned_header_sha256": "ff05611b4f981a7b0fc7adec7eaf49f9749d55340f19cc33d3d50a0247d1aa47",
+    "fixture_wall_clock_only": false,
+    "identity_header_sha256": "8ac5120f5bfef8dcccc7c1ad2e36ec983da5e3066404a53961a8b5c60e71218a",
+    "executed_adapters": [
+      "ThreadingPrimitivesDihOS",
+      "CurrentTimeDihOS",
+      "FileSystemDihOS",
+      "FileHandle",
+      "PlatformDihOS (identity, locale, page size)",
+      "ResourcesDihOS (CPUTime and private footprint)"
+    ],
+    "native_platform_sources": {
+      "tools/jsc_dihos/PlatformDihOS.cpp": "43732fd579e175338f8f07d2bf1670ae4ac6f8c0ff0490150938f7789b1f97a1",
+      "tools/jsc_dihos/ResourcesDihOS.cpp": "59f038f9afff93a82c3f90c180e93321a80dfed250b1bc564fba74a5d62222ad"
+    },
+    "native_file_sources": {
+      "tools/jsc_dihos/FileSystemDihOS.cpp": "e2d4c0382b3cea54b33a12b18505ba46049336b711d56a89a803b26750878e52"
+    },
+    "file_handle_source_sha256": "db19c0afdbe371a0549a5c5c3d955b9234a46f61e19f3189b55d272d11ab5381",
+    "full_wtf_thread_object_tested": false,
+    "fixture_source_sha256": "7c0c955859b63087171e5c799cf453c6b8efc9a83aa041cd4041031ad6a51340",
+    "builder_sha256": "7ffb80f9dcbaec03349a14b213fed97db008dba1042c654c53694f1559920e60",
+    "port_edits_sha256": "56a60109072fcec42125b3f1dafa520c9756ae6095c6734aa44945cd93f3c868",
+    "source_version": "2.54.2",
+    "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+    "qemu_validated": true,
+    "guest_validated": false,
+    "programs": {
+      "sync": {
+        "sha256": "5603ead25f2b297b3a53f159dac3c7c0f6d371010c3282870b17305da79e9d6b",
+        "bytes": 46048,
+        "undefined_symbols": []
+      },
+      "invalid": {
+        "sha256": "5320f26b2a784a03dd9f7116d4568e3886e20457470f4224f859d953b4ea1b73",
+        "bytes": 44872,
+        "undefined_symbols": []
+      },
+      "invalid_key": {
+        "sha256": "16d2a3b11ade03ed078ee8fe7934129c69d7bb6de2589d1aedc7f5c7459b2fcf",
+        "bytes": 40688,
+        "undefined_symbols": []
+      }
+    }
+  },
+  "user-webkit-random": {
+    "native_sources": {
+      "tools/jsc_dihos/RandomDihOS.cpp": "4cf8e508d2ab4acddb30c3807cf2da05661ea7f1eea343af85e7714398624f20",
+      "tools/jsc_dihos/BmallocRandomDihOS.cpp": "7e951b2d31a8c7b20a13caf2af73522d0644227b39c71999827c047ae27620f3",
+      "tools/jsc_dihos/RandomDeviceDihOS.cpp": "48dc70963ef1ce76d10f1e76cc22d7ee64b9b132e1f6c96b33690f3891aead48"
+    },
+    "runtime_sha256": "861c786297e735e8d6989bd8cb139cecfe43fa01c263560bd5b59190677423a6",
+    "fixture_source_sha256": "fd133dc72e473b094507c032b7993fd7765e3c0bf0907709124acf21013035de",
+    "builder_sha256": "57fe81da534bb7f904edfc329595b0f50903b2af332d8e7ed4a32f2cb66509d6",
+    "port_edits_sha256": "56a60109072fcec42125b3f1dafa520c9756ae6095c6734aa44945cd93f3c868",
+    "qemu_validated": true,
+    "guest_validated": false,
+    "programs": {
+      "bmalloc": {
+        "sha256": "a756f9336ea0bd81fae93ea980d57334a7c638408d318b42a9375a6f62554d4e",
+        "bytes": 37248,
+        "undefined_symbols": []
+      },
+      "wtf": {
+        "sha256": "9e44921dd0a687e65dc8e1372e1b893813908b7e59927aedbb1161476c631ed3",
+        "bytes": 37248,
+        "undefined_symbols": []
+      }
+    }
+  },
+  "resource_abi": {
+    "operation": 24,
+    "version": 1,
+    "bytes": 80,
+    "grants": [
+      "clock",
+      "memory"
+    ],
+    "scope": "calling thread/process only"
+  },
+  "working_kernel_sha256": "5ad373f3bab1d2346bdbf3ac096c128012be3842cd25fc1305bbc109ff01fc9d"
+}

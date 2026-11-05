@@ -1,8 +1,15 @@
 param(
   [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path,
   [ValidateSet("Release","Debug")][string]$Config = "Release",
-  [switch]$BuildX64
+  [switch]$BuildX64,
+  [ValidateSet('WebCore','NetSurf')][string]$Engine='WebCore'
 )
+
+if ($Engine -eq 'WebCore') {
+  if ($BuildX64) {throw 'The WebCore port currently targets ARM64. Use -Engine NetSurf for the legacy x64 build.'}
+  & (Join-Path $PSScriptRoot 'build_webcore.ps1') -ProjectRoot $ProjectRoot -Config $Config
+  return
+}
 
 $netsurfRoot = Join-Path $ProjectRoot "third_party\netsurf-all-3.11"
 if (!(Test-Path -LiteralPath $netsurfRoot)) {
@@ -114,3 +121,5 @@ if ($BuildX64) { $args.BuildX64 = $true }
 
 & (Join-Path $ProjectRoot "build_sacx_app.ps1") @args
 if ($LASTEXITCODE) { throw "Dihscover SACX build failed" }
+@{engine='NetSurf';frontend_sha256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'build/sacx/Dihscover.sacx') -Algorithm SHA256).Hash.ToLowerInvariant()} |
+  ConvertTo-Json | Set-Content -Encoding UTF8 -LiteralPath (Join-Path $ProjectRoot 'build/sacx/Dihscover-engine.json')

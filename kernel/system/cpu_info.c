@@ -228,7 +228,7 @@ static void cpu_parse_madt(uint64_t rsdp_phys)
     const uint8_t *p;
     const uint8_t *end;
 
-    if (!h || h->length < sizeof(cpu_acpi_madt))
+    if (!h || h->length < sizeof(cpu_acpi_madt) || h->length > 1024u*1024u)
         return;
 
     madt = (const cpu_acpi_madt *)h;
@@ -253,9 +253,23 @@ static void cpu_parse_madt(uint64_t rsdp_phys)
                 out->flags = gicc->flags;
                 out->enabled = (gicc->flags & CPU_GICC_ENABLED) ? 1u : 0u;
                 out->mpidr = gicc->mpidr;
+                out->redistributor = gicc->gicr_base_address;
                 if (out->enabled)
                     ++g_cpu_info.enabled_count;
             }
+        } else if (entry->type == 0x0cu && entry->length >= 24u) {
+            /* MADT GIC distributor; read packed fields without alignment. */
+            uint64_t base=0u;
+            for(uint32_t n=0;n<8;++n)base|=(uint64_t)p[8+n]<<(n*8);
+            g_cpu_info.gic_distributor=base;
+            g_cpu_info.gic_version=p[20];
+        } else if (entry->type == 0x0eu && entry->length >= 16u) {
+            uint64_t base=0u;uint32_t bytes=0u;
+            for(uint32_t n=0;n<8;++n)base|=(uint64_t)p[4+n]<<(n*8);
+            for(uint32_t n=0;n<4;++n)bytes|=(uint32_t)p[12+n]<<(n*8);
+            /* The first region is a bounded discovery range. The timer
+             * selects the boot CPU by GICR_TYPER affinity, never index. */
+            if(!g_cpu_info.gic_redistributor){g_cpu_info.gic_redistributor=base;g_cpu_info.gic_redistributor_bytes=bytes;}
         }
 
         p += entry->length;
@@ -273,6 +287,17 @@ void cpu_info_init(uint64_t acpi_rsdp_phys)
     g_cpu_info.id_aa64isar0 = cpu_read_id_aa64isar0();
     g_cpu_info.id_aa64mmfr0 = cpu_read_id_aa64mmfr0();
     cpu_parse_madt(acpi_rsdp_phys);
+    for(uint32_t i=0;i<g_cpu_info.core_count;++i)
+        if((g_cpu_info.cores[i].mpidr&0xff00ffffffull)==(g_cpu_info.boot_mpidr&0xff00ffffffull) && g_cpu_info.cores[i].redistributor){
+            g_cpu_info.gic_redistributor=g_cpu_info.cores[i].redistributor;
+            g_cpu_info.gic_redistributor_bytes=0x20000u;
+            break;
+        }
+    const cpu_acpi_sdt *gtdt=cpu_acpi_find_table(acpi_rsdp_phys,"GTDT");
+    if(gtdt && gtdt->length>=72u && gtdt->length<=1024u*1024u){
+        const uint8_t *p=(const uint8_t*)gtdt;
+        for(uint32_t n=0;n<4;++n){g_cpu_info.virtual_timer_irq|=(uint32_t)p[64+n]<<(n*8);g_cpu_info.virtual_timer_flags|=(uint32_t)p[68+n]<<(n*8);}
+    }
     g_cpu_info.initialized = 1u;
 }
 

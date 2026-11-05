@@ -23,7 +23,7 @@ typedef struct
 
 typedef struct
 {
-    uint32_t version; // 2 adds the boot UTC clock at the end
+    uint32_t version; // 2 adds UTC, 3 adds the one-use firmware RNG seed
     uint32_t _pad;
     boot_fb fb;
     // (optional) UEFI memory map (raw copy)
@@ -87,4 +87,9 @@ typedef struct
     uint64_t boot_utc_seconds; /* Unix epoch, sampled before ExitBootServices */
     uint32_t boot_time_flags; /* bit 0 valid; bit 1 RTC timezone assumed UTC */
     uint32_t _pad_time;
+    /* Version 3 extension. Secret: consume and wipe before general allocation. */
+    uint8_t boot_rng_seed[48];
+    uint32_t boot_rng_flags; /* bit 0 valid, bit 1 raw algorithm */
+    uint32_t _pad_rng;
+    uint64_t boot_rng_status; /* EFI status only; never seed contents */
 } boot_info;

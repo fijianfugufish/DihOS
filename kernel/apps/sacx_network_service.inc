@@ -21,10 +21,13 @@ extern "C" void sacx_runtime_network_poll(void)
     /* App callbacks must never be reentered from the network continuation. */
     if (G_current_task) return;
     if (!G_net_active_slot && !G_net_background_active) {
-        const uint32_t count=SACX_MAX_TASKS*SACX_MAX_TASK_NET_REQUESTS;
+        const uint32_t legacy_count=SACX_MAX_TASKS*SACX_MAX_TASK_NET_REQUESTS;
+        const uint32_t count=legacy_count+USER_HTTP_SLOTS;
         for (uint32_t i=0;i<count;++i) {
             uint32_t index=(G_net_cursor+i)%count;
-            sacx_net_request_slot *slot=&G_tasks[index/SACX_MAX_TASK_NET_REQUESTS].net_requests[index%SACX_MAX_TASK_NET_REQUESTS];
+            sacx_net_request_slot *slot=index<legacy_count?
+                &G_tasks[index/SACX_MAX_TASK_NET_REQUESTS].net_requests[index%SACX_MAX_TASK_NET_REQUESTS]:
+                &G_user_http[index-legacy_count].request;
             if (!slot->used || slot->status!=SACX_NET_STATUS_QUEUED) continue;
             G_net_cursor=(index+1)%count;
             G_net_active_slot=slot;

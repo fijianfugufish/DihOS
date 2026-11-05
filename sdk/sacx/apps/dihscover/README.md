@@ -1,13 +1,19 @@
 # Dihscover
 
-Dihscover is the SACX browser shell for the NetSurf 3.11 engine. The active
-application contains only browser chrome and a DihOS-specific NetSurf front
-end. NetSurf owns HTML parsing, the DOM, CSS selection, layout, history, form
-handling, resource discovery, and page painting.
+Dihscover retains its existing SACX browser chrome in `main.cpp`. The default
+ARM64 build uses `webcore_backend.cpp` to connect those controls to the isolated
+WebCore renderer inside Dihscover's application bundle. See
+`docs/dihscover-webcore-integration.md` for build, deployment and validation.
+
+The NetSurf 3.11 backend remains available with `build.ps1 -Engine NetSurf`.
+With that backend, NetSurf owns HTML parsing, the DOM, CSS selection, layout,
+history, form handling, resource discovery and page painting. The backend
+interface retains its original names for source compatibility.
 
 ## DihOS front end
 
 - `main.cpp`: native SACX window, address bar, navigation controls, and input.
+- `webcore_backend.cpp`: existing UI callbacks connected to an isolated renderer.
 - `netsurf_backend.cpp`: NetSurf GUI operation tables, scheduler, bitmap store,
   font measurement, ARGB plotter, and the single composited page surface.
 - `netsurf_fetch.cpp`: asynchronous `http` and `https` fetcher backed by the

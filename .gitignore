@@ -28,3 +28,7 @@ cmds.md
 !tools/sacx_build_cache.ps1
 !tools/test_sacx_build_cache.ps1
 !tools/test_browser_binary.ps1
+!tools/test_user_runtime_qemu.ps1
+!tools/build_user_programs.ps1
+!tools/build_user_library.ps1
+!tools/build_user_sync.ps1

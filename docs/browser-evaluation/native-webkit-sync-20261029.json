@@ -1,0 +1,183 @@
+{
+  "date": "2026-10-29",
+  "scope": "Pinned native WTF synchronization in ARM64 EL0; not a runnable JavaScript engine",
+  "target": "aarch64-none-elf",
+  "adapter": {
+    "native_sources": {
+      "tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp": "714efb126f02782e650fd079c1b7e1ffd37f4426679b4141e49dc7d7b2e9410c"
+    },
+    "runtime_sha256": "577c18745c7659ba888c37afdac16966ea7643bee8463f17a16017cf534e5149",
+    "pinned_header_sha256": "ff05611b4f981a7b0fc7adec7eaf49f9749d55340f19cc33d3d50a0247d1aa47",
+    "fixture_wall_clock_only": true,
+    "fixture_source_sha256": "4453d566e69747475d3ce530440545549435154e74980d983573c87491c997d5",
+    "builder_sha256": "9fab25e51a211499ebd5847b23a666e99452381209b8fdce640b9337fa2ee4bc",
+    "port_edits_sha256": "ebfbff81e79253d2003e22d37d7cbc33bcb561444d97d852a575376f45ad77b4",
+    "source_version": "2.54.2",
+    "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+    "qemu_validated": true,
+    "guest_validated": false,
+    "programs": {
+      "sync": {
+        "sha256": "e0871760fc13e7e58cbb203e0e22ab9a23094b5b87ca21346b4cc492a80a4c2e",
+        "bytes": 41968,
+        "undefined_symbols": []
+      },
+      "invalid": {
+        "sha256": "4ca8928a27322d57228a6fc1f3b136ddfc14d7423bbebf0d00580b319c9cdb71",
+        "bytes": 36680,
+        "undefined_symbols": []
+      },
+      "invalid_key": {
+        "sha256": "6a7fd86269d228d72f7fa9754c2fe9c03dde6ec0a222ee0a52d11569e99aaee2",
+        "bytes": 36488,
+        "undefined_symbols": []
+      }
+    },
+    "qemu_log_sha256": "7bc2c96841a3a084d2420657217b8a0478676757327171a0eab1b40e6384a4ea"
+  },
+  "configure_succeeded": true,
+  "engine_built": false,
+  "thread_register_inspection_implemented": false,
+  "shipping_browser_changed": false,
+  "vhdx_updated": false,
+  "protected_kernel_sha256": "5ad373f3bab1d2346bdbf3ac096c128012be3842cd25fc1305bbc109ff01fc9d",
+  "qemu_kernel_sha256": "be5a0a1bb749dcc1181f1587ae944c4a5f7dafd297bf449ba65ef2753f7a0723",
+  "qemu_log_sha256": "7bc2c96841a3a084d2420657217b8a0478676757327171a0eab1b40e6384a4ea",
+  "qemu_passes": [
+    "PASS: 100 timer preemptions of an API-free EL0 loop; GPR/SIMD/FP/TLS and kernel root restored",
+    "PASS: existing synchronous EL0 entry/exit uses the shared vector correctly",
+    "PASS: user exit, guard fault, kernel access fault and resumable sleep syscall",
+    "PASS: all owned process pages reclaimed; kernel remains running after user faults",
+    "PASS: owned backing RX/RW protection, both stack guards and unchanged kernel mappings",
+    "PASS: owned heap quota, zeroing, guards, foreign/interior/double free rejection, transactional failures and hardware NX",
+    "PASS: userspace SACX function table crosses versioned syscall boundary; checked buffers, clock, log, yield, sleep and exit",
+    "PASS: EL0 SACX heap wrappers, page protection, repeated zeroed reuse, exit/fault/cancel cleanup",
+    "PASS: freestanding C++ startup, RELATIVE relocations into RO data, constructors/destructors, initialized pointers, virtual dispatch and SACX new/delete",
+    "PASS: userspace TLSF arena: 1024 objects in one pool, aligned new/alloc, calloc/realloc, eight-pool exhaustion and trim",
+    "PASS: pinned target libc++ containers, strings, algorithms, ownership, bounds hardening and isolated abort cleanup",
+    "PASS: native threads/TLS, process-local timed join/wait/wake, shared allocator contention, worker faults, parked cancellation and OOM cleanup",
+    "PASS: three API-free worker loops preempt while main sleeps, resumes and joins; kernel regains control",
+    "PASS: C++ local static contention, guard abort/retry, recursive-init isolation, TLS destructor ordering/re-registration, explicit thread exit, bounded overflow and concurrent finalization",
+    "PASS: standard synchronization completes with fast and guest-frame-paced syscall scheduling",
+    "PASS: libc++ SACX mutex/recursive mutex/call_once, multi-lock contention, condition broadcast/timeout/relock and invalid-operation isolation",
+    "PASS: standard C++ threads, owned callbacks/arguments, moves, IDs, sleep/clock, TLS keys/destructors, exit notifications, generation reuse and isolated lifecycle failures",
+    "PASS: nonblocking entropy syscall, consumed test-only boot seed, protected output rejection and repeated EL0 cleanup",
+    "PASS: actual native bmalloc/WTF random adapters: fail-closed unseeded, seeded output and isolated cleanup",
+    "PASS: native VM alignment/guards, zeroing, decommit/recommit, protection, concurrent registry and isolated hardware faults",
+    "PASS: actual native WTF synchronization, TLS destructors, timed waits, six joins and invalid-unlock containment",
+    "PASS: actual pinned bmalloc and native WTF OSAllocator adapters execute in EL0 with repeated cleanup",
+    "PASS: native libc++abi RTTI in EL0: virtual diamond, cross-cast, null/private rejection, type identity and repeated cleanup",
+    "PASS: incremental 20 MiB ELF, indexed relocations, large zeroed BSS/heap, 8 MiB malloc, RO protection and cancellation in every admission phase",
+    "PASS: compiled ELF programs: initialized data/BSS, owned bytes, preemption, sleep, fault isolation and allocation failure cleanup",
+    "PASS: fully mapped firmware admission with owned backing aliases",
+    "PASS: round-robin tasks, nonblocking sleep, fault isolation, loop cancellation, exhausted slots, allocation failures and 100 create/close cycles"
+  ],
+  "successful_repeated_runs": 4,
+  "joins_per_success": 6,
+  "success_exit": 95,
+  "invalid_unlock_exit": 187,
+  "stale_key_process_fault": true,
+  "host_sync_regression_passed": true,
+  "native_probe_sha256": "495fbc561e5fb016ae93a2e8f8102c649505facf4399b52b88241a15a7a6a8fe",
+  "translation_units": [
+    {
+      "unit": "embedding",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "native-vm",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "native-random",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "native-bmalloc-random",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "native-thread-primitives",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "allocator",
+      "compiled": true,
+      "errors": []
+    },
+    {
+      "unit": "threads",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "time",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/CurrentTime.cpp:216:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/CurrentTime.cpp:217:19: error: use of undeclared identifier 'CLOCK_REALTIME'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/CurrentTime.cpp:223:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/CurrentTime.cpp:224:19: error: use of undeclared identifier 'CLOCK_REALTIME'"
+      ]
+    },
+    {
+      "unit": "strings",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'"
+      ]
+    },
+    {
+      "unit": "api",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "global-object",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "interpreter",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/JavaScriptCore/runtime/OptionsList.h:29:10: fatal error: 'JavaScriptCore/JSCWebPreferenceOptions.h' file not found"
+      ]
+    },
+    {
+      "unit": "gc",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-ebfbff81e792-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    }
+  ]
+}

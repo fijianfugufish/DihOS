@@ -1,0 +1,52 @@
+<div id="blob-result" style="position:absolute;left:600px;top:275px;width:20px;height:20px;background:#ff0000"></div>
+<script>
+addEventListener('load', async function () {
+    let foreignDenied;
+    const foreign = new Promise(resolve => { foreignDenied = resolve; });
+    addEventListener('message', e => {
+        if (e.origin === 'https://captcha.example' && e.data === 'blob-denied') foreignDenied();
+    });
+    const read = blob => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('FileReader'));
+        reader.readAsArrayBuffer(blob);
+    });
+    const xhrText = url => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest(); xhr.open('GET', url);
+        xhr.onload = () => resolve(xhr.responseText);
+        xhr.onerror = () => reject(new Error('blob XHR'));
+        xhr.send();
+    });
+    try {
+        console.error('Blob probe phase: binary');
+        const blob = new Blob([new Uint8Array([0, 1, 127, 128, 255])], {type:'application/octet-stream'});
+        if (blob.size !== 5 || blob.type !== 'application/octet-stream') throw Error('blob metadata');
+        const bytes = new Uint8Array(await read(blob.slice(1, 4)));
+        if (bytes.join(',') !== '1,127,128') throw Error('blob slice');
+        console.error('Blob probe phase: URL reads');
+        const url = URL.createObjectURL(new Blob(['owned ', 'memory'], {type:'text/plain'}));
+        if (await xhrText(url) !== 'owned memory') throw Error('blob XHR text');
+        if (await (await fetch(url)).text() !== 'owned memory') throw Error('blob fetch text');
+        console.error('Blob probe phase: origin');
+        document.querySelectorAll('iframe')[1].contentWindow.postMessage({blobProbe:url}, 'https://captcha.example');
+        await foreign;
+        console.error('Blob probe phase: revoke');
+        URL.revokeObjectURL(url);
+        let revoked = false;
+        try { await fetch(url); } catch (e) { revoked = true; }
+        if (!revoked) throw Error('revoked URL still readable');
+        console.error('Blob probe phase: image');
+        const imageURL = URL.createObjectURL(new Blob([
+            '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><rect width="20" height="20" fill="#24ac68"/></svg>'
+        ], {type:'image/svg+xml'}));
+        const image = new Image();
+        image.style.display = 'block';
+        image.width = image.height = 20;
+        await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = imageURL; });
+        document.getElementById('blob-result').appendChild(image);
+        URL.revokeObjectURL(imageURL);
+        console.error('Blob probe phase: done');
+    } catch (e) { console.error('Blob fixture: ' + (e.message || e)); }
+});
+</script>

@@ -16,6 +16,7 @@ typedef struct cpu_core_info
     uint32_t flags;
     uint32_t enabled;
     uint64_t mpidr;
+    uint64_t redistributor;
 } cpu_core_info;
 
 typedef struct cpu_info_snapshot
@@ -31,6 +32,8 @@ typedef struct cpu_info_snapshot
     uint64_t id_aa64pfr0;
     uint64_t id_aa64isar0;
     uint64_t id_aa64mmfr0;
+    uint64_t gic_distributor, gic_redistributor, gic_redistributor_bytes;
+    uint32_t gic_version, virtual_timer_irq, virtual_timer_flags;
     cpu_core_info cores[CPU_INFO_MAX_CORES];
 } cpu_info_snapshot;
 

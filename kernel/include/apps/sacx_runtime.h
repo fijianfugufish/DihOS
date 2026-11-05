@@ -82,6 +82,7 @@ extern "C"
                                   const sacx_runtime_io *io,
                                   uint32_t *out_task_id);
 
+    void dihos_user_window_desktop_poll(void);
     int sacx_runtime_task_status(uint32_t task_id, sacx_task_status *out_status);
     uint32_t sacx_runtime_task_snapshot(sacx_task_info *out_items, uint32_t max_items);
     int sacx_runtime_task_cancel(uint32_t task_id, int32_t status, const char *message);

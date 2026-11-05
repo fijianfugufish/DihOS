@@ -1,3 +1,4 @@
+#include "address.h"
 #include "netsurf_backend.h"
 #include "web_font.h"
 #include "preferences.h"
@@ -183,41 +184,8 @@ static gui_fetch_table g_fetch_table={fetch_filetype,resource_url,resource_data,
 static nserror option_defaults(nsoption_s *defaults){(void)defaults;return NSERROR_OK;}
 static netsurf_table g_netsurf_table={&g_misc_table,&g_window_table,0,0,&g_fetch_table,0,0,0,0,0,&g_bitmap_table,&g_layout_table};
 
-static uint8_t is_space(char c){return c==' '||c=='\t'||c=='\r'||c=='\n';}
-static uint8_t is_unreserved(char c)
-{
-    return(c>='A'&&c<='Z')||(c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c=='.'||c=='~';
-}
-static int append_encoded(char *out,uint32_t cap,uint32_t *at,const char *text)
-{
-    static const char hex[]="0123456789ABCDEF";
-    for(uint32_t i=0u;text&&text[i];++i){
-        unsigned char c=(unsigned char)text[i];
-        if(is_space((char)c)){if(*at+1u>=cap)return -1;out[(*at)++]='+';}
-        else if(is_unreserved((char)c)){if(*at+1u>=cap)return -1;out[(*at)++]=(char)c;}
-        else{if(*at+3u>=cap)return -1;out[(*at)++]='%';out[(*at)++]=hex[c>>4];out[(*at)++]=hex[c&15u];}
-    }
-    out[*at]=0;return 0;
-}
 static int normalize_address(const char *input,char *out,uint32_t cap)
-{
-    while(input&&is_space(*input))++input;if(!input||!input[0]||!out||cap<16u)return -1;
-    char trimmed[DIHSCOVER_URL_CAP];uint32_t len=0u;
-    while(input[len]&&len+1u<sizeof(trimmed))trimmed[len++]=input[len];
-    while(len&&is_space(trimmed[len-1u]))--len;trimmed[len]=0;if(!len)return -1;
-    uint8_t has_scheme=0u,has_space=0u,has_dot=0u;
-    for(uint32_t i=0u;trimmed[i];++i){char c=trimmed[i];if(c==':'&&i>0u&&i<16u){has_scheme=1u;break;}if(is_space(c))has_space=1u;if(c=='.')has_dot=1u;}
-    if(has_scheme){dihs_copy(out,cap,trimmed);return dihs_strlen(out)+1u<cap?0:-1;}
-    if(has_space||!has_dot){
-        const char prefix[]="https://html.duckduckgo.com/html/?q=";uint32_t at=0u;
-        for(uint32_t i=0u;prefix[i];++i){if(at+1u>=cap)return -1;out[at++]=prefix[i];}
-        return append_encoded(out,cap,&at,trimmed);
-    }
-    const char prefix[]="https://";uint32_t at=0u;
-    for(uint32_t i=0u;prefix[i];++i)out[at++]=prefix[i];
-    for(uint32_t i=0u;trimmed[i]&&at+1u<cap;++i)out[at++]=trimmed[i];
-    out[at]=0;return trimmed[0]&&at+1u<cap?0:-1;
-}
+{ return dihscover_address_normalize(input,out,cap); }
 
 static void destroy_surface(void)
 {

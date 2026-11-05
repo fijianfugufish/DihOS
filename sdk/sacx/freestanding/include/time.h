@@ -11,7 +11,11 @@ clock_t clock(void);
 char *ctime(const time_t *value);
 struct tm *localtime(const time_t *value);
 struct tm *gmtime(const time_t *value);
+struct tm *gmtime_r(const time_t *value,struct tm *out);
+struct tm *localtime_r(const time_t *value,struct tm *out);
 time_t mktime(struct tm *value);
+time_t timegm(struct tm *value);
+double difftime(time_t end,time_t begin);
 size_t strftime(char *dst, size_t capacity, const char *format, const struct tm *value);
 #ifdef __cplusplus
 }

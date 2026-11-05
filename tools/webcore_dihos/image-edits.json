@@ -1,0 +1,7 @@
+{
+  "Source/WebCore/platform/graphics/PlatformImage.h": {
+    "before_sha256": "fa4fcca99ae569ab99b76012a75ad17a9c7e1b02ea207e56f22fadf82fe107a4",
+    "match": "#include <wtf/Compiler.h>\n",
+    "replacement": "#include <wtf/Compiler.h>\n#if PLATFORM(DIHOS)\n#include \"PlatformImageDihOS.h\"\n#endif\n"
+  }
+}

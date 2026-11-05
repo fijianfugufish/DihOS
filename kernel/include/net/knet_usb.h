@@ -31,6 +31,8 @@ void knet_usb_get_status(knet_usb_status *out_status);
 void knet_usb_set_worker_quiet(uint32_t quiet);
 /* Failure detail from the most recent owned fetch, including quiet requests. */
 const char *knet_usb_last_fetch_error(void);
+/* Current core-0 owned fetch: true only after verified certificate + Finished. */
+uint32_t knet_usb_tls_verified(void);
 int knet_usb_get_url(const char *url, uint32_t max_bytes);
 int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
                        uint32_t *out_size, uint8_t *out_truncated,
@@ -38,6 +40,12 @@ int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
 int knet_usb_fetch_request(const char *url, const char *method,
                            const uint8_t *body, uint32_t body_size,
                            const char *content_type,
+                           uint8_t *response, uint32_t capacity,
+                           uint32_t *out_size, uint8_t *out_truncated,
+                           volatile uint32_t *cancelled, uint32_t timeout_ms);
+int knet_usb_fetch_request_headers(const char *url, const char *method,
+                           const uint8_t *body, uint32_t body_size,
+                           const char *content_type,const char *headers,uint32_t header_bytes,
                            uint8_t *response, uint32_t capacity,
                            uint32_t *out_size, uint8_t *out_truncated,
                            volatile uint32_t *cancelled, uint32_t timeout_ms);

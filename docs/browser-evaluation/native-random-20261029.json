@@ -1,0 +1,40 @@
+{
+  "native_sources": {
+    "tools/jsc_dihos/RandomDihOS.cpp": "4cf8e508d2ab4acddb30c3807cf2da05661ea7f1eea343af85e7714398624f20",
+    "tools/jsc_dihos/BmallocRandomDihOS.cpp": "7e951b2d31a8c7b20a13caf2af73522d0644227b39c71999827c047ae27620f3"
+  },
+  "runtime_sha256": "577c18745c7659ba888c37afdac16966ea7643bee8463f17a16017cf534e5149",
+  "qemu_validated": true,
+  "guest_validated": false,
+  "programs": {
+    "bmalloc": {
+      "sha256": "e3e00ab166fad4890e097bedd99c9046bd449bcd6f11f05aec91efc292a8d6ea",
+      "bytes": 36864,
+      "undefined_symbols": []
+    },
+    "wtf": {
+      "sha256": "c43f23c24724d9909dfe8a441b8a77562823849defb5dcbda30da359af8e8ba5",
+      "bytes": 36864,
+      "undefined_symbols": []
+    }
+  },
+  "qemu_rndr_sha256": "9ce26974a4bee49fba2fd8158c836f0894a7783fe2a4c3793cdf94788a9a1617",
+  "qemu_no_rndr_sha256": "77d06399992e6481272da50223288b9d31a7cd6ed5db76d93adea12e94558511",
+  "source_sha256": {
+    "include/bootinfo.h": "7fa83f6ecac3346ef93c15a7c2dec3ca98cea35e786ad967956377f802399aa0",
+    "src/stage2/stage2_rng.inc": "cdf954a8cd0265b7fa9b6b4872f6b1f2c58003bb0d8c70b2e4265d1517bc4534",
+    "src/stage2/stage2.c": "ac7a01f6ca404ac3c77932efa6e5e7aacfb3bbf229fae43ad9df03e24c1fbae1",
+    "src/stage2/stage2_load_kernel.c": "c570f8e45cbcb6f33e1971d34289788fcd437f7e1d059e1e198b770c9ec467d4",
+    "kernel/system/entropy.c": "fcd2ac31b5f97eab440b3c18990a922941ef0f443f821634ee9da451578f226b",
+    "kernel/include/system/entropy.h": "bec5a1cb300448af45c53dafc108870e17a1ec5c34927933c0f34151e5d1bb12",
+    "kernel/process/dihos_user_sacx.c": "678f6d3b5e8f2b9114dd2eb8ef4411f38fb980111513815b6f65a98d10b1ba40",
+    "sdk/sacx/include/sacx_user_random.h": "6b0130d5e979561b04d6c7aa53a689daa919f7500078be6d7ee6d65cecf9b0df",
+    "sdk/sacx/include/sacx_user_syscall.h": "35322cb70fe0cc81cf295eb3322d0f926e717a5cab5860e352c4a8b73e3801b3",
+    "tools/entropy_tests.c": "efcf92c65f4a7c2ca6e2839028cfaa4534935506336ba094ce20348793a6298a",
+    "tools/firmware_rng_tests.c": "f19398d9b69fe5d0cc06ff82b0f601a7e8b939fd956cbedf0bb5404c528caa5d",
+    "tools/user_random_program.cpp": "870c7078fdddceb68fef9939653ccfc0cc1a23da3109f9a73723c4d866eb1c93",
+    "tools/user_webkit_random_program.cpp": "0ed351f902fb5da477a29a8ce0df4c905067f515e3195d9afc0fafead63f44f3",
+    "tools/jsc_dihos/port-edits.json": "29192bde02287ced4fff694bf61f27f4df7fdb0f2e2d912b111fc4d22c8d2f78"
+  },
+  "physical_source_validated": false
+}

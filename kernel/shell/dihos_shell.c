@@ -9,6 +9,8 @@
 #include "mesart/mesart_renderer.h"
 #include "mesart/mesart_shader.h"
 #include "process/dihos_process.h"
+#include "process/dihos_user_runtime.h"
+#include "system/cpu_info.h"
 #include "filesystem/dihos_path.h"
 #include "gpio/gpio.h"
 #include "hardware_probes/acpi_dump.h"
@@ -246,7 +248,16 @@ static int dihos_cmd_demo_installfx(dihos_shell_stage *stage);
 static int dihos_cmd_shell_fallback(dihos_shell_stage *stage);
 static int dihos_shell_fallback_available(const char *name, char *friendly, char *raw);
 
+#include "dihos_user_commands.inc"
+
 static const dihos_shell_command G_commands[] = {
+    {"proc:test", "proc:test", "Start bounded, preemptible EL0 process fixtures.", 0u, dihos_cmd_proc_test},
+    {"proc:run", "proc:run <path>", "Queue a static ARM64 user ELF image.", 0u, dihos_cmd_proc_run},
+    {"proc:run-net", "proc:run-net <path>", "Queue an ARM64 ELF with explicit network access.", 0u, dihos_cmd_proc_run_net},
+    {"proc:run-ui", "proc:run-ui <path>", "Queue an ARM64 ELF with an owned-window grant.", 0u, dihos_cmd_proc_run_ui},
+    {"proc:run-web", "proc:run-web <path>", "Queue an ARM64 ELF with window and network grants.", 0u, dihos_cmd_proc_run_web},
+    {"proc:status", "proc:status", "Show EL0 task preemption and fault state.", 0u, dihos_cmd_proc_status},
+    {"proc:stop", "proc:stop", "Cancel and clean up EL0 process fixtures.", 0u, dihos_cmd_proc_stop},
     {"sys:help", "sys:help [command]", "Show DIHOS shell help.", 0u, dihos_cmd_sys_help},
     {"sys:clear", "sys:clear", "Clear the terminal surface.", 0u, dihos_cmd_sys_clear},
     {"sys:flush", "sys:flush", "Flush the terminal log to storage.", 0u, dihos_cmd_sys_flush},

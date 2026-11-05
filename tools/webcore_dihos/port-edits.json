@@ -1,0 +1,7 @@
+{
+  "Source/WTF/wtf/RedBlackTree.h": {
+    "before_sha256": "e4f38fbcba6fcdc926075b60d458a9cd94303a74d0d1e943fd5132cfba266a60",
+    "match": "        return z;\n    }\n",
+    "replacement": "        // A removed node must not retain checked references to live children.\n        // They can otherwise outlive the tree membership and abort when a\n        // former child is destroyed before this removed node (generic timers).\n        z->reset();\n        return z;\n    }\n"
+  }
+}

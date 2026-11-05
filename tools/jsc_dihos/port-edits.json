@@ -1,0 +1,285 @@
+{
+  "Source/cmake/WebKitCommon.cmake": {
+    "match": "    elseif (CMAKE_SYSTEM_NAME MATCHES \"Fuchsia\")\n        set(WTF_OS_FUCHSIA 1)\n",
+    "replacement": "    elseif (CMAKE_SYSTEM_NAME MATCHES \"Fuchsia\")\n        set(WTF_OS_FUCHSIA 1)\n    elseif (CMAKE_SYSTEM_NAME STREQUAL \"DihOS\")\n        set(WTF_OS_DIHOS 1)\n"
+  },
+  "Source/cmake/WebKitCommon.cmake@link-checks": {
+    "path": "Source/cmake/WebKitCommon.cmake",
+    "match": "    set(HAS_RUN_WEBKIT_COMMON TRUE)\n",
+    "replacement": "    set(HAS_RUN_WEBKIT_COMMON TRUE)\n    if (CMAKE_SYSTEM_NAME STREQUAL \"DihOS\")\n        # ABI identification compiles archives; subsequent capability checks\n        # must link real native executables and resolve their symbols.\n        set(CMAKE_TRY_COMPILE_TARGET_TYPE EXECUTABLE)\n    endif ()\n"
+  },
+  "Source/cmake/OptionsJSCOnly.cmake": {
+    "match": "find_package(Threads REQUIRED)\n",
+    "replacement": "if (CMAKE_SYSTEM_NAME STREQUAL \"DihOS\")\n    list(PREPEND CMAKE_MODULE_PATH \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/cmake\")\n    find_package(DihOSThreads REQUIRED)\nelse ()\n    find_package(Threads REQUIRED)\nendif ()\n"
+  },
+  "Source/WTF/wtf/PlatformOS.h": {
+    "match": "#define OS_CONSTANT(WTF_FEATURE) (WTF_OS_CONSTANT_##WTF_FEATURE)\n",
+    "replacement": "#define OS_CONSTANT(WTF_FEATURE) (WTF_OS_CONSTANT_##WTF_FEATURE)\n\n/* Native SACX port: this does not imply POSIX/Linux services. */\n#if defined(__DIHOS__)\n#define WTF_OS_DIHOS 1\n#endif\n"
+  },
+  "Source/bmalloc/bmalloc/BPlatform.h": {
+    "match": "#define BOS(OS) (defined BOS_##OS && BOS_##OS)\n",
+    "replacement": "#define BOS(OS) (defined BOS_##OS && BOS_##OS)\n#if defined(__DIHOS__)\n#define BOS_DIHOS 1\n#endif\n"
+  },
+  "Source/bmalloc/bmalloc/VMAllocate.h": {
+    "match": "#if BOS(WINDOWS)\n#include <windows.h>",
+    "replacement": "#if BOS(DIHOS)\n#include <sacx_user_vm.h>\n#elif BOS(WINDOWS)\n#include <windows.h>"
+  },
+  "Source/bmalloc/bmalloc/VMAllocate.h@aligned": {
+    "replacement": "    vmValidate(vmAlignment);\n#if BOS(DIHOS)\n    void* native = dihos_user_vm_reserve(vmSize, vmAlignment, 0);\n    if (native && dihos_user_vm_commit(native, vmSize, 1)) {\n        RELEASE_BASSERT(!dihos_user_vm_release(native, vmSize));\n        return nullptr;\n    }\n    return native;\n#endif\n",
+    "path": "Source/bmalloc/bmalloc/VMAllocate.h",
+    "match": "    vmValidate(vmAlignment);\n"
+  },
+  "Source/bmalloc/bmalloc/VMAllocate.h@backend": {
+    "replacement": "#if BOS(DIHOS)\n#include <bmalloc-vm.h>\n#elif !BOS(WINDOWS)\n// POSIX",
+    "path": "Source/bmalloc/bmalloc/VMAllocate.h",
+    "match": "#if !BOS(WINDOWS)\n// POSIX"
+  },
+  "Source/WTF/wtf/PlatformJSCOnly.cmake": {
+    "match": "list(APPEND WTF_LIBRARIES\n    Threads::Threads\n)",
+    "replacement": "if (WTF_OS_DIHOS)\n    list(REMOVE_ITEM WTF_SOURCES posix/OSAllocatorPOSIX.cpp CryptographicallyRandomNumber.cpp OSRandomSource.cpp posix/ThreadingPOSIX.cpp StackBounds.cpp CurrentTime.cpp posix/FileHandlePOSIX.cpp posix/FileSystemPOSIX.cpp posix/MappedFileDataPOSIX.cpp generic/MainThreadGeneric.cpp text/unix/TextBreakIteratorInternalICUUnix.cpp unix/LanguageUnix.cpp PageBlock.cpp WTFProcess.cpp SafeStrerror.cpp RandomDevice.cpp posix/CPUTimePOSIX.cpp generic/MemoryFootprintGeneric.cpp unix/UniStdExtrasUnix.cpp)\n    list(APPEND WTF_SOURCES \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/OSAllocatorDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/RandomDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/ThreadingPrimitivesDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/ThreadingDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/CurrentTimeDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/FileSystemDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/PlatformDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/RandomDeviceDihOS.cpp\" \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/ResourcesDihOS.cpp\")\nendif ()\n\nlist(APPEND WTF_LIBRARIES\n    Threads::Threads\n)"
+  },
+  "Source/bmalloc/CMakeLists.txt": {
+    "match": "set(bmalloc_SOURCES\n    bmalloc/CryptoRandom.cpp",
+    "replacement": "if (WTF_OS_DIHOS)\n    set(DIHOS_BMALLOC_RANDOM_SOURCE \"${DIHOS_SDK_ROOT}/tools/jsc_dihos/BmallocRandomDihOS.cpp\")\nelse ()\n    set(DIHOS_BMALLOC_RANDOM_SOURCE bmalloc/CryptoRandom.cpp)\nendif ()\nset(bmalloc_SOURCES\n    ${DIHOS_BMALLOC_RANDOM_SOURCE}"
+  },
+  "Source/WTF/wtf/ThreadingPrimitives.h@includes": {
+    "path": "Source/WTF/wtf/ThreadingPrimitives.h",
+    "match": "#include <wtf/WallTime.h>\n",
+    "replacement": "#include <wtf/WallTime.h>\n#if OS(DIHOS)\n#include <sacx_user_sync.hpp>\n#include <sacx_user_keys.h>\n#endif\n"
+  },
+  "Source/WTF/wtf/ThreadingPrimitives.h@types": {
+    "path": "Source/WTF/wtf/ThreadingPrimitives.h",
+    "match": "#if USE(PTHREADS)\nusing PlatformThreadHandle = pthread_t;",
+    "replacement": "#if OS(DIHOS)\nusing ThreadIdentifier = uint64_t;\nusing PlatformThreadHandle = sacx_user_thread;\nusing PlatformMutex = sacx_user_mutex;\nusing PlatformCondition = sacx_user_condition;\nusing ThreadSpecificKey = sacx_user_key;\n#elif USE(PTHREADS)\nusing PlatformThreadHandle = pthread_t;"
+  },
+  "Source/WTF/wtf/ThreadingPrimitives.h@mutex": {
+    "path": "Source/WTF/wtf/ThreadingPrimitives.h",
+    "match": "#if USE(PTHREADS)\n    PlatformMutex m_mutex = PTHREAD_MUTEX_INITIALIZER;",
+    "replacement": "#if OS(DIHOS)\n    PlatformMutex m_mutex { };\n#elif USE(PTHREADS)\n    PlatformMutex m_mutex = PTHREAD_MUTEX_INITIALIZER;"
+  },
+  "Source/WTF/wtf/ThreadingPrimitives.h@condition": {
+    "path": "Source/WTF/wtf/ThreadingPrimitives.h",
+    "match": "#if USE(PTHREADS)\n    PlatformCondition m_condition = PTHREAD_COND_INITIALIZER;",
+    "replacement": "#if OS(DIHOS)\n    PlatformCondition m_condition { };\n#elif USE(PTHREADS)\n    PlatformCondition m_condition = PTHREAD_COND_INITIALIZER;"
+  },
+  "Source/WTF/wtf/ThreadingPrimitives.h@keys": {
+    "path": "Source/WTF/wtf/ThreadingPrimitives.h",
+    "match": "#if USE(PTHREADS)\n\nstatic constexpr ThreadSpecificKey InvalidThreadSpecificKey",
+    "replacement": "#if OS(DIHOS)\nstatic constexpr ThreadSpecificKey InvalidThreadSpecificKey = 0;\ninline void threadSpecificKeyCreate(ThreadSpecificKey* key, void (*destructor)(void*))\n{\n    if (sacx_user_key_create(key, destructor))\n        __builtin_trap();\n}\ninline void threadSpecificKeyDelete(ThreadSpecificKey key)\n{\n    if (sacx_user_key_delete(key))\n        __builtin_trap();\n}\ninline void threadSpecificSet(ThreadSpecificKey key, void* value)\n{\n    if (sacx_user_key_set(key, value))\n        __builtin_trap();\n}\ninline void* threadSpecificGet(ThreadSpecificKey key) { return sacx_user_key_get(key); }\n#elif USE(PTHREADS)\n\nstatic constexpr ThreadSpecificKey InvalidThreadSpecificKey"
+  },
+  "Source/WTF/wtf/PlatformRegisters.h@native-include": {
+    "path": "Source/WTF/wtf/PlatformRegisters.h",
+    "match": "#if OS(DARWIN)\n#include <mach/exception_types.h>",
+    "replacement": "#if OS(DIHOS)\n#include <sacx_user_thread_context.h>\n#elif OS(DARWIN)\n#include <mach/exception_types.h>"
+  },
+  "Source/WTF/wtf/PlatformRegisters.h@native-context": {
+    "path": "Source/WTF/wtf/PlatformRegisters.h",
+    "match": "#if OS(DARWIN)\n\n#if CPU(X86)",
+    "replacement": "#if OS(DIHOS)\n\n// Real saved EL0 state; C-loop consumers use the stackPointer fallback.\n// No signal/ucontext or writable restore interface is implied.\nstruct PlatformRegisters { void* stackPointer { nullptr }; sacx_user_thread_context native { }; };\n\n#elif OS(DARWIN)\n\n#if CPU(X86)"
+  },
+  "Source/WTF/wtf/Threading.h@suspend-error": {
+    "path": "Source/WTF/wtf/Threading.h",
+    "match": "#if OS(DARWIN)\n    using PlatformSuspendError",
+    "replacement": "#if OS(DIHOS)\n    using PlatformSuspendError = int;\n#elif OS(DARWIN)\n    using PlatformSuspendError"
+  },
+  "Source/WTF/wtf/Threading.h@native-fields": {
+    "path": "Source/WTF/wtf/Threading.h",
+    "match": "    ThreadIdentifier m_id { 0 };\n#elif OS(DARWIN)",
+    "replacement": "    ThreadIdentifier m_id { 0 };\n#elif OS(DIHOS)\n    PlatformRegisters m_nativeRegisters { };\n    unsigned m_suspendCount { 0 };\n#elif OS(DARWIN)"
+  },
+  "Source/WTF/wtf/Threading.h@handle-init": {
+    "path": "Source/WTF/wtf/Threading.h",
+    "match": "    PlatformThreadHandle m_handle;",
+    "replacement": "    PlatformThreadHandle m_handle { };"
+  },
+  "Source/WTF/wtf/ThreadSpecific.h@native-key": {
+    "path": "Source/WTF/wtf/ThreadSpecific.h",
+    "match": "#if USE(PTHREADS)\n    pthread_key_t m_key { };",
+    "replacement": "#if OS(DIHOS)\n    ThreadSpecificKey m_key { };\n#elif USE(PTHREADS)\n    pthread_key_t m_key { };"
+  },
+  "Source/WTF/wtf/ThreadSpecific.h@native-methods": {
+    "path": "Source/WTF/wtf/ThreadSpecific.h",
+    "match": "#if USE(PTHREADS)\n\ntemplate<typename T, CanBeGCThread canBeGCThread>",
+    "replacement": "#if OS(DIHOS)\ntemplate<typename T, CanBeGCThread canBeGCThread>\ninline ThreadSpecific<T, canBeGCThread>::ThreadSpecific() { threadSpecificKeyCreate(&m_key, destroy); }\ntemplate<typename T, CanBeGCThread canBeGCThread>\ninline T* ThreadSpecific<T, canBeGCThread>::get()\n{\n    auto* data = static_cast<Data*>(threadSpecificGet(m_key));\n    return data ? data->storagePointer() : nullptr;\n}\ntemplate<typename T, CanBeGCThread canBeGCThread>\ninline void ThreadSpecific<T, canBeGCThread>::setInTLS(Data* data) { threadSpecificSet(m_key, data); }\n#elif USE(PTHREADS)\n\ntemplate<typename T, CanBeGCThread canBeGCThread>"
+  },
+  "Source/WTF/wtf/ThreadSpecific.h@native-destructor": {
+    "path": "Source/WTF/wtf/ThreadSpecific.h",
+    "match": "#if USE(PTHREADS)\n    // We want get()",
+    "replacement": "#if OS(DIHOS)\n    threadSpecificSet(data->owner->m_key, ptr);\n#elif USE(PTHREADS)\n    // We want get()"
+  },
+  "Source/bmalloc/bmalloc/bmalloc.h@native-stdlib": {
+    "path": "Source/bmalloc/bmalloc/bmalloc.h",
+    "match": "#include \"SystemHeap.h\"\n",
+    "replacement": "#include \"SystemHeap.h\"\n#if BOS(DIHOS)\n#include <cstdlib>\n#endif\n"
+  },
+  "Source/bmalloc/bmalloc/SpinBackoff.h@native-header": {
+    "path": "Source/bmalloc/bmalloc/SpinBackoff.h",
+    "match": "#include \"BPlatform.h\"\n",
+    "replacement": "#include \"BPlatform.h\"\n#if BOS(DIHOS)\n#include <sacx_user_syscall.h>\n#endif\n"
+  },
+  "Source/bmalloc/bmalloc/SpinBackoff.h@native-yield": {
+    "path": "Source/bmalloc/bmalloc/SpinBackoff.h",
+    "match": "#if BOS(DARWIN)\n        constexpr mach_msg_timeout_t timeoutInMS = 1;",
+    "replacement": "#if BOS(DIHOS)\n        if (sacx_user_call(SACX_USER_YIELD, 0, 0, 0))\n            __builtin_trap();\n#elif BOS(DARWIN)\n        constexpr mach_msg_timeout_t timeoutInMS = 1;"
+  },
+  "Source/JavaScriptCore/llint/LLIntSettingsExtractor.cpp@native-metadata": {
+    "path": "Source/JavaScriptCore/llint/LLIntSettingsExtractor.cpp",
+    "match": "    printf(\"%p\\n\", settingsExtractorTable);",
+    "replacement": "#if OS(DIHOS)\n    // Retain target-layout metadata for the host Ruby reader, without libc IO.\n    __asm__ volatile(\"\" : : \"r\"(settingsExtractorTable) : \"memory\");\n#else\n    printf(\"%p\\n\", settingsExtractorTable);\n#endif"
+  },
+  "Source/JavaScriptCore/llint/LLIntOffsetsExtractor.cpp@native-metadata": {
+    "path": "Source/JavaScriptCore/llint/LLIntOffsetsExtractor.cpp",
+    "match": "    printf(\"%p\\n\", JSC::LLIntOffsetsExtractor::dummy());",
+    "replacement": "#if OS(DIHOS)\n    // Retain target-layout metadata for the host Ruby reader, without libc IO.\n    __asm__ volatile(\"\" : : \"r\"(JSC::LLIntOffsetsExtractor::dummy()) : \"memory\");\n#else\n    printf(\"%p\\n\", JSC::LLIntOffsetsExtractor::dummy());\n#endif"
+  },
+  "Source/WTF/wtf/Threading.cpp@native-process-lifetime": {
+    "path": "Source/WTF/wtf/Threading.cpp",
+    "match": "#include <bmalloc/pas_process.h>",
+    "replacement": "#if !OS(DIHOS)\n#include <bmalloc/pas_process.h>\n#endif"
+  },
+  "Source/WTF/wtf/Threading.cpp@native-process-shutdown": {
+    "path": "Source/WTF/wtf/Threading.cpp",
+    "match": "    if (pas_process_is_shutting_down())\n        return;",
+    "replacement": "#if !OS(DIHOS)\n    if (pas_process_is_shutting_down())\n        return;\n#endif"
+  },
+  "Source/JavaScriptCore/API/JSBase.cpp@native-no-signals": {
+    "path": "Source/JavaScriptCore/API/JSBase.cpp",
+    "match": "#if !OS(DARWIN) && !OS(WINDOWS)\nbool JSConfigureSignalForGC(int signal)",
+    "replacement": "#if OS(DIHOS)\nbool JSConfigureSignalForGC(int) { return false; }\n#elif !OS(DARWIN) && !OS(WINDOWS)\nbool JSConfigureSignalForGC(int signal)"
+  },
+  "Source/bmalloc/CMakeLists.txt@native-system-only": {
+    "path": "Source/bmalloc/CMakeLists.txt",
+    "match": "set(bmalloc_LIBRARIES\n",
+    "replacement": "if (WTF_OS_DIHOS)\n    if (NOT USE_SYSTEM_MALLOC OR USE_MIMALLOC)\n        message(FATAL_ERROR \"The native DihOS profile requires its SACX system allocator\")\n    endif ()\n    # libpas is not selected by BPlatform.h on DihOS. Its process source still\n    # includes pthreads outside feature guards, so do not build that backend.\n    list(FILTER bmalloc_SOURCES EXCLUDE REGEX \"^libpas/\")\n    set(bmalloc_C_SOURCES)\nendif ()\n\nset(bmalloc_LIBRARIES\n"
+  },
+  "Source/JavaScriptCore/heap/RegisterState.h@native-register-spill": {
+    "path": "Source/JavaScriptCore/heap/RegisterState.h",
+    "match": "#include <cstdint>\n#include <setjmp.h>\n#include <wtf/Platform.h>",
+    "replacement": "#include <cstdint>\n#include <wtf/Platform.h>\n#if !OS(DIHOS) || !CPU(ARM64)\n#include <setjmp.h>\n#endif\n// Native ARM64 uses the actual x19..x28 spill implementation below, not the\n// setjmp fallback. No signal/non-local-jump ABI is advertised by this change."
+  },
+  "Source/WTF/wtf/ProcessID.h@native-header": {
+    "path": "Source/WTF/wtf/ProcessID.h",
+    "match": "#include <wtf/Platform.h>",
+    "replacement": "#include <wtf/Platform.h>\n#if OS(DIHOS)\n#include <sacx_user_syscall.h>\n#endif"
+  },
+  "Source/WTF/wtf/ProcessID.h@native-type": {
+    "path": "Source/WTF/wtf/ProcessID.h",
+    "match": "#if OS(WINDOWS)\nusing ProcessID = int;",
+    "replacement": "#if OS(WINDOWS) || OS(DIHOS)\nusing ProcessID = int;"
+  },
+  "Source/WTF/wtf/ProcessID.h@native-self": {
+    "path": "Source/WTF/wtf/ProcessID.h",
+    "match": "#if OS(WINDOWS)\n    return GetCurrentProcessId();",
+    "replacement": "#if OS(DIHOS)\n    auto id = sacx_user_call(SACX_USER_PROCESS_SELF, 0, 0, 0);\n    if (id <= 0 || id > 0x7fffffff)\n        __builtin_trap();\n    return static_cast<ProcessID>(id);\n#elif OS(WINDOWS)\n    return GetCurrentProcessId();"
+  },
+  "Source/WTF/wtf/DateMath.cpp@native-utc-calendar": {
+    "path": "Source/WTF/wtf/DateMath.cpp",
+    "match": "#if HAVE(LOCALTIME_R)\n    localtime_r(localTime, localTM);",
+    "replacement": "#if OS(DIHOS) || HAVE(LOCALTIME_R)\n    localtime_r(localTime, localTM);"
+  },
+  "Source/WTF/wtf/Lock.cpp@native-includes": {
+    "path": "Source/WTF/wtf/Lock.cpp",
+    "match": "#if OS(WINDOWS)\n#include <windows.h>",
+    "replacement": "#if OS(DIHOS)\n#include \"sacx_user_api.h\"\n#include <wtf/MonotonicTime.h>\n#elif OS(WINDOWS)\n#include <windows.h>"
+  },
+  "Source/WTF/wtf/Lock.cpp@native-timeout": {
+    "path": "Source/WTF/wtf/Lock.cpp",
+    "match": "bool Lock::tryLockWithTimeout(Seconds timeout)\n{",
+    "replacement": "bool Lock::tryLockWithTimeout(Seconds timeout)\n{\n#if OS(DIHOS)\n    // There is no signal-handler ABI in this profile. Native sleep yields\n    // the EL0 thread; never invoke a POSIX call or busy-wait in the kernel.\n    if (tryLock())\n        return true;\n    if (!(timeout > Seconds(0)))\n        return false; // Includes NaN, negative and zero timeouts.\n    auto deadline = MonotonicTime::now() + timeout;\n    do {\n        if (sacx_user_call(SACX_USER_SLEEP_MS, 1, 0, 0))\n            __builtin_trap();\n        if (tryLock())\n            return true;\n    } while (MonotonicTime::now() < deadline);\n    return false;\n#else"
+  },
+  "Source/WTF/wtf/Lock.cpp@native-timeout-end": {
+    "path": "Source/WTF/wtf/Lock.cpp",
+    "match": "    return isHeld();\n}",
+    "replacement": "    return isHeld();\n#endif\n}"
+  },
+  "Source/WTF/wtf/Int128.cpp@native-no-stream-includes": {
+    "path": "Source/WTF/wtf/Int128.cpp",
+    "match": "#include <iomanip>\n#include <ostream>  // NOLINT(readability/streams)\n#include <sstream>",
+    "replacement": "#if !OS(DIHOS)\n#include <iomanip>\n#include <ostream>  // NOLINT(readability/streams)\n#include <sstream>\n#endif"
+  },
+  "Source/WTF/wtf/Int128.cpp@native-no-unsigned-stream": {
+    "path": "Source/WTF/wtf/Int128.cpp",
+    "match": "namespace {\n\nstatic std::string UInt128ToFormattedString",
+    "replacement": "// The native SDK does not expose iostreams. Keep arithmetic and WTF\n// PrintStream formatting; omit only the unavailable standard-stream API.\n#if !OS(DIHOS)\nnamespace {\n\nstatic std::string UInt128ToFormattedString"
+  },
+  "Source/WTF/wtf/Int128.cpp@native-end-unsigned-stream": {
+    "path": "Source/WTF/wtf/Int128.cpp",
+    "match": "namespace {\n\nstatic UInt128Impl NODELETE UnsignedAbsoluteValue",
+    "replacement": "#endif\n\nnamespace {\n\nstatic UInt128Impl NODELETE UnsignedAbsoluteValue"
+  },
+  "Source/WTF/wtf/Int128.cpp@native-no-signed-stream": {
+    "path": "Source/WTF/wtf/Int128.cpp",
+    "match": "std::ostream& operator<<(std::ostream& os, Int128Impl v) {",
+    "replacement": "#if !OS(DIHOS)\nstd::ostream& operator<<(std::ostream& os, Int128Impl v) {"
+  },
+  "Source/WTF/wtf/Int128.cpp@native-end-signed-stream": {
+    "path": "Source/WTF/wtf/Int128.cpp",
+    "match": "void printInternal(PrintStream& out, UInt128 value)",
+    "replacement": "#endif\n\nvoid printInternal(PrintStream& out, UInt128 value)"
+  },
+  "Source/WTF/wtf/Int128.h@native-unsigned-stream-api": {
+    "path": "Source/WTF/wtf/Int128.h",
+    "match": "WTF_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, UInt128Impl v);",
+    "replacement": "#if !OS(DIHOS)\nWTF_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, UInt128Impl v);\n#endif"
+  },
+  "Source/WTF/wtf/Int128.h@native-signed-stream-api": {
+    "path": "Source/WTF/wtf/Int128.h",
+    "match": "WTF_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, Int128Impl v);",
+    "replacement": "#if !OS(DIHOS)\nWTF_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os, Int128Impl v);\n#endif"
+  },
+  "Source/WTF/wtf/FileHandle.h@native-types": {
+    "path": "Source/WTF/wtf/FileHandle.h",
+    "match": "#elif OS(UNIX)\n#include <sys/types.h>",
+    "replacement": "#elif OS(UNIX) || OS(DIHOS)\n#include <sys/types.h>"
+  },
+  "Source/WTF/wtf/FileHandle.cpp@native-deny-adopt": {
+    "path": "Source/WTF/wtf/FileHandle.cpp",
+    "match": "#if USE(FILE_LOCK)\n    if (lockMode)",
+    "replacement": "#if OS(DIHOS)\n    m_handle = std::nullopt; // No file-handle namespace is exposed to this profile.\n    UNUSED_PARAM(lockMode);\n#elif USE(FILE_LOCK)\n    if (lockMode)"
+  },
+  "Source/WTF/wtf/MappedFileData.h@native-empty-view": {
+    "path": "Source/WTF/wtf/MappedFileData.h",
+    "match": "    std::span<uint8_t> mutableSpan() LIFETIME_BOUND { return m_fileData; }\n#endif",
+    "replacement": "    std::span<uint8_t> mutableSpan() LIFETIME_BOUND { return m_fileData; }\n#elif OS(DIHOS)\n    // Only emptyFile() is valid; all file-open and mapping requests fail.\n    size_t size() const { return 0; }\n    std::span<const uint8_t> span() const { return { }; }\n    std::span<uint8_t> mutableSpan() { return { }; }\n#endif"
+  },
+  "Source/WTF/wtf/FileSystem.cpp@native-includes": {
+    "path": "Source/WTF/wtf/FileSystem.cpp",
+    "match": "#if !OS(WINDOWS)\n#include <fcntl.h>",
+    "replacement": "#if !OS(WINDOWS) && !OS(DIHOS)\n#include <fcntl.h>"
+  },
+  "Source/WTF/wtf/FileSystem.cpp@native-no-file-map": {
+    "path": "Source/WTF/wtf/FileSystem.cpp",
+    "match": "#if OS(WINDOWS)\n    DWORD oldProtection;",
+    "replacement": "#if OS(DIHOS)\n    if (bytesSize)\n        __builtin_trap(); // Nonempty file mappings are unsupported, not flushed.\n    UNUSED_PARAM(map);\n#elif OS(WINDOWS)\n    DWORD oldProtection;"
+  },
+  "Source/WTF/wtf/PlatformHave.h@native-no-filesystem": {
+    "path": "Source/WTF/wtf/PlatformHave.h",
+    "match": "#if !defined(HAVE_STD_FILESYSTEM)\n",
+    "replacement": "#if OS(DIHOS)\n// The selected native libc++ slice intentionally has no filesystem module.\n// Header presence alone is not a linkable filesystem capability.\n#undef HAVE_STD_FILESYSTEM\n#undef HAVE_STD_EXPERIMENTAL_FILESYSTEM\n#define HAVE_STD_FILESYSTEM 0\n#define HAVE_STD_EXPERIMENTAL_FILESYSTEM 0\n#endif\n\n#if !defined(HAVE_STD_FILESYSTEM)\n"
+  },
+  "Source/WTF/wtf/FileSystem.cpp@native-isSafeToUseMemoryMapForPath": {
+    "path": "Source/WTF/wtf/FileSystem.cpp",
+    "match": "bool isSafeToUseMemoryMapForPath(const String&)\n{\n    return true;\n}",
+    "replacement": "bool isSafeToUseMemoryMapForPath(const String&)\n{\n#if OS(DIHOS)\n    return false;\n#else\n    return true;\n#endif\n}"
+  },
+  "Source/WTF/wtf/FileSystem.cpp@native-makeSafeToUseMemoryMapForPath": {
+    "path": "Source/WTF/wtf/FileSystem.cpp",
+    "match": "bool makeSafeToUseMemoryMapForPath(const String&)\n{\n    return true;\n}",
+    "replacement": "bool makeSafeToUseMemoryMapForPath(const String&)\n{\n#if OS(DIHOS)\n    return false;\n#else\n    return true;\n#endif\n}"
+  },
+  "Source/WTF/wtf/RandomDevice.h@native-constructor": {
+    "path": "Source/WTF/wtf/RandomDevice.h",
+    "match": "#if OS(DARWIN) || OS(FUCHSIA) || OS(WINDOWS)\n    RandomDevice()",
+    "replacement": "#if OS(DIHOS) || OS(DARWIN) || OS(FUCHSIA) || OS(WINDOWS)\n    RandomDevice()"
+  },
+  "Source/WTF/wtf/RandomDevice.h@native-no-fd": {
+    "path": "Source/WTF/wtf/RandomDevice.h",
+    "match": "private:\n#if OS(DARWIN) || OS(FUCHSIA) || OS(WINDOWS)",
+    "replacement": "private:\n#if OS(DIHOS) || OS(DARWIN) || OS(FUCHSIA) || OS(WINDOWS)"
+  },
+  "Source/WTF/wtf/PrintStream.cpp@native-utf16": {
+    "path": "Source/WTF/wtf/PrintStream.cpp",
+    "match": "    out.printf(\"%lc\", static_cast<wint_t>(value));",
+    "replacement": "#if OS(DIHOS)\n    // This API receives one UTF-16 unit, not a surrogate pair. Render isolated\n    // surrogates as U+FFFD instead of depending on a host wide-character locale.\n    unsigned scalar = (value >= 0xd800 && value <= 0xdfff) ? 0xfffd : value;\n    char encoded[4] { };\n    if (scalar < 0x80) {\n        out.printf(\"%c\", scalar);\n        return;\n    } else if (scalar < 0x800) {\n        encoded[0] = 0xc0 | (scalar >> 6);\n        encoded[1] = 0x80 | (scalar & 63);\n    } else {\n        encoded[0] = 0xe0 | (scalar >> 12);\n        encoded[1] = 0x80 | ((scalar >> 6) & 63);\n        encoded[2] = 0x80 | (scalar & 63);\n    }\n    out.printf(\"%s\", encoded);\n#else\n    out.printf(\"%lc\", static_cast<wint_t>(value));\n#endif"
+  }
+}

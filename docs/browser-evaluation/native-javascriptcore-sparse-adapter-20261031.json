@@ -1,0 +1,189 @@
+{
+  "date": "2026-10-31",
+  "scope": "Actual native interpreter-only JavaScriptCore in DihOS ARM64 EL0",
+  "qemu_validated": true,
+  "hyperv_validated": false,
+  "hardware_validated": false,
+  "browser_integrated": false,
+  "websites_validated": false,
+  "host_engine_reused": false,
+  "structure_heap_kib": 4194304,
+  "exit_status": 87,
+  "pass_groups": [
+    "PASS: 100 timer preemptions of an API-free EL0 loop; GPR/SIMD/FP/TLS and kernel root restored",
+    "PASS: existing synchronous EL0 entry/exit uses the shared vector correctly",
+    "PASS: user exit, guard fault, kernel access fault and resumable sleep syscall",
+    "PASS: all owned process pages reclaimed; kernel remains running after user faults",
+    "PASS: owned backing RX/RW protection, both stack guards and unchanged kernel mappings",
+    "PASS: owned heap quota, zeroing, guards, foreign/interior/double free rejection, transactional failures and hardware NX",
+    "PASS: userspace SACX function table crosses versioned syscall boundary; checked buffers, clock, log, yield, sleep and exit",
+    "PASS: EL0 SACX heap wrappers, page protection, repeated zeroed reuse, exit/fault/cancel cleanup",
+    "PASS: freestanding C++ startup, RELATIVE relocations into RO data, constructors/destructors, initialized pointers, virtual dispatch and SACX new/delete",
+    "PASS: userspace TLSF arena: 1024 objects in one pool, aligned new/alloc, calloc/realloc, eight-pool exhaustion and trim",
+    "PASS: pinned target libc++ containers, strings, algorithms, ownership, bounds hardening and isolated abort cleanup",
+    "PASS: native threads/TLS, process-local timed join/wait/wake, shared allocator contention, worker faults, parked cancellation and OOM cleanup",
+    "PASS: three API-free worker loops preempt while main sleeps, resumes and joins; kernel regains control",
+    "PASS: C++ local static contention, guard abort/retry, recursive-init isolation, TLS destructor ordering/re-registration, explicit thread exit, bounded overflow and concurrent finalization",
+    "PASS: standard synchronization completes with fast and guest-frame-paced syscall scheduling",
+    "PASS: libc++ SACX mutex/recursive mutex/call_once, multi-lock contention, condition broadcast/timeout/relock and invalid-operation isolation",
+    "PASS: standard C++ threads, owned callbacks/arguments, moves, IDs, sleep/clock, TLS keys/destructors, exit notifications, generation reuse and isolated lifecycle failures",
+    "PASS: nonblocking entropy syscall, consumed test-only boot seed, protected output rejection and repeated EL0 cleanup",
+    "PASS: actual native bmalloc/WTF random adapters: fail-closed unseeded, seeded output and isolated cleanup",
+    "PASS: native VM alignment/guards, zeroing, decommit/recommit, protection, concurrent registry and isolated hardware faults",
+    "PASS: firmware-anchored UTC, FP rounding inheritance/isolation, 1 MiB guarded stacks and 100 detached-thread reclaims",
+    "PASS: actual C, C++ main() and C++ main(argc,argv) bridge entry points execute in EL0",
+    "PASS: real stopped-thread contexts, owned inspection, wait/notification recovery, inspector exit and cancellation",
+    "PASS: actual native WTF synchronization, TLS destructors, timed waits, six joins and invalid-unlock containment",
+    "PASS: actual pinned bmalloc and native WTF OSAllocator adapters execute in EL0 with repeated cleanup",
+    "PASS: pinned native math executes in EL0: arithmetic, special values, rounding, FP exceptions and repeated cleanup",
+    "PASS: pinned LLVM 128-bit arithmetic against Python oracle, conversions, actual libc++ hashing and repeated cleanup",
+    "PASS: native C formatting, parsing, denied files, stream states, thread-local errors, concurrent output and repeated cleanup",
+    "PASS: native libc++abi RTTI in EL0: virtual diamond, cross-cast, null/private rejection, type identity and repeated cleanup",
+    "PASS: incremental 20 MiB ELF, indexed relocations, large zeroed BSS/heap, 8 MiB malloc, RO protection and cancellation in every admission phase",
+    "PASS: compiled ELF programs: initialized data/BSS, owned bytes, preemption, sleep, fault isolation and allocation failure cleanup",
+    "PASS: fully mapped firmware admission with owned backing aliases",
+    "PASS: round-robin tasks, nonblocking sleep, fault isolation, loop cancellation, exhausted slots, allocation failures and 100 create/close cycles",
+    "PASS: actual native JavaScriptCore creates a context, evaluates JavaScript to 4950, releases the context and reclaims process memory",
+    "PASS: actual JavaScriptCore full suite and GC complete with bounded desktop service and 16 ms execution frames",
+    "PASS: infinite native JavaScript timer preemption, kernel progress without engine syscalls, cancellation and complete cleanup",
+    "PASS: bounded desktop service batches short syscalls, preserves yield/sleep/log boundaries, round-robin CPU fairness, cancellation and idle return",
+    "PASS: sparse GiB EL0 reservations, distant pages, physical accounting, zeroed reuse, guard/protection/decommit/NX hardware faults and cancellation cleanup",
+    "PASS: sparse quota/slot bounds, fragmented backing, 19 transactional OOM points, page-table reclaim, process isolation and unchanged kernel mapping"
+  ],
+  "engine_elf_sha256": "ccb1280ab0508d9509a91d52cad60545c2b53627f03d01d0751efeaefe3bfc17",
+  "engine_bytes": 51407872,
+  "kernel_sha256": "a893f4763616464d9ab98c786eb0905d396c713be57cb4d25515976ae0fd572a",
+  "embedded_elf_verified": true,
+  "qemu_log_sha256": "3cdff4125aa7e3b3f09acafddfea3563ba5f6b99639118591c609082dce7390e",
+  "build_report_sha256": "f0ffa1e781f32e89b0ddcb94e9f674c9cefbb759d4e11a2f8372049ad5af5dc6",
+  "layout": {
+    "loads": [
+      {
+        "virtual_address": 0,
+        "file_bytes": 12080680,
+        "memory_bytes": 12080680,
+        "writable": false,
+        "executable": true
+      },
+      {
+        "virtual_address": 12083200,
+        "file_bytes": 35694540,
+        "memory_bytes": 35694540,
+        "writable": false,
+        "executable": false
+      },
+      {
+        "virtual_address": 47779840,
+        "file_bytes": 62560,
+        "memory_bytes": 79192,
+        "writable": true,
+        "executable": false
+      }
+    ],
+    "image_span": 47861760
+  },
+  "startup_tables": {
+    "g_config": {
+      "address": 47779840,
+      "bytes": 16384,
+      "writable_nonexecutable": true
+    },
+    "os_script_config_storage": {
+      "address": 47796224,
+      "bytes": 16384,
+      "writable_nonexecutable": true
+    }
+  },
+  "loader": {
+    "result": 0,
+    "file_bytes": 51407872,
+    "image_bytes": 47861760,
+    "segments": 3,
+    "relocations": 30759,
+    "tls_bytes": 868,
+    "file_limit": 67108864,
+    "image_limit": 67108864
+  },
+  "libraries": {
+    "/home/joshu/.cache/dihos-jsc-target/runtime/libdihos-runtime.a": "36a274e928f9c8eef95263214529bd40932731cba0d9c7ee754861c0424b9f3a",
+    "/home/joshu/.cache/dihos-jsc-target/sealed-archives/e789cf8b71b730749b377f058abc278bda20c1dec4c60eeea298cf971bb520d1-libWTF.a": "e789cf8b71b730749b377f058abc278bda20c1dec4c60eeea298cf971bb520d1",
+    "/home/joshu/.cache/dihos-jsc-target/sealed-archives/6593be6a14ea5d92e7a15573128b9143b46607f3800fb0f9110d6ed48eae3e28-libJavaScriptCore.a": "6593be6a14ea5d92e7a15573128b9143b46607f3800fb0f9110d6ed48eae3e28",
+    "/home/joshu/.cache/dihos-jsc-target/sealed-archives/d0ffdbde9a54b82a1b4f2cda8799fb4453203cbc4c1a21d495407b80d41d8bb9-libJavaScriptCoreBytecode.a": "d0ffdbde9a54b82a1b4f2cda8799fb4453203cbc4c1a21d495407b80d41d8bb9",
+    "/home/joshu/.cache/dihos-jsc-target/sealed-archives/cf22c8b37e2ae1d7794f18da2c4c42e8d11736698419d7f8bdd6600486f1e5f9-libbmalloc.a": "cf22c8b37e2ae1d7794f18da2c4c42e8d11736698419d7f8bdd6600486f1e5f9",
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-rtti/libdihos-rtti.a": "51052617fbef4d6c4186b89cba872b1bd88f00fc9ac2f4f4b14598e50bb433e7",
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-programs/libdihos-libcxx.a": "88775c32847fccc61af61537638ed81ddf451ad48dfd5376bdd1a9dafe5f1bbb",
+    "/home/joshu/.cache/dihos-jsc-target/sysroot/usr/lib/libicuuc.a": "abfb780337ada3402b95b7dcd9084a2bf2c445b24d8c2b268999f3aa0ef10d83",
+    "/home/joshu/.cache/dihos-jsc-target/sysroot/usr/lib/libicui18n.a": "bb7a085e6971d8f564368efdf777ca998488098eb972079b6f8debdd5f7f75a0",
+    "/home/joshu/.cache/dihos-jsc-target/sysroot/usr/lib/libicudata.a": "aae91a61e781aa4060fba646606ac30951dafe013a205cfb1a06a2ce9c7345e8",
+    "/home/joshu/.cache/dihos-libm-1.2.5/f61bb525690f/libdihos-math.a": "e91d1093fecbd26356e4490d911e6e81d227612bcb2962f6a2f432ca08614fd6",
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-jsc-support/libdihos-jsc-support.a": "f110478c2dcfb1f426177eaa2a356b13078728c894a21b71e082019eab68cd0d",
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-stdio/libdihos-stdio.a": "d0246221e50e047dee9d2bfb2f81646352bc22f2a9aacd366ee4d5e6e264eae4"
+  },
+  "source_hashes": {
+    "sdk/sacx/apps/jsc_probe/main.cpp": "2cf9a80451775514ab814a5239dadf593fb457389fc4a8e7b7591b5047a53c19",
+    "tools/jsc_dihos/AbortDihOS.cpp": "db28e77bfb542eab946c9e958bcc2d9d8a72404677922873e35907a39654dde5",
+    "tools/build_jsc_native_test.py": "313aa44a5af0bafcb0d8a0444312c2b32a1a2b0e484b7edf1e8897ad754ee01a",
+    "tools/test_user_runtime_qemu.ps1": "b34d3d33d2c8012391611fabcc6c2ba96654eb75bbf5b3558511f255a94a2235",
+    "tools/user_runtime_qemu_tests.c": "65031a9c3255d19523718a18647c624d5ed2a57b5025cf32aca4c4313bd00cf7",
+    "tools/user_threads_program.ld": "ff10702ebc637f45e2a416925e2e5880272faef50f3be98ea1bd3570f588232e",
+    "kernel/process/dihos_user_runtime.c": "906fd9d26d92493ee27698b0883d8ffb84274face796608eed428eafdfe2d6ae",
+    "kernel/process/dihos_user_elf.c": "1e90441ef6dda841364484bcb10cf4638180caaee1ecc3e42128e04aec5d6ff9",
+    "kernel/include/process/dihos_user_elf.h": "bfae852c8e037d99cb594ce2e708b9b0c98f46e7fbf6b409de01988f923cb86d",
+    "kernel/include/process/dihos_user_runtime.h": "f19ae1b6799c8f95579a8fff25d16ce74989617748b3503ad2195de5b961819b",
+    "kernel/kernel.c": "a5f2f3dd5adaec320821d8aaf068045552b4cca2c1c6a7b052cf61d33669ee94",
+    "kernel/asm/aa64/aa64_user_timer.c": "7184098cfe7914e7729e4b39c947a7174a446ee873bcc689d9567926f4967815",
+    "kernel/include/asm/aa64_user_slice.h": "6d85b3c3039cda575d0ffbe070e5e50091aa1fc2989305819b33e94ed8b81901",
+    "sdk/sacx/user_runtime/virtual_memory.cpp": "8930d946b453038487a9683529bff38f5d604861d31dac3d7814ce7b5260c6bf",
+    "sdk/sacx/include/sacx_user_vm.h": "f1fb15a27e1a4846965c2bd62111cf017e7afbbd8b76d6c01b3b0b9a2fec23b2",
+    "sdk/sacx/include/sacx_user_sparse_vm.h": "7d3be979564ff9c05c8a8028c7c0e2d36b277437a3cf57e250aeb76bd41739be",
+    "tools/user_vm_program.cpp": "099281c870bb89e68bfb88a928a66d19cbb97a6abeea271e37910b4fe3d558f0",
+    "tools/user_webkit_vm_program.cpp": "11b3355a85f19170799fa2a3d6ae5587b2749ed4821e70e709bbb3320606580a",
+    "tools/jsc_dihos/OSAllocatorDihOS.cpp": "549327bd31bcbcfab2964fd6935588502ee1ff42936a9ae30468f47ce3a125f7"
+  },
+  "extended_checks": [
+    "classes, closures and modern syntax",
+    "collections, JSON and BigInt",
+    "typed arrays and DataView",
+    "Unicode, RegExp and ICU Intl",
+    "native callbacks and exception crossing",
+    "promise microtask checkpoint",
+    "protected roots and full GC cycles",
+    "context isolation"
+  ],
+  "spin_elf_sha256": "38904e55a1b9b55e46f7dabdbb4bd93884508d9cdf649fb6d51d47c9ad8e0b02",
+  "spin_build_report_sha256": "ca72cdfe362fa56e2eafdcd84f56d1fe778b723ab6fc865c20a47e85d460095d",
+  "spin_embedded_elf_verified": true,
+  "busy_engine_preemptions_minimum": 24,
+  "api_free_preemptions_minimum": 8,
+  "cancellation_cleanup_verified": true,
+  "desktop_service_operation_cap": 64,
+  "desktop_execution_budget_us": 1000,
+  "execution_frame_pacing_ms": 16,
+  "admission_frame_paced": false,
+  "concurrent_gc_enabled": false,
+  "collector_profile": "upstream synchronous stop-the-world scheduler",
+  "execution_counters": {
+    "slices": 966,
+    "syscalls": 406,
+    "waits": 0,
+    "wakes": 0
+  },
+  "sparse_adapter": true,
+  "structure_heap_override": false,
+  "peak_reserved_bytes": 4303360000,
+  "peak_committed_bytes": 3330048,
+  "adapter_programs": {
+    "vm": {
+      "path": "build/user-programs/vm.elf",
+      "sha256": "6f3e2667b1e286cac37524e8ecfb1b0155d97f35ea82aa19e116792df3925ca0",
+      "bytes": 45888,
+      "embedded_verified": true
+    },
+    "webkit_vm": {
+      "path": "build/user-webkit-vm/webkit-vm.elf",
+      "sha256": "b335a480ac439ddc28b3ffb590fac5ce4bd58c52e085c48d92ba8867a8f7aef7",
+      "bytes": 41536,
+      "embedded_verified": true
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "elf_sha256": "47281f8ab5e2a14aea9947bd853217faf9e909202151ec28b3f36593444df993",
+  "bytes": 41336,
+  "undefined_symbols": [],
+  "native_sources": {
+    "tools/jsc_dihos/bmalloc-vm.h": "3c43934b78935a1c8266b28dbff6f4d3ccceeabf4c65bfe806c683cfbb6045d9",
+    "tools/jsc_dihos/OSAllocatorDihOS.cpp": "63b238031efff018d25be6d9dd694e93faf991a90883d0b9fc11eb028448773e"
+  },
+  "runtime_sha256": "577c18745c7659ba888c37afdac16966ea7643bee8463f17a16017cf534e5149",
+  "guest_validated": false,
+  "qemu_validated": true,
+  "qemu_log_sha256": "c5bcb8331c1f486ef1c17a4498a23b6470a8c79ed3a6dd9ca225112e30912ab6",
+  "source_sha256": {
+    "kernel/process/dihos_user_memory.c": "7e2fd22095d9282a9af0bb778799c64c59fe199544bc9649ca639bd4d4b2ca92",
+    "kernel/process/dihos_user_sacx.c": "52d7cf36024747718e0da729a62b2b5d28e4ae03ae8fdaa8670ab70c8b0bd63b",
+    "sdk/sacx/include/sacx_user_syscall.h": "a53de4efc4195a32b52fc9d203a4809b59456fb6da4e85fd53fb16cc015c05df",
+    "sdk/sacx/include/sacx_user_vm.h": "ed35fc054a9fefb2b6c3a543d4cd53d819df0acd2212cd00bffa51a7abffb3bb",
+    "sdk/sacx/user_runtime/virtual_memory.cpp": "b7615486175f7589ed0ba4e44557310a7743ed951eaaa67b273d4ed2e839e475",
+    "tools/user_vm_program.cpp": "7dfe1e62ccb39291f1bde06683f7401e030bf7cb59f1d2f2f7793e28b56dcc2e",
+    "tools/user_webkit_vm_program.cpp": "991dbceddda7af761e732ecd768a4720b577ee501bc6701a42ee35c60546d857",
+    "tools/user_runtime_qemu_tests.c": "0bb0fa35ae92a66fad09921c7db059684fe4c3b1b8f5297604f26e8f89f551b0",
+    "tools/jsc_dihos/port-edits.json": "24388f256303bcc16266cacef692791f75750a6bead3a2a3a0b9ac20f95c4fc6"
+  }
+}

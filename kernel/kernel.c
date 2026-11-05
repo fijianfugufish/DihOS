@@ -1,4 +1,5 @@
 #include "bootinfo.h"
+#include "system/entropy.h"
 #include "memory/pmem.h"
 #include "kwrappers/kfile.h"
 #include "kwrappers/ktext.h"
@@ -16,6 +17,8 @@
 #include "system/dihos_time.h"
 #include "system/task_accounting.h"
 #include "system/cpu_info.h"
+#include "process/dihos_user_runtime.h"
+#include "process/dihos_user_loader.h"
 #include "system/smp.h"
 #include "system/kwork.h"
 #include "system/ksystem_font.h"
@@ -124,6 +127,7 @@ void kmain(boot_info *bi)
 {
     k_bootinfo_ptr = bi;
     asm_enable_fp_simd();
+    dihos_entropy_init(bi);
 
     // init graphics & pmem
     if (kgfx_init(bi) != 0)
@@ -576,6 +580,8 @@ void kmain(boot_info *bi)
         task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
         uint64_t ui_stage_started=hyperv_present ? dihos_time_monotonic_ms() : 0;
         sacx_runtime_network_poll();
+        dihos_user_runtime_service();
+        dihos_user_load_poll();
         kinput_poll();
         kmouse_update();
         if (hyperv_present) { hyperv_timing_record(0,ui_stage_started); ui_stage_started=dihos_time_monotonic_ms(); }
@@ -583,6 +589,7 @@ void kmain(boot_info *bi)
         {
             task_accounting_add(TASK_ACCOUNT_INPUT_UI, 1u);
             kwindow_update_all();
+            dihos_user_window_desktop_poll();
             file_explorer_update();
             text_editor_update();
             task_manager_update();

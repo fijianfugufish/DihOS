@@ -10,7 +10,9 @@
  */
 
 #define AARCH64_USER_VM_PAGE_SIZE 4096ull
-#define AARCH64_USER_VM_MAX_TABLES 24u
+#ifndef AARCH64_USER_VM_MAX_TABLES
+#define AARCH64_USER_VM_MAX_TABLES 512u
+#endif
 
 #define AARCH64_USER_VM_READ    (1u << 0)
 #define AARCH64_USER_VM_WRITE   (1u << 1)
@@ -25,7 +27,8 @@ typedef struct aarch64_user_vm
     uint32_t owned_table_count;
 } aarch64_user_vm;
 
-/* Clones the active EL1 root but does not install or activate the clone. */
+/* Rejects inherited EL0-accessible mappings, then clones the active EL1 root
+ * without installing or activating the clone. */
 int aarch64_user_vm_create(aarch64_user_vm *vm);
 /* Maps contiguous physical pages into an otherwise-unmapped EL0 range. */
 int aarch64_user_vm_map(aarch64_user_vm *vm, uint64_t user_va,
@@ -43,3 +46,25 @@ int aarch64_user_vm_translate(const aarch64_user_vm *vm,
 /* Releases only private page-table pages; mapped process memory remains owned
  * by the process loader/supervisor.  The VM must not be active. */
 void aarch64_user_vm_release(aarch64_user_vm *vm);
+/* Publish all private descriptors before first activation; does not install
+ * the VM. Required even when firmware configured non-cacheable table walks. */
+int aarch64_user_vm_publish(const aarch64_user_vm *vm);
+/* Paused VM only. Prepare private L3 leaves transactionally, preserving their
+ * physical targets/permissions. Owned updates require those exact targets. */
+int aarch64_user_vm_prepare_owned(aarch64_user_vm *vm,uint64_t va,uint64_t physical,uint64_t bytes);
+int aarch64_user_vm_set_owned(aarch64_user_vm *vm,uint64_t va,uint64_t physical,uint64_t bytes,uint32_t permissions);
+int aarch64_user_vm_check_buffer(const aarch64_user_vm *vm,uint64_t address,uint64_t bytes,int write);
+int aarch64_user_vm_check_execute(const aarch64_user_vm *vm,uint64_t address);
+int aarch64_user_vm_describe(const aarch64_user_vm *vm,uint64_t va,uint64_t descriptors[4]);
+/* Paused private tree only. Claim a whole-GB physical hole, preserving the
+ * active kernel map. Existing leaves must be EL1-only normal identity maps.
+ * Firmware resources/boot allocations are independently excluded by pmem. */
+int aarch64_user_vm_claim_sparse_arena(aarch64_user_vm *vm,uint64_t base,uint64_t bytes);
+#define AARCH64_USER_VM_SCATTER_MAX 16u
+int aarch64_user_vm_map_scatter(aarch64_user_vm*,uint64_t,const uint64_t*,unsigned,uint32_t);
+int aarch64_user_vm_protect_scatter(aarch64_user_vm*,uint64_t,const uint64_t*,unsigned,uint32_t);
+int aarch64_user_vm_unmap_scatter(aarch64_user_vm*,uint64_t,const uint64_t*,unsigned);
+/* Paused-process copies. Validate every page before writing anything; only
+ * EL0-accessible pages of an inert owned VM are admitted. Maximum 4 KiB. */
+int aarch64_user_vm_copy_in(const aarch64_user_vm *vm,void *kernel_buffer,uint64_t user_address,uint64_t bytes);
+int aarch64_user_vm_copy_out(const aarch64_user_vm *vm,uint64_t user_address,const void *kernel_buffer,uint64_t bytes);

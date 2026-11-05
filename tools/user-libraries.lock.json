@@ -1,0 +1,6 @@
+{
+  "version": "22.1.0",
+  "repository": "https://github.com/llvm/llvm-project.git",
+  "commit": "4434dabb69916856b824f68a64b029c67175e532",
+  "tree_sha256": "b4bbb0028e6c9f5062949cdc739f663d0409242d724cd3e8fe742f22bffef0b8"
+}

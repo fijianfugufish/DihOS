@@ -6,6 +6,7 @@ typedef struct __attribute__((aligned(64))) sacx_net_request_slot
     uint8_t used;
     uint8_t truncated;
     uint8_t release_when_done,no_follow;
+    uint8_t tls_required,tls_verified;
     uint32_t id;
     uint32_t job_id;
     volatile uint32_t status;
@@ -19,9 +20,11 @@ typedef struct __attribute__((aligned(64))) sacx_net_request_slot
     uint8_t *buffer;
     sacx_net_response_info info;
     http_stream stream;
-    char url[768];
+    char url[SACX_HTTP_URL_MAX+1];
     char method[8];
     char content_type[96];
+    uint32_t request_header_bytes;
+    char request_headers[SACX_HTTP_REQUEST_HEADERS_MAX+1];
     uint32_t request_body_size;
-    uint8_t request_body[4096];
+    uint8_t request_body[SACX_HTTP_REQUEST_BODY_MAX];
 } sacx_net_request_slot;

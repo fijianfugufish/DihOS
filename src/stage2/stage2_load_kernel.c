@@ -616,7 +616,7 @@ static void jump_to_kernel(EFI_PHYSICAL_ADDRESS entry, const boot_info *bi)
 
 EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
                               EFI_HANDLE image,
-                              const boot_info *bi,
+                              boot_info *bi,
                               EFI_PHYSICAL_ADDRESS entry)
 {
     EFI_GET_MEMORY_MAP GetMMap = BsGetMMap(st->BootServices);
@@ -673,6 +673,8 @@ EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *st,
     }
 
     boot_info bi_copy = *bi;
+    for(unsigned i=0;i<sizeof(bi->boot_rng_seed);++i)((volatile uint8_t*)bi->boot_rng_seed)[i]=0;
+    bi->boot_rng_flags=0;
     bi_copy.mmap = (uint64_t)(uintptr_t)mmap;
     bi_copy.mmap_size = map_sz;
     bi_copy.mmap_desc_size = dsz;

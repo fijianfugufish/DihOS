@@ -1,0 +1,210 @@
+{
+  "Source/WebCore/platform/graphics/WOFFFileFormat.cpp": {
+    "before_sha256": "1e9c8c02c9f85090bd03114c7bc1fea6db8bea26f24174df854393f5a9069612",
+    "match": "#include <wtf/ByteOrder.h>",
+    "replacement": "#if PLATFORM(DIHOS)\n#include \"ByteOrderDihOS.h\"\n#else\n#include <wtf/ByteOrder.h>\n#endif"
+  },
+  "Source/WebCore/platform/graphics/iso/ISOTrackEncryptionBox.cpp": {
+    "before_sha256": "8f5404ed3e0ff49776d1b1589f57fafcb14148314f8abc83a3e8bcca81f10a34",
+    "match": "#include \"BitReader.h\"",
+    "replacement": "#include \"platform/video-codecs/BitReader.h\""
+  },
+  "Source/WebCore/platform/graphics/VP9Utilities.cpp": {
+    "before_sha256": "37b3b1c66a75af1180295362dec1dee63ff6c857f899cf307441084099620e3d",
+    "match": "#include \"BitReader.h\"",
+    "replacement": "#include \"platform/video-codecs/BitReader.h\""
+  },
+  "Source/WebCore/platform/graphics/cairo/ImageUtilitiesCairo.cpp": {
+    "before_sha256": "27e5b0b40eb2965905f347845ce418bc84290591058fcda577e578f59230ad9d",
+    "operations": [
+      {
+        "match": "#if !PLATFORM(GTK)\nstatic cairo_status_t",
+        "replacement": "#if !PLATFORM(GTK)\n#if CAIRO_HAS_PNG_FUNCTIONS\nstatic cairo_status_t"
+      },
+      {
+        "match": "#else\n\nVector<uint8_t> platformEncodeData(const NativeImage& image, const String& mimeType, std::optional<double> quality)",
+        "replacement": "#else\nVector<uint8_t> platformEncodeData(const NativeImage&, const String&, std::optional<double>)\n{\n    // This Cairo build has no bitmap encoder. Empty data reports failure.\n    return { };\n}\n#endif // CAIRO_HAS_PNG_FUNCTIONS\n#else\n\nVector<uint8_t> platformEncodeData(const NativeImage& image, const String& mimeType, std::optional<double> quality)"
+      }
+    ]
+  },
+  "Source/WebCore/platform/graphics/ImageDecoder.cpp": {
+    "before_sha256": "96b2893f79849b078381c446bf122036a57316ac60e2127ea84015821aee1081",
+    "operations": [
+      {
+        "match": "#include \"ScalableImageDecoder.h\"",
+        "replacement": "#if !PLATFORM(DIHOS)\n#include \"ScalableImageDecoder.h\"\n#endif"
+      },
+      {
+        "match": "#else\n    return ScalableImageDecoder::create(data, alphaOption, gammaAndColorProfileOption);\n#endif",
+        "replacement": "#elif PLATFORM(DIHOS)\n    // No native bitmap codecs yet: reject decoding, never fabricate an image.\n    UNUSED_PARAM(data);\n    UNUSED_PARAM(alphaOption);\n    UNUSED_PARAM(gammaAndColorProfileOption);\n    return nullptr;\n#else\n    return ScalableImageDecoder::create(data, alphaOption, gammaAndColorProfileOption);\n#endif"
+      },
+      {
+        "match": "#else\n    if (ScalableImageDecoder::supportsMediaType(type))",
+        "replacement": "#elif !PLATFORM(DIHOS)\n    if (ScalableImageDecoder::supportsMediaType(type))"
+      }
+    ]
+  },
+  "Source/WebCore/platform/graphics/AV1Utilities.cpp": {
+    "before_sha256": "0866596ae44e85af0a655598dcde5f1b693fbfdad6d3f9aaa773e5fc77e03eca",
+    "match": "#include \"BitReader.h\"",
+    "replacement": "#include \"platform/video-codecs/BitReader.h\""
+  },
+  "Source/WebCore/Modules/push-api/PushMessageCrypto.cpp": {
+    "before_sha256": "38a7911d60192f976684fcd794bd859809ad93cefeb644726196dcf8b85dedd2",
+    "match": "    uint16_t paddingLength;\n    memcpySpan(asMutableByteSpan(paddingLength), span.first(2));\n    paddingLength = ntohs(paddingLength);",
+    "replacement": "    // Decode the checked two-byte network field without a POSIX socket API.\n    uint16_t paddingLength = (static_cast<uint16_t>(span[0]) << 8) | span[1];"
+  },
+  "Source/WebCore/platform/SharedMemory.h": {
+    "before_sha256": "e9ac7fc80e95f05b09ee7dfa3244dd4908f04107712d517b2ed32abbf4b9a0ae",
+    "match": "#elif OS(WINDOWS)\n        Win32Handle;\n#endif",
+    "replacement": "#elif OS(WINDOWS)\n        Win32Handle;\n#elif OS(DIHOS)\n        std::nullptr_t; // No transferable IPC handles in the native profile.\n#endif"
+  },
+  "Source/WebCore/crypto/openssl/CryptoKeyRSAOpenSSL.cpp": {
+    "before_sha256": "1a5f201dc16a7820e123478f5c4333513d743a0ac37f8cd3c03cbf9a2bbb7026",
+    "match": "RSA* rsa",
+    "matches": 4,
+    "replacement": "const RSA* rsa"
+  },
+  "Source/WebCore/platform/network/DNS.cpp": {
+    "before_sha256": "4f76695a147036df638371df2ffb72bd092bc529e51693de688f5dc5284ebf9c",
+    "operations": [
+      {
+        "match": "#include \"DNSResolveQueue.h\"",
+        "replacement": "#include \"DNSResolveQueue.h\"\n#if PLATFORM(DIHOS)\n#include \"ByteOrderDihOS.h\"\n#endif"
+      },
+      {
+        "match": "    DNSResolveQueue::singleton().add(hostname);",
+        "replacement": "#if !PLATFORM(DIHOS)\n    DNSResolveQueue::singleton().add(hostname);\n#endif // Native HTTP resolves on demand; no advisory prefetch service."
+      },
+      {
+        "match": "htonl(INADDR_LOOPBACK)",
+        "replacement": "htonl(0x7f000001U)"
+      }
+    ]
+  },
+  "Source/WebCore/platform/network/DNSResolveQueue.cpp": {
+    "before_sha256": "a1acfb557bc4c224290897c141b93da8a65c2d2e2b5d39d76795f3c8a89fb747",
+    "match": "#if USE(GLIB)",
+    "replacement": "#if PLATFORM(DIHOS)\n#include \"DNSResolveQueueDihOS.h\"\n#elif USE(GLIB)"
+  },
+  "Source/WebCore/platform/graphics/FontCache.cpp": {
+    "before_sha256": "2001b6a198dc9b4f7214618eecf8529145879e22ae1b826167c8537bfcf28b4a",
+    "operations": [
+      {
+        "match": "FontCache* FontCache::forCurrentThreadIfExists()\n{\n    return threadGlobalDataSingleton().fontCacheIfExists();\n}",
+        "replacement": "FontCache* FontCache::forCurrentThreadIfExists()\n{\n#if PLATFORM(DIHOS)\n    // Main-thread TLS is finalized before process static destructors. Font\n    // destructors must not resurrect ThreadGlobalData (and its shared timer).\n    auto* thread = Thread::currentMayBeNull();\n    if (!thread || !thread->m_clientData)\n        return nullptr;\n    return downcast<ThreadGlobalData>(*thread->m_clientData).fontCacheIfExists();\n#else\n    return threadGlobalDataSingleton().fontCacheIfExists();\n#endif\n}"
+      },
+      {
+        "match": "FontCache* FontCache::forCurrentThreadIfNotDestroyed()\n{\n    return threadGlobalDataSingleton().fontCacheIfNotDestroyed();\n}",
+        "replacement": "FontCache* FontCache::forCurrentThreadIfNotDestroyed()\n{\n#if PLATFORM(DIHOS)\n    // Main-thread TLS is finalized before process static destructors. Font\n    // destructors must not resurrect ThreadGlobalData (and its shared timer).\n    auto* thread = Thread::currentMayBeNull();\n    if (!thread || !thread->m_clientData)\n        return nullptr;\n    return downcast<ThreadGlobalData>(*thread->m_clientData).fontCacheIfNotDestroyed();\n#else\n    return threadGlobalDataSingleton().fontCacheIfNotDestroyed();\n#endif\n}"
+      }
+    ]
+  },
+  "Source/WebCore/platform/network/ResourceHandleInternal.h": {
+    "before_sha256": "5b8e08775a851824dcc1d8ea4092fc868352c9d11739a9a89b1add1a0bd3c38a",
+    "operations": [
+      {
+        "match": "namespace WebCore {",
+        "replacement": "#if PLATFORM(DIHOS)\n#include \"NativeHandleState.h\"\n#endif\n\nnamespace WebCore {"
+      },
+      {
+        "match": "    RefPtr<NetworkingContext> m_context;",
+        "replacement": "#if PLATFORM(DIHOS)\n    RefPtr<DihOSWeb::NativeHandleState> m_nativeState;\n#endif\n    RefPtr<NetworkingContext> m_context;"
+      }
+    ]
+  },
+  "Source/WebCore/loader/EmptyFrameLoaderClient.h": {
+    "before_sha256": "429f9a9095c35f6eaace6d3e3191e85eb91937130e3246ca52daa76e3bb1f6d4",
+    "operations": [
+      {
+        "match": "    bool NODELETE hasWebView() const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    bool NODELETE hasWebView() const override;\n#else\n    bool NODELETE hasWebView() const final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE committedLoad(DocumentLoader*, const SharedBuffer&) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE committedLoad(DocumentLoader*, const SharedBuffer&) override;\n#else\n    void NODELETE committedLoad(DocumentLoader*, const SharedBuffer&) final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDecidePolicyForResponse(const ResourceResponse&, const ResourceRequest&, const String&, FramePolicyFunction&&) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDecidePolicyForResponse(const ResourceResponse&, const ResourceRequest&, const String&, FramePolicyFunction&&) override;\n#else\n    void NODELETE dispatchDecidePolicyForResponse(const ResourceResponse&, const ResourceRequest&, const String&, FramePolicyFunction&&) final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDecidePolicyForNavigationAction(const NavigationAction&, const ResourceRequest&, const ResourceResponse& redirectResponse, FormState*, const String&, std::optional<NavigationIdentifier>, std::optional<HitTestResult>&&, bool, NavigationUpgradeToHTTPSBehavior, SandboxFlags, PolicyDecisionMode, FramePolicyFunction&&) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDecidePolicyForNavigationAction(const NavigationAction&, const ResourceRequest&, const ResourceResponse& redirectResponse, FormState*, const String&, std::optional<NavigationIdentifier>, std::optional<HitTestResult>&&, bool, NavigationUpgradeToHTTPSBehavior, SandboxFlags, PolicyDecisionMode, FramePolicyFunction&&) override;\n#else\n    void NODELETE dispatchDecidePolicyForNavigationAction(const NavigationAction&, const ResourceRequest&, const ResourceResponse& redirectResponse, FormState*, const String&, std::optional<NavigationIdentifier>, std::optional<HitTestResult>&&, bool, NavigationUpgradeToHTTPSBehavior, SandboxFlags, PolicyDecisionMode, FramePolicyFunction&&) final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&&) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&&) override;\n#else\n    void NODELETE dispatchDecidePolicyForNewWindowAction(const NavigationAction&, const ResourceRequest&, FormState*, const String&, std::optional<HitTestResult>&&, FramePolicyFunction&&) final;\n#endif"
+      },
+      {
+        "match": "    bool NODELETE canHandleRequest(const ResourceRequest&) const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    bool NODELETE canHandleRequest(const ResourceRequest&) const override;\n#else\n    bool NODELETE canHandleRequest(const ResourceRequest&) const final;\n#endif"
+      },
+      {
+        "match": "    bool NODELETE canShowMIMEType(const String&) const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    bool NODELETE canShowMIMEType(const String&) const override;\n#else\n    bool NODELETE canShowMIMEType(const String&) const final;\n#endif"
+      },
+      {
+        "match": "    bool NODELETE canShowMIMETypeAsHTML(const String&) const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    bool NODELETE canShowMIMETypeAsHTML(const String&) const override;\n#else\n    bool NODELETE canShowMIMETypeAsHTML(const String&) const final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDidFailProvisionalLoad(const ResourceError&, WillContinueLoading, WillInternallyHandleFailure) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDidFailProvisionalLoad(const ResourceError&, WillContinueLoading, WillInternallyHandleFailure) override;\n#else\n    void NODELETE dispatchDidFailProvisionalLoad(const ResourceError&, WillContinueLoading, WillInternallyHandleFailure) final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDidFailLoad(const ResourceError&) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDidFailLoad(const ResourceError&) override;\n#else\n    void NODELETE dispatchDidFailLoad(const ResourceError&) final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE dispatchDidFinishLoad() final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE dispatchDidFinishLoad() override;\n#else\n    void NODELETE dispatchDidFinishLoad() final;\n#endif"
+      },
+      {
+        "match": "    void NODELETE transitionToCommittedForNewPage(InitializingIframe) final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    void NODELETE transitionToCommittedForNewPage(InitializingIframe) override;\n#else\n    void NODELETE transitionToCommittedForNewPage(InitializingIframe) final;\n#endif"
+      },
+      {
+        "match": "    Ref<FrameNetworkingContext> createNetworkingContext() final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    Ref<FrameNetworkingContext> createNetworkingContext() override;\n#else\n    Ref<FrameNetworkingContext> createNetworkingContext() final;\n#endif"
+      },
+      {
+        "match": "    ShouldGoToHistoryItem NODELETE shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation) const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    ShouldGoToHistoryItem NODELETE shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation) const override;\n#else\n    ShouldGoToHistoryItem NODELETE shouldGoToHistoryItem(HistoryItem&, IsSameDocumentNavigation) const final;\n#endif"
+      },
+      {
+        "match": "    RefPtr<HistoryItem> createHistoryItemTree(bool, BackForwardItemIdentifier) const final;",
+        "replacement": "#if PLATFORM(DIHOS)\n    RefPtr<HistoryItem> createHistoryItemTree(bool, BackForwardItemIdentifier) const override;\n#else\n    RefPtr<HistoryItem> createHistoryItemTree(bool, BackForwardItemIdentifier) const final;\n#endif"
+      }
+    ]
+  },
+  "Source/WebCore/loader/EmptyClients.cpp": {
+    "before_sha256": "08e95b17bedb725ef9a65308c2cca2552e0c7e2c0786f9408505119fbbc1e278",
+    "operations": [
+      {
+        "match": "    bool NODELETE shouldDeleteRange(const std::optional<SimpleRange>&) final { return false; }",
+        "replacement": "    bool NODELETE shouldDeleteRange(const std::optional<SimpleRange>&) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      },
+      {
+        "match": "    bool NODELETE shouldBeginEditing(const SimpleRange&) final { return false; }",
+        "replacement": "    bool NODELETE shouldBeginEditing(const SimpleRange&) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      },
+      {
+        "match": "    bool NODELETE shouldEndEditing(const SimpleRange&) final { return false; }",
+        "replacement": "    bool NODELETE shouldEndEditing(const SimpleRange&) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      },
+      {
+        "match": "    bool NODELETE shouldInsertNode(Node&, const std::optional<SimpleRange>&, EditorInsertAction) final { return false; }",
+        "replacement": "    bool NODELETE shouldInsertNode(Node&, const std::optional<SimpleRange>&, EditorInsertAction) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      },
+      {
+        "match": "    bool NODELETE shouldInsertText(const String&, const std::optional<SimpleRange>&, EditorInsertAction) final { return false; }",
+        "replacement": "    bool NODELETE shouldInsertText(const String&, const std::optional<SimpleRange>&, EditorInsertAction) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      },
+      {
+        "match": "    bool NODELETE shouldChangeSelectedRange(const std::optional<SimpleRange>&, const std::optional<SimpleRange>&, Affinity, bool) final { return false; }",
+        "replacement": "    bool NODELETE shouldChangeSelectedRange(const std::optional<SimpleRange>&, const std::optional<SimpleRange>&, Affinity, bool) final {\n#if PLATFORM(DIHOS)\n        return true;\n#else\n        return false;\n#endif\n    }"
+      }
+    ]
+  }
+}

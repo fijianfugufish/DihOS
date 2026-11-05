@@ -1,0 +1,148 @@
+{
+  "date": "2026-10-30",
+  "scope": "Actual ARM64 EL0 C runtime using shared SDK error storage",
+  "qemu_validated": true,
+  "engine_executed": false,
+  "hyperv_validated": false,
+  "hardware_validated": false,
+  "pass_groups": [
+    "PASS: 100 timer preemptions of an API-free EL0 loop; GPR/SIMD/FP/TLS and kernel root restored",
+    "PASS: existing synchronous EL0 entry/exit uses the shared vector correctly",
+    "PASS: user exit, guard fault, kernel access fault and resumable sleep syscall",
+    "PASS: all owned process pages reclaimed; kernel remains running after user faults",
+    "PASS: owned backing RX/RW protection, both stack guards and unchanged kernel mappings",
+    "PASS: owned heap quota, zeroing, guards, foreign/interior/double free rejection, transactional failures and hardware NX",
+    "PASS: userspace SACX function table crosses versioned syscall boundary; checked buffers, clock, log, yield, sleep and exit",
+    "PASS: EL0 SACX heap wrappers, page protection, repeated zeroed reuse, exit/fault/cancel cleanup",
+    "PASS: freestanding C++ startup, RELATIVE relocations into RO data, constructors/destructors, initialized pointers, virtual dispatch and SACX new/delete",
+    "PASS: userspace TLSF arena: 1024 objects in one pool, aligned new/alloc, calloc/realloc, eight-pool exhaustion and trim",
+    "PASS: pinned target libc++ containers, strings, algorithms, ownership, bounds hardening and isolated abort cleanup",
+    "PASS: native threads/TLS, process-local timed join/wait/wake, shared allocator contention, worker faults, parked cancellation and OOM cleanup",
+    "PASS: three API-free worker loops preempt while main sleeps, resumes and joins; kernel regains control",
+    "PASS: C++ local static contention, guard abort/retry, recursive-init isolation, TLS destructor ordering/re-registration, explicit thread exit, bounded overflow and concurrent finalization",
+    "PASS: standard synchronization completes with fast and guest-frame-paced syscall scheduling",
+    "PASS: libc++ SACX mutex/recursive mutex/call_once, multi-lock contention, condition broadcast/timeout/relock and invalid-operation isolation",
+    "PASS: standard C++ threads, owned callbacks/arguments, moves, IDs, sleep/clock, TLS keys/destructors, exit notifications, generation reuse and isolated lifecycle failures",
+    "PASS: nonblocking entropy syscall, consumed test-only boot seed, protected output rejection and repeated EL0 cleanup",
+    "PASS: actual native bmalloc/WTF random adapters: fail-closed unseeded, seeded output and isolated cleanup",
+    "PASS: native VM alignment/guards, zeroing, decommit/recommit, protection, concurrent registry and isolated hardware faults",
+    "PASS: firmware-anchored UTC, FP rounding inheritance/isolation, 1 MiB guarded stacks and 100 detached-thread reclaims",
+    "PASS: actual C, C++ main() and C++ main(argc,argv) bridge entry points execute in EL0",
+    "PASS: real stopped-thread contexts, owned inspection, wait/notification recovery, inspector exit and cancellation",
+    "PASS: actual native WTF synchronization, TLS destructors, timed waits, six joins and invalid-unlock containment",
+    "PASS: actual pinned bmalloc and native WTF OSAllocator adapters execute in EL0 with repeated cleanup",
+    "PASS: pinned native math executes in EL0: arithmetic, special values, rounding, FP exceptions and repeated cleanup",
+    "PASS: pinned LLVM 128-bit arithmetic against Python oracle, conversions, actual libc++ hashing and repeated cleanup",
+    "PASS: native C formatting, parsing, denied files, stream states, thread-local errors, concurrent output and repeated cleanup",
+    "PASS: native libc++abi RTTI in EL0: virtual diamond, cross-cast, null/private rejection, type identity and repeated cleanup",
+    "PASS: incremental 20 MiB ELF, indexed relocations, large zeroed BSS/heap, 8 MiB malloc, RO protection and cancellation in every admission phase",
+    "PASS: compiled ELF programs: initialized data/BSS, owned bytes, preemption, sleep, fault isolation and allocation failure cleanup",
+    "PASS: fully mapped firmware admission with owned backing aliases",
+    "PASS: round-robin tasks, nonblocking sleep, fault isolation, loop cancellation, exhausted slots, allocation failures and 100 create/close cycles"
+  ],
+  "qemu_kernel_sha256": "2a25afc8b70d90b994e1eb1cfcd9362d2f78b387b31fc6acd9adfad78ca90d44",
+  "qemu_log_sha256": "cedb05af9ada27f1d2d48716900d4c3d2f638f3a146ba1929cd8af8ef2b9445a",
+  "sdk_report_sha256": "748096e213f467646415a4b8804594eb0b5fc5d311105425614dbdaa44790cef",
+  "runtime_archive": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/runtime/libdihos-runtime.a",
+    "sha256": "4c91cca68d39004e028f37ce3523c3bad93eb412f5f26c7187a7007f8d134c32"
+  },
+  "components": {
+    "user-libm": {
+      "library": {
+        "path": "/home/joshu/.cache/dihos-libm-1.2.5/f61bb525690f/libdihos-math.a",
+        "sha256": "e91d1093fecbd26356e4490d911e6e81d227612bcb2962f6a2f432ca08614fd6",
+        "bytes": 461954
+      },
+      "fixture": {
+        "source_sha256": "cd28aabf4d113171fd0da9b77eb4eaf2eea45acb8c1d08866f919f04c0c2e867",
+        "elf_sha256": "05cda89bb4ae325407bf733c7dee55b4f1d26e4dffa706e12cf5dd84f52b8a04",
+        "elf_bytes": 80712,
+        "runtime_sha256": "4c91cca68d39004e028f37ce3523c3bad93eb412f5f26c7187a7007f8d134c32",
+        "runtime_report_sha256": "748096e213f467646415a4b8804594eb0b5fc5d311105425614dbdaa44790cef",
+        "exit_status": 96,
+        "undefined_symbols": [],
+        "guest_validated": false
+      },
+      "report_sha256": "0f28e012c5a49f7db7362f63ec4743b2d1f89de0103c311aa6e31bfbc97eb42a"
+    },
+    "user-jsc-support": {
+      "library": {
+        "path": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-jsc-support/libdihos-jsc-support.a",
+        "sha256": "f110478c2dcfb1f426177eaa2a356b13078728c894a21b71e082019eab68cd0d",
+        "bytes": 46800
+      },
+      "fixture": {
+        "source_sha256": "5ca8399026c79d6b68363875a317019e603884cf465d7a6db3f11c269e4c8b12",
+        "vectors_sha256": "406894507343f32a61edefef6f8995e82005117a39d788239cd851a0f70502d3",
+        "generator_sha256": "9bc0641b3cd029e4b4d54f34ada1acff419d147df88ca8f9d118c29d76222d50",
+        "elf_sha256": "25f1b5791258ff46ae4823e20e7721ff8b709e307e3ea30879714aa3f65ef2a2",
+        "elf_bytes": 66760,
+        "exit_status": 98,
+        "retained_imports": [
+          "                 U _ZNSt3__112__next_primeEm",
+          "                 U _ZNSt3__113__hash_memoryEPKvm",
+          "                 U _ZNSt3__122__libcpp_verbose_abortEPKcz",
+          "                 U _ZdlPvm",
+          "                 U _Znwm",
+          "                 U __addtf3",
+          "                 U __divtf3",
+          "                 U __divti3",
+          "                 U __eqtf2",
+          "                 U __extenddftf2",
+          "                 U __extendsftf2",
+          "                 U __fixdfti",
+          "                 U __fixtfdi",
+          "                 U __fixtfsi",
+          "                 U __fixunstfsi",
+          "                 U __floatsitf",
+          "                 U __floattidf",
+          "                 U __modti3",
+          "                 U __multf3",
+          "                 U __netf2",
+          "                 U __subtf3",
+          "                 U __trunctfdf2",
+          "                 U __trunctfsf2",
+          "                 U __udivti3",
+          "                 U __umodti3",
+          "                 U dihos_user_libcxx_abort",
+          "                 U memcmp",
+          "                 U memcpy",
+          "                 U strlen"
+        ],
+        "undefined_symbols": [],
+        "qemu_validated": false
+      },
+      "report_sha256": "d86611186fff164d1ae304c00f5f25526c2dc6201dcc5feec5d694a7f95c580a"
+    },
+    "user-stdio": {
+      "library": {
+        "path": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-stdio/libdihos-stdio.a",
+        "sha256": "d0246221e50e047dee9d2bfb2f81646352bc22f2a9aacd366ee4d5e6e264eae4",
+        "bytes": 88198
+      },
+      "fixture": {
+        "source_sha256": "8dd21adeee9c4e7dc0b45c53ff4f1e9444dd0dc8d9b190515f739ceed9fe9660",
+        "elf_sha256": "22ef195043afb6c5cda5fbbe025e371c95a54ea6b0859464a1b57ea83baab4f9",
+        "elf_bytes": 85312,
+        "exit_status": 99,
+        "undefined_symbols": [],
+        "qemu_validated": false,
+        "libraries": {
+          "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-stdio/libdihos-stdio.a": "d0246221e50e047dee9d2bfb2f81646352bc22f2a9aacd366ee4d5e6e264eae4",
+          "/home/joshu/.cache/dihos-jsc-target/runtime/libdihos-runtime.a": "4c91cca68d39004e028f37ce3523c3bad93eb412f5f26c7187a7007f8d134c32",
+          "/home/joshu/.cache/dihos-libm-1.2.5/f61bb525690f/libdihos-math.a": "e91d1093fecbd26356e4490d911e6e81d227612bcb2962f6a2f432ca08614fd6",
+          "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-jsc-support/libdihos-jsc-support.a": "f110478c2dcfb1f426177eaa2a356b13078728c894a21b71e082019eab68cd0d"
+        }
+      },
+      "report_sha256": "37abf29275c87ab416477e4491b9b0c902dccd160bec1d992d718fdff91f5021"
+    }
+  },
+  "source_hashes": {
+    "sdk\\sacx\\user_runtime\\runtime.cpp": "3bf5e409f703196987e1882509e1751df20198dfe483695fa4486856e72b27eb",
+    "sdk\\sacx\\user_runtime\\libcxx\\c\\errno.h": "c43a4a9dbb04e35842452b51fda6b617c3572b45e5fc1ae47c962f8c2ac91e0c",
+    "sdk\\sacx\\user_runtime\\libcxx\\c\\stdio.h": "34b407cae87fd1924dac7edff72c388b2948d3a2f417a7da032d119a58997c9e",
+    "tools\\jsc_dihos\\StdioDihOS.cpp": "4f7f89ca3e0111611ecac16f1bbde2480ed22f8e8792c10f23d94f2538f7385a"
+  },
+  "legacy_c_shim_preserved": true
+}

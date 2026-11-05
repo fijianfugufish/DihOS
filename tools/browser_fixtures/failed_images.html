@@ -1,0 +1,7 @@
+<script>window.failedImageCount=0;</script>
+<div id="failed-images-result" style="position:absolute;left:600px;top:300px;width:20px;height:20px;background:#ff0000"></div>
+<div style="position:absolute;left:0;top:420px;display:flex">
+<img width="40" height="40" alt="network" src="/failed-image" onerror="if(++failedImageCount===3)document.getElementById('failed-images-result').style.background='#24ac68'">
+<img width="40" height="40" alt="corrupt" src="data:image/png;base64,AA==" onerror="if(++failedImageCount===3)document.getElementById('failed-images-result').style.background='#24ac68'">
+<img alt="unsized" src="data:image/jpeg;base64,AA==" onerror="if(++failedImageCount===3)document.getElementById('failed-images-result').style.background='#24ac68'">
+</div>

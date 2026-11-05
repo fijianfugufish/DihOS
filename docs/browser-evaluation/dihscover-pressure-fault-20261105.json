@@ -1,0 +1,15 @@
+{
+  "evidence": "user-supplied proc:status screenshot after search and watch-page navigation",
+  "screenshot": "codex-clipboard-d0a08b59-1dee-4eea-adc7-20446eee8a59.png",
+  "pc": "0x11d4def8",
+  "code_base": "0xf31a000",
+  "offset": "0x2a33ef8",
+  "symbol": "WTF::fastCompactMalloc(unsigned long)",
+  "requested_bytes": 10775467,
+  "allocator_reserved_bytes": 404488192,
+  "allocator_live_bytes": 242881664,
+  "allocator_pools": 20,
+  "allocator_reason": 3,
+  "peak_heap_committed_bytes": 414552064,
+  "matching_renderer_sha256": "6d97f7635cffd57ce42fcb2252aa52310b6b2386918f694ff1ea28f2eb4d0d24"
+}

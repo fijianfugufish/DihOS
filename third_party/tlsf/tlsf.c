@@ -1,9 +1,13 @@
+#if defined(DIHOS_USER_TLSF)
+#include "dihos_user_tlsf.h"
+#else
 #include <assert.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#endif
 
 #include "tlsf.h"
 

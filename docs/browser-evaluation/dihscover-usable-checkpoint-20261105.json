@@ -1,0 +1,26 @@
+{
+  "date": "2026-11-05",
+  "base": "43f5d2ad0279656a7cda58065d3c74c1a0730320",
+  "selected_source_files": 980,
+  "selected_source_sha256": "85f0640aa2980123256cc8ba7a4bec600035f49cc7e09d4b6e50b2e361e8a105",
+  "clean_snapshot": "HEAD archive plus reviewed source overlay; no untracked build inputs",
+  "validation": {
+    "arm64_boot_stage2_kernel": "passed: build.ps1 -ArmOnly -KernelOnly",
+    "hyperv_host_suite": "passed: tools/test_hyperv.ps1",
+    "browser_host_suite": "passed: tools/test_browser.ps1",
+    "shared_abi_and_dependency_pins": "passed",
+    "source_selection_matches_index": true,
+    "working_tree_kernel_preserved": true,
+    "prior_package_manifest_verified": true
+  },
+  "rebuilt_public_kernel_sha256": "07c5d4134172a0bf61de77eb9f5be8818a96cf21dd10d4a2474c73d75186a688",
+  "prior_live_package": "20261105T145705Z-4D2ECBE0BB9D",
+  "prior_package_files": 202,
+  "live_result": "User-reported YouTube watch playback around 3-5 FPS; slow interaction and poor apparent stream quality remain",
+  "limits": [
+    "No new Hyper-V live test or native hardware test in this checkpoint turn",
+    "Prior ARM64 engine/QEMU validation records remain under docs/browser-evaluation; network there is modeled",
+    "Public rebuild excludes local inspection CA; packaged live test used locally selected CA",
+    "Performance improvements are documented next steps, not implemented in this commit"
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "date": "2026-10-29",
+  "pin": {
+    "version": "78.2",
+    "archive": "icu4c-78.2-sources.tgz",
+    "url": "https://github.com/unicode-org/icu/releases/download/release-78.2/icu4c-78.2-sources.tgz",
+    "sha256": "3e99687b5c435d4b209630e2d2ebb79906c984685e78635078b672e03c89df35"
+  },
+  "target": "aarch64-none-elf",
+  "compiler": "Ubuntu clang version 22.1.2 (1ubuntu1)",
+  "probe_sha256": "339f7eddb6c1e7cc5a051d7c63cd8581364582fa274ab77033fb76559ff6f8bd",
+  "profile_sha256": "5741e09a0d8dddf816721fef50e05df6a69f13f292c994ad2cdff21514a18e05",
+  "locale_header_sha256": "7102972a787cc92a401b759058cb0c9fd1c0b7d810d26dbddae5929171c46a87",
+  "source_tree_sha256": "43898ebfcf8d059529c6225778bc20f388c518c037fcbb12b05e76e5031461be",
+  "compiled": 456,
+  "failed": 0,
+  "all_sources": true,
+  "libraries_built": true,
+  "archives": {
+    "common": {
+      "path": "/home/joshu/.cache/dihos-jsc-target/icu-build-d23ba93fcc97/libicuuc.a",
+      "sha256": "50a0de54bf7fa607d5c39edb0acc1dddc4054e05781a6a533a9ed6db627656bc"
+    },
+    "i18n": {
+      "path": "/home/joshu/.cache/dihos-jsc-target/icu-build-d23ba93fcc97/libicui18n.a",
+      "sha256": "7b2cb890b3c0b03a6d09100b4483341aafe7863982655ac53119864a24fc82d5"
+    }
+  },
+  "data": {
+    "version": "78.2",
+    "archive_sha256": "3e99687b5c435d4b209630e2d2ebb79906c984685e78635078b672e03c89df35",
+    "data_bytes": 33107248,
+    "data_sha256": "a3d49eacd189624769dc77457c6aa1789a89219fb217a6d87d5b076c269aaf1f",
+    "library": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/icu-dihos/libicudata.a",
+    "library_sha256": "aae91a61e781aa4060fba646606ac30951dafe013a205cfb1a06a2ce9c7345e8",
+    "symbol": "icudt78_dat",
+    "alignment": 16,
+    "guest_validated": false
+  },
+  "final_link_validated": false,
+  "guest_validated": false,
+  "note": "All common/i18n source files compiled; native final executable link and ICU runtime tests remain."
+}

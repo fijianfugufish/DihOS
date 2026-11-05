@@ -1,0 +1,162 @@
+{
+  "date": "2026-10-29",
+  "target": "aarch64-none-elf",
+  "source_version": "2.54.2",
+  "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+  "compiler": "Ubuntu clang version 22.1.2 (1ubuntu1)",
+  "probe_sha256": "ddb3edb9f0c006813920a47257cadb5883ac3735d270bd88988bf87c3d1073b5",
+  "port_edits_sha256": "b9383901c616055def38fae713b052ca760c2757907163c6ae206913b4181821",
+  "port_edits": {
+    "Source/cmake/WebKitCommon.cmake": {
+      "before": "fd9902edefdcee19c623f6bb5d6e88bab4774245ac8042d188e16bae09963469",
+      "after": "f745ad1b19f6965aa16b4ed30201e3a69ee82a8fb1fb4c4a31c6283fc37d3c42"
+    },
+    "Source/cmake/OptionsJSCOnly.cmake": {
+      "before": "88beef9d63b1e160e83512eb8afe5459794f91c2006e4a0b77dcfd0bc3085af2",
+      "after": "da7383cff11bfb16ee983b9d3de847aaa82d1742c1ea68c4727116d77c7d9c6b"
+    },
+    "Source/WTF/wtf/PlatformOS.h": {
+      "before": "ad5594b0edbcd6d588c255e70a9f5bbcd2a35a43f54cdd4f9bc61954398996e5",
+      "after": "f91895f68e5aa019705e1bfb5c2f819fbd154a4c01ce29122b71ec7ae3ed46db"
+    }
+  },
+  "libcxx": {
+    "bundle": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-libcxx-22.1.0",
+    "commit": "4434dabb69916856b824f68a64b029c67175e532",
+    "tree_sha256": "b4bbb0028e6c9f5062949cdc739f663d0409242d724cd3e8fe742f22bffef0b8",
+    "files": 1681
+  },
+  "target_macros_verified": true,
+  "configure_succeeded": false,
+  "engine_built": false,
+  "guest_validated": false,
+  "host_engine_reused": false,
+  "runtime_archive": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/runtime/libdihos-runtime.a",
+    "sha256": "b695f5961d51f5849fbf96b65405008d7b686b85a4d390a7cdfc60707bd90e83"
+  },
+  "runtime_thread_link": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/build-7bd89c44b95c/dihos-thread-link.elf",
+    "sha256": "bbbf22ed5eb08e1b8d7e4267188ad605256cc08e11bc870efb721c469cce1cb2",
+    "undefined_symbols": []
+  },
+  "translation_units": [
+    {
+      "unit": "embedding",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/sdk/sacx/apps/jsc_probe/main.cpp",
+      "source_sha256": "034b4919a09b76268637c43d1bf5e139c4fc06f5f94ee9c0a5adb5f6bf94e35a",
+      "compiled": true,
+      "errors": [],
+      "object_sha256": "491ecccb1a9645a1998cb52e1b1b28839c96dbc4366c46ff8a46713edef79dce",
+      "undefined_symbols": [
+        "JSEvaluateScript",
+        "JSGlobalContextCreate",
+        "JSGlobalContextRelease",
+        "JSStringCreateWithUTF8CString",
+        "JSStringRelease",
+        "JSValueToNumber"
+      ]
+    },
+    {
+      "unit": "allocator",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/FastMalloc.cpp",
+      "source_sha256": "bd97fe24e86c9a9b0d3c67ba696ef0c66876dcbaca13e9433ff6c87e3e75d1f6",
+      "compiled": true,
+      "errors": [],
+      "object_sha256": "7c89c28aa1a113f91728bcd8abd15348a228d351cc5ecbb3603ef291f73b2fb3",
+      "undefined_symbols": [
+        "WTFReportAssertionFailure",
+        "WTFReportAssertionFailureWithMessage",
+        "WTFReportBacktrace",
+        "_ZN3WTF44assertMallocRestrictionForCurrentThreadScopeEv",
+        "_ZN3WTF8pageSizeEv",
+        "_ZN7bmalloc3api14enableMiniModeEb",
+        "_ZN7bmalloc3api14forceEnablePGMEt",
+        "_ZN7bmalloc3api16disableScavengerEv",
+        "_ZN7bmalloc3api16freeLargeVirtualEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api18scavengeThisThreadEv",
+        "_ZN7bmalloc3api21commitAlignedPhysicalEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api23decommitAlignedPhysicalEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api29tryLargeZeroedMemalignVirtualEmmNS_21CompactAllocationModeENS_8HeapKindE",
+        "_ZN7bmalloc3api8scavengeEv",
+        "_ZN7bmalloc3api9isEnabledENS_8HeapKindE",
+        "abort",
+        "aligned_alloc",
+        "calloc",
+        "free",
+        "malloc",
+        "memcpy",
+        "realloc",
+        "strlen"
+      ]
+    },
+    {
+      "unit": "threads",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/Threading.cpp",
+      "source_sha256": "30e8991182bb2eb47c25d6157a73f8ab02f2eaddd2048e02502eaaed535a8ad3",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringHasher.h:24:10: fatal error: 'unicode/utypes.h' file not found"
+      ]
+    },
+    {
+      "unit": "time",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp",
+      "source_sha256": "f735ade17899d8192fb6a39abb0780bf19cb56a5bc7aea5471468b308827a37c",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:216:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:217:19: error: use of undeclared identifier 'CLOCK_REALTIME'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:223:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:224:19: error: use of undeclared identifier 'CLOCK_REALTIME'"
+      ]
+    },
+    {
+      "unit": "strings",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringImpl.cpp",
+      "source_sha256": "812c63f5937a1b0c6df1332f26f832677056887440cd09c6675e5e34d93aee43",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringImpl.h:28:10: fatal error: 'unicode/uchar.h' file not found"
+      ]
+    },
+    {
+      "unit": "api",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/API/JSBase.cpp",
+      "source_sha256": "4d7a1f1d2306389c228a8fb6755244d48b089bace3e653307dd471b75e6ca526",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringHasher.h:24:10: fatal error: 'unicode/utypes.h' file not found"
+      ]
+    },
+    {
+      "unit": "global-object",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/runtime/JSGlobalObject.cpp",
+      "source_sha256": "5c2f4ba62fa4d7331cdbe5e9aac300cad1be4af2f73ddcf108c452b766653ec7",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringHasher.h:24:10: fatal error: 'unicode/utypes.h' file not found"
+      ]
+    },
+    {
+      "unit": "interpreter",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/interpreter/Interpreter.cpp",
+      "source_sha256": "8efbd4ffc82ff992dbaa0ba89d18e612d7226903a1e7350aad7a413ba460806c",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringHasher.h:24:10: fatal error: 'unicode/utypes.h' file not found"
+      ]
+    },
+    {
+      "unit": "gc",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/heap/Heap.cpp",
+      "source_sha256": "6d22d7ad6c018519ea0845b2ebe39f0f994c652d2f05be54eb7c62452d981871",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringHasher.h:24:10: fatal error: 'unicode/utypes.h' file not found"
+      ]
+    }
+  ],
+  "configure_failure": "Target ICU >=70.1 headers and data/i18n/uc libraries unavailable",
+  "note": "Cross-compilation/link inventory only. No JavaScript execution or guest update."
+}

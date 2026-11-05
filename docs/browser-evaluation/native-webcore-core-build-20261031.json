@@ -1,0 +1,77 @@
+{
+  "milestone": "native WebCore configuration and core object compilation",
+  "target": "aarch64-none-elf",
+  "webkit_version": "2.54.2",
+  "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+  "configure_report_sha256": "d0de05d1b5ff38fd238183ab9362ff8181b97679d4774288264ea987aee47f9c",
+  "units_report_sha256": "b47334e3b1117941b95e130c6bce4d751bdd3edb94b16fff2004127821b27428",
+  "xml_report_sha256": "df887d92cb6250a312560aa5cb0651ea97bc8410145637ae3a321cfd07b91ee0",
+  "dependency_report_sha256": "15568c86615b060262c7de5484304c1ea26323b2a51ba6642df7361208bad32e",
+  "compiled_units": [
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/html/parser/HTMLTokenizer.cpp",
+      "source_sha256": "7aa2af5145f4d7f6e2f46aa66795c284e4d5b05b34defe94dad6838904a4514e",
+      "object_sha256": "0b84ea9d30f49f600f3f5d3c00ce3f85352c3cc32524708c553c139856a39ce9",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/html/parser/HTMLEntityParser.cpp",
+      "source_sha256": "d03f001d780cb8cb82c15cb6dd4ab83cc4960766620f43cfd6ef8e9e78bb2ed5",
+      "object_sha256": "bf35b0c1d68c02f904ffff32a2d4317ee7c3d42a34846376d4394989786a88ce",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/html/parser/HTMLEntitySearch.cpp",
+      "source_sha256": "4b8c64acc8394c216d6578ee27ea233fd43c15a7b3c61e23f27209ad63cda083",
+      "object_sha256": "8e8a71e8685ae1a8727bddcc03be5ee2d43686d3efe12c87cd30c31112588760",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/platform/text/SegmentedString.cpp",
+      "source_sha256": "2d25775e51144dd91841dbf42f72b09b8f2c13db8cf25bc832c1abc7a3933aaf",
+      "object_sha256": "84f195956ec9716a2d5aa750930cc66784992ef2d4680194641f4a41057ae9ef",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/css/parser/CSSTokenizer.cpp",
+      "source_sha256": "7178c467d1cffa011191d7def3ebc5754745e3fede6e5c5d4a4fa7731d6b37f2",
+      "object_sha256": "31489482ba42862417f8d47a184b488f2f988053dd17eaa576f71df84005552f",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/css/parser/CSSParserToken.cpp",
+      "source_sha256": "357f9ce37b7fbb268f21405c072b33408680ebb6915b58e7a6540b1caf5efa3e",
+      "object_sha256": "c76aced9cf46e775d0df52ffc49e10dfe508d3f4e863cb0fe639806a06758c5a",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/css/parser/CSSTokenizerInputStream.cpp",
+      "source_sha256": "d5911691459692aae243c0f33ae5c3296a2c3c449d06e854601bbf730df0f1f6",
+      "object_sha256": "6a352c964d25e1e03ccef437f1f91dce3aa0f0277b6cf5645f98f0f9cd6d9005",
+      "elf_machine": 183
+    },
+    {
+      "source": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3/Source/WebCore/platform/network/ResourceErrorBase.cpp",
+      "source_sha256": "3e3e4f755ed765f505b2b55effbd21863621688eaa6b27305f5cb6c84da05359",
+      "object_sha256": "1833339d9ea9d1f3a952790fccd5ba6c9ea2a76ef0c46d56f983946119916f77",
+      "elf_machine": 183
+    }
+  ],
+  "webcore_configured": true,
+  "complete_webcore_library_built": false,
+  "native_execution_tested": false,
+  "dom_executed": false,
+  "page_rendered": false,
+  "shipping_browser_changed": false,
+  "next_boundaries": [
+    "Native ResourceRequest/ResourceResponse/CertificateInfo contracts",
+    "WebCore resource loader over checked asynchronous SACX HTTP",
+    "Page/graphics/fonts/input/surface integration and local document execution"
+  ],
+  "limits": [
+    "No native graphics backend yet",
+    "No registered SQLite VFS",
+    "Experimental XML pin requires review before shipping",
+    "HTTPS peer authentication remains unavailable"
+  ]
+}

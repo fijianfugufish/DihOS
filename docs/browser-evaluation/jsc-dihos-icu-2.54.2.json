@@ -1,0 +1,321 @@
+{
+  "date": "2026-10-29",
+  "target": "aarch64-none-elf",
+  "source_version": "2.54.2",
+  "archive_sha256": "f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56",
+  "compiler": "Ubuntu clang version 22.1.2 (1ubuntu1)",
+  "probe_sha256": "c137ad34a9e4ecef7f92c044df73ca37981f6e7c847ebb74bac6a9236f9282a8",
+  "port_edits_sha256": "b9383901c616055def38fae713b052ca760c2757907163c6ae206913b4181821",
+  "configure_succeeded": true,
+  "engine_built": false,
+  "guest_validated": false,
+  "icu": {
+    "version": "78.2",
+    "stage_report_sha256": "4dbbd6b94242e22f5391a96883766f6b69ca0f484f467e913c130749c1858bde",
+    "sysroot": "/home/joshu/.cache/dihos-jsc-target/sysroot",
+    "final_link_validated": false
+  },
+  "extra_cxx_libraries": {
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-rtti/libdihos-rtti.a": "1daba58f4dabd613b6430b2afe6105daf2c6cd9314c73e88f29d31a07249a0d9",
+    "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/build/user-programs/libdihos-libcxx.a": "c8f039aa7a8c9855350ee3bb38c0582e2bc478b52b371697687228a58622615b"
+  },
+  "runtime_thread_link": {
+    "path": "/home/joshu/.cache/dihos-jsc-target/build-2d82b3d63493/dihos-thread-link.elf",
+    "sha256": "bbbf22ed5eb08e1b8d7e4267188ad605256cc08e11bc870efb721c469cce1cb2",
+    "undefined_symbols": []
+  },
+  "steps": [
+    {
+      "label": "libcxx-configure",
+      "exit_code": 0,
+      "log_sha256": "39b11e78129f2933f69860c2858905b1f108d0411743a6bdf4413c152d7cad80"
+    },
+    {
+      "label": "target-macros",
+      "exit_code": 0,
+      "log_sha256": "5b5f59c97dfc747aea53dfe1a0da76112e4f24d108aa048198355c80ceec1698"
+    },
+    {
+      "label": "runtime-runtime",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-thread_lifetime",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-thread_keys",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-allocator",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-allocator_platform",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-platform",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-c_support",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-synchronization",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-threading",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-tlsf",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-archive",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "runtime-feature-adapter",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "engine-configure",
+      "exit_code": 0,
+      "log_sha256": "25ac2669a4a478d2d685024d8b0bcd0aabcdedaba73404edb1254a8033e6955b"
+    },
+    {
+      "label": "runtime-thread-imports",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "engine-build",
+      "exit_code": 1,
+      "log_sha256": "730f9a0cf48558e134790854f6e1591426be38981691c2838f75ca22c4fb1c64"
+    },
+    {
+      "label": "compile-embedding",
+      "exit_code": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "imports-embedding",
+      "exit_code": 0,
+      "log_sha256": "d02696591a0ca2edf104d28f226b3c7a1a0fb6da04fa06e4050d2bf167ec7e19"
+    },
+    {
+      "label": "compile-allocator",
+      "exit_code": 0,
+      "log_sha256": "2ffe51b8af2299331ce6e944c10c066e98a80be8cc4dc9dc56db5ba83d6dd399"
+    },
+    {
+      "label": "imports-allocator",
+      "exit_code": 0,
+      "log_sha256": "c5f3930ea465d6716f02963bdf4c1520bf61f52b1561284edb664d61318f2f22"
+    },
+    {
+      "label": "compile-threads",
+      "exit_code": 1,
+      "log_sha256": "5af18123deda178264fc760aa59e0bb0eb5a25a5b5fce7dba6128408eb4b18c7"
+    },
+    {
+      "label": "compile-time",
+      "exit_code": 1,
+      "log_sha256": "2196d27ff90bd41288b4b05328a3ebc849038289c71321b39f39342d4dd96453"
+    },
+    {
+      "label": "compile-strings",
+      "exit_code": 1,
+      "log_sha256": "e35ffb73555337b483ff4f5aa70ce9acb1e47103d2a3602e2f75039015a3267a"
+    },
+    {
+      "label": "compile-api",
+      "exit_code": 1,
+      "log_sha256": "d52826a83909ef79b6f5abfa0d67f5cfa2b49e898c2a7390999e047f12873a61"
+    },
+    {
+      "label": "compile-global-object",
+      "exit_code": 1,
+      "log_sha256": "68422f9b51696896d805808353878c8ae2eead76317c01630034b30090dcaa72"
+    },
+    {
+      "label": "compile-interpreter",
+      "exit_code": 1,
+      "log_sha256": "84aab2990bdd92a558810512b754d4927d36054d57b4e4cf7c5978baa6e026a5"
+    },
+    {
+      "label": "compile-gc",
+      "exit_code": 1,
+      "log_sha256": "e6273eb00d05f9dba35a0ee92ba4caf7dbb91c6ea0765f6294b6814a88338d63"
+    }
+  ],
+  "translation_units": [
+    {
+      "unit": "embedding",
+      "source": "/mnt/c/Users/joshu/OneDrive/dokumernts/Documents/Programming/AArch64 Assembly (i hate myself)/arm64-asm-windows-starter/sdk/sacx/apps/jsc_probe/main.cpp",
+      "source_sha256": "034b4919a09b76268637c43d1bf5e139c4fc06f5f94ee9c0a5adb5f6bf94e35a",
+      "compiled": true,
+      "errors": [],
+      "object_sha256": "491ecccb1a9645a1998cb52e1b1b28839c96dbc4366c46ff8a46713edef79dce",
+      "undefined_symbols": [
+        "JSEvaluateScript",
+        "JSGlobalContextCreate",
+        "JSGlobalContextRelease",
+        "JSStringCreateWithUTF8CString",
+        "JSStringRelease",
+        "JSValueToNumber"
+      ]
+    },
+    {
+      "unit": "allocator",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/FastMalloc.cpp",
+      "source_sha256": "bd97fe24e86c9a9b0d3c67ba696ef0c66876dcbaca13e9433ff6c87e3e75d1f6",
+      "compiled": true,
+      "errors": [],
+      "object_sha256": "7c89c28aa1a113f91728bcd8abd15348a228d351cc5ecbb3603ef291f73b2fb3",
+      "undefined_symbols": [
+        "WTFReportAssertionFailure",
+        "WTFReportAssertionFailureWithMessage",
+        "WTFReportBacktrace",
+        "_ZN3WTF44assertMallocRestrictionForCurrentThreadScopeEv",
+        "_ZN3WTF8pageSizeEv",
+        "_ZN7bmalloc3api14enableMiniModeEb",
+        "_ZN7bmalloc3api14forceEnablePGMEt",
+        "_ZN7bmalloc3api16disableScavengerEv",
+        "_ZN7bmalloc3api16freeLargeVirtualEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api18scavengeThisThreadEv",
+        "_ZN7bmalloc3api21commitAlignedPhysicalEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api23decommitAlignedPhysicalEPvmNS_8HeapKindE",
+        "_ZN7bmalloc3api29tryLargeZeroedMemalignVirtualEmmNS_21CompactAllocationModeENS_8HeapKindE",
+        "_ZN7bmalloc3api8scavengeEv",
+        "_ZN7bmalloc3api9isEnabledENS_8HeapKindE",
+        "abort",
+        "aligned_alloc",
+        "calloc",
+        "free",
+        "malloc",
+        "memcpy",
+        "realloc",
+        "strlen"
+      ]
+    },
+    {
+      "unit": "threads",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/Threading.cpp",
+      "source_sha256": "30e8991182bb2eb47c25d6157a73f8ab02f2eaddd2048e02502eaaed535a8ad3",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "time",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp",
+      "source_sha256": "f735ade17899d8192fb6a39abb0780bf19cb56a5bc7aea5471468b308827a37c",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:216:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:217:19: error: use of undeclared identifier 'CLOCK_REALTIME'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:223:21: error: variable has incomplete type 'struct timespec'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/CurrentTime.cpp:224:19: error: use of undeclared identifier 'CLOCK_REALTIME'"
+      ]
+    },
+    {
+      "unit": "strings",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/text/StringImpl.cpp",
+      "source_sha256": "812c63f5937a1b0c6df1332f26f832677056887440cd09c6675e5e34d93aee43",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:70:2: error: \"Not supported platform\"",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:5: error: unknown type name 'PlatformMutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:51: error: use of undeclared identifier 'm_mutex'"
+      ]
+    },
+    {
+      "unit": "api",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/API/JSBase.cpp",
+      "source_sha256": "4d7a1f1d2306389c228a8fb6755244d48b089bace3e653307dd471b75e6ca526",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:70:2: error: \"Not supported platform\"",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:5: error: unknown type name 'PlatformMutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:51: error: use of undeclared identifier 'm_mutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "global-object",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/runtime/JSGlobalObject.cpp",
+      "source_sha256": "5c2f4ba62fa4d7331cdbe5e9aac300cad1be4af2f73ddcf108c452b766653ec7",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    },
+    {
+      "unit": "interpreter",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/interpreter/Interpreter.cpp",
+      "source_sha256": "8efbd4ffc82ff992dbaa0ba89d18e612d7226903a1e7350aad7a413ba460806c",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:70:2: error: \"Not supported platform\"",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:5: error: unknown type name 'PlatformMutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:51: error: use of undeclared identifier 'm_mutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/runtime/OptionsList.h:29:10: fatal error: 'JavaScriptCore/JSCWebPreferenceOptions.h' file not found"
+      ]
+    },
+    {
+      "unit": "gc",
+      "source": "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/JavaScriptCore/heap/Heap.cpp",
+      "source_sha256": "6d22d7ad6c018519ea0845b2ebe39f0f994c652d2f05be54eb7c62452d981871",
+      "compiled": false,
+      "errors": [
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:70:2: error: \"Not supported platform\"",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:5: error: unknown type name 'PlatformMutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/ThreadingPrimitives.h:84:51: error: use of undeclared identifier 'm_mutex'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96039:13: error: use of undeclared identifier 'fegetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96084:19: error: use of undeclared identifier 'FE_TONEAREST'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/simde/arm/neon.h:96115:5: error: use of undeclared identifier 'fesetround'",
+        "/home/joshu/.cache/dihos-jsc-target/port-source-b9383901c616-v2/Source/WTF/wtf/PlatformRegisters.h:43:10: fatal error: 'sys/ucontext.h' file not found"
+      ]
+    }
+  ],
+  "remaining": [
+    "Native allocator virtual-memory backend; build currently reaches POSIX sys/mman.h",
+    "WTF native thread primitives and register context",
+    "Floating-point environment and clock services",
+    "Final C/runtime import resolution and guest execution"
+  ]
+}

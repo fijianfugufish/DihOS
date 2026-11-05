@@ -1,0 +1,66 @@
+{
+  "milestone": "native media decoder foundation",
+  "native_arm64_decode_tested": true,
+  "hyperv_playback_tested": false,
+  "browser_video_enabled": false,
+  "youtube_playback_tested": false,
+  "codecs_built": [
+    "H.264",
+    "VP8",
+    "VP9",
+    "MPEG-4"
+  ],
+  "codecs_tested": [
+    "H.264 baseline I_PCM"
+  ],
+  "checks": [
+    "owned memory input",
+    "MP4 sample tables and AVC configuration",
+    "BGRA pixels",
+    "presentation timestamps",
+    "seek after EOF and back to start",
+    "early close",
+    "truncated headers",
+    "1920x1080 SPS crop",
+    "complete process page cleanup"
+  ],
+  "files": {
+    "build/dihscover-media-validation/decoder-report.json": "31a28bed465e29308f3d06ebee3d95c56b122e7114953ffdc991ac9b9a9e870f",
+    "build/dihscover-media-validation/fixture-report.json": "4dd4f808df312bb5f6f0f2410692bfd73b4988d3b62f924ed63d42122cfb0c73",
+    "build/dihscover-media-validation/reference-report.json": "1f71c0458aabac10eb43b457d6cb686d0cc7d598932901a898795424f0455e42",
+    "build/dihscover-media-validation/signature.log": "6955af95e7dd5ea96229fac36c71d65b8ec839c6b87725ddb89ee0e01cfd33e3",
+    "build/dihscover-media-validation/qemu/report.json": "010f5d9d86b433047e74a639cc0912794cdd06548260110e3bb64a4d9ba1be3d",
+    "build/dihscover-media-validation/qemu/run.log": "990edd7d24354335c6eaf6d4dfb705a1ed3891887207f55c840d58e19fed7048",
+    "build/dihscover-media-validation/host-execute.log": "0d73a6e821c0c93b41e7c9b98751c07da753b1ebc87d09b926ae0dda22471983",
+    "build/dihscover-media-validation/video.elf": "afdd27b352dd890bcac11a28b5fe4a29bb007bcb1eca42855f5ffdec54f0bc8f",
+    "build/dihscover-media-validation/red-blue.mp4": "70c63196bee40973a6cd0a2a5b4c40db687ec3e31f4eee2b9073941731a8c56f",
+    "build/dihscover-media-validation/red-blue-1080.mp4": "a3ded8b6f8f763429130b4053b5ee8611043636e05fe949f3a10cc746a91ef10"
+  },
+  "sources": {
+    "tools/webcore_dihos/build_media_decoder.py": "4e193afc0ffbb9cfc362b83b9fe38e1872be8c53873974c9072745cff5d3babb",
+    "tools/user_runtime_qemu_tests.c": "58d4077e8b67c46c963bcf3aafecf881e602af15d4e78ad7f56694bc2143ce37",
+    "tools/webcore_dihos/media/build_fixture.py": "88f6c46be4d242f67d82b21d2346607e3d851b6442c8a802a43b837638e0082b",
+    "tools/webcore_dihos/media/build_reference.py": "c734f087b70fe38f1cde927e8836893e0fb8b035e4c534a3e7d17705a79c9648",
+    "tools/webcore_dihos/media/decoder_fixture.cpp": "4fc699953feb74c9ebfb5b5e8a41a2e787323f0996c2189bd5ab160421be20ab",
+    "tools/webcore_dihos/media/errno.h": "44809671e09dd12eb0227631b382525c10831c63533adf4994e4fa2bacad0512",
+    "tools/webcore_dihos/media/inttypes.h": "59b29e9942c43bd60eab93620341389bdf6501f27776cbdefbc7000ac1865f7b",
+    "tools/webcore_dihos/media/make_fixture.py": "42636e55407c4d5ae983ecf6dcd27f27d6b7c1a1c9c9899776eee8e2b80d1130",
+    "tools/webcore_dihos/media/math.h": "d5807c913c266e26fe48876da770f0fe4a334caf6e9d034b54a205ecf1d19b9b",
+    "tools/webcore_dihos/media/memory_video.c": "189374236eafd9bbc3b9b8b1f78ff3c28ff3c323e8611c3d57deeca03996430a",
+    "tools/webcore_dihos/media/memory_video.h": "b54f7daaf913eb24c274d0cf9d6e51495bff8a8ef0f8e46d402f5060f99cd1c5",
+    "tools/webcore_dihos/media/native_abi.h": "fcbe0f38828cf1d0ef2bf6a8f62f7837c24b3e0f3a8a3a794c43df13389ff4ad",
+    "tools/webcore_dihos/media/native_c_support.c": "fb4bd4785567f6cc7a8dd080a5c26d82a8183cc2447002f8f262789b93fa0f3f",
+    "tools/webcore_dihos/media/record_validation.py": "1a88ad318ab5f0f24888bc485a19210590c750794b865fbd88bcde1931996887",
+    "tools/webcore_dihos/media/stddef.h": "c60540350760fd03dec3570b509d2339169841319bb59a3636140f0440429dce",
+    "tools/webcore_dihos/media/test_native.py": "28c07c40e9bbdf086004d0d9d83960116628b0e22a76526d1d76af947e152445",
+    "tools/webcore_dihos/media/time.h": "82d0aeb73ff1f04f372e5463459006758f0b95952ab2dd5ce5ef8ed2c3b9528c",
+    "docs/dihscover-native-video.md": "707882413e1bd7c5f5b9fce9381fbe96535c341a97f3c907e21a822825f6b289"
+  },
+  "kernel_unchanged_sha256": "5ad373f3bab1d2346bdbf3ac096c128012be3842cd25fc1305bbc109ff01fc9d",
+  "native_groups": 29,
+  "remaining": [
+    "WebCore video-enabled engine build and media player integration",
+    "range-backed progressive input and MediaSource/SourceBuffer",
+    "YouTube bootstrap compatibility and actual muted playback testing"
+  ]
+}

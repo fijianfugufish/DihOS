@@ -1,0 +1,33 @@
+{
+  "date": "2026-11-01",
+  "target": "aarch64-none-elf",
+  "native_page_client_compiled": true,
+  "client_object_sha256": "a448bcf5cf61f3abae72f70dd04621cc06ebc5e99c9a6bf98a195d6680120db3",
+  "complete_engine_built": false,
+  "engine_build_exit_code": 1,
+  "current_build_failure": "Mandatory WebCrypto EC/RSA platform key containers/backend are not implemented",
+  "push_endian_failure_corrected_and_unit_compiled": true,
+  "dom_executed": false,
+  "page_rendered": false,
+  "loader_accepted": false,
+  "hyperv_tested": false,
+  "shipping_browser_changed": false,
+  "vhd_updated": false,
+  "working_kernel_unchanged_sha256": "5ad373f3bab1d2346bdbf3ac096c128012be3842cd25fc1305bbc109ff01fc9d",
+  "proof_files": {
+    "build\\native-page-validation-20261101\\build__webcore-headless-page__compile-report.json": "2cc51c707b462dbb0a0ebe65d80b8fe1c7f4e28db7d6a01abb0d3e35ec20a610",
+    "build\\native-page-validation-20261101\\build__webcore-engine-native__report.json": "5a3280915ea344856903a970cd9fbc21b5945ee7e72d68d1f1fb61cbfb756b84",
+    "build\\native-page-validation-20261101\\build__webcore-engine-native__compile-report.json": "d18e65dcacd79b31a070a625282f1b3c2d2a5e9167edb57b782c5a933f00a8a0",
+    "build\\native-page-validation-20261101\\build__webcore-engine-native__compile.log": "bab2b15f4a5510b18896be2df4737c9559a891e9f5cdf95429fadb91322a8774",
+    "build\\native-page-validation-20261101\\build__webcore-headless-page__compile.log": "399c3904e0ebe09eb9858f6a1422433664d31f64a5b0ad6f89dad78d8cbfaf79",
+    "build\\native-page-validation-20261101\\build__webcore-openssl__source-report.json": "3b6d5706b4fb234ad1572bd31e5371c925349bab36d5be16a41ae1a8fa1a8517",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__headless_page_fixture.cpp": "6919f9e27cdf24861ff63f87e3d1958eca47ec33db0eeb693478cdb2373d3e5d",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__headless_page_strategies.h": "198a055f9c17da52c483bce36d2bedeab745cb96a06b41a6f655008d626efb8c",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__compile_page_fixture.py": "354bdb0fd7c102a0a04d764c239add7e9943a33636fd2f7070c2ebb41e0c847d",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__build_page_fixture.py": "611cbd582dccdbc3f78bccdbd0a6297a5a9c5f3784483a0acdcf6553763c577d",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__configure_native.py": "b400a07ebcb1170745dcfece585caa44c4a02d8b9bac60d320d097d5e2b56723",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__compile_native.py": "ef05a3ea2d805f62b213f8d1cda89cc0d962939406744103003e83795ba14e4f",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__port-edits.json": "0d34c18854b542b04825588fa4dc44d5844ae63efcd0eaf5469022f7956eb2d9",
+    "build\\native-page-validation-20261101\\tools__webcore_dihos__prepare_openssl.py": "12f31ba6113ae0a5f58b65ab5456eb6eac827510016070dc6ce34da71a152de5"
+  }
+}

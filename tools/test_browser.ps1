@@ -25,6 +25,8 @@ try {
   Compile $cxx @('-std=c++17','-O2','tools/browser_numbers_tests.cpp','-o',$exe);Run $exe
   $exe=Join-Path $output 'http.exe'
   Compile $cc (@('-std=c11','-O2')+$inc+@('tools/http_stream_tests.c','kernel/net/http_stream.c','-o',$exe));Run $exe
+  $exe=Join-Path $output 'request-headers.exe'
+  Compile $cc (@('-std=c11','-O2')+$inc+@('tools/http_request_headers_tests.c','-o',$exe));Run $exe
   $exe=Join-Path $output 'receive.exe'
   Compile $cxx @('-std=c++17','-O2','tools/browser_receive_tests.cpp','-o',$exe);Run $exe
   $exe=Join-Path $output 'network.exe'

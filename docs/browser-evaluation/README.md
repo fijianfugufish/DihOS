@@ -1,5 +1,15 @@
 # Modern browser engine evaluation — 2026-10-27
 
+Current status (2026-11-03): Dihscover's native ARM64 WebCore browser is running
+inside DihOS. The original engine-comparison notes below describe the earlier
+evaluation snapshot, including its then-current NetSurf implementation.
+
+The [native video decoder notes](../dihscover-native-video.md) and
+[exact execution evidence](dihscover-native-video-decoder-20261103.json) cover
+the new MP4/H.264 decoding tests in ARM64 EL0, including 1080p frames and seeking.
+WebCore video integration, MediaSource streaming and actual YouTube playback
+remain outstanding; these decoder tests do not establish browser playback.
+
 **Recommended next port prototype: WebKit.** This is a provisional decision
 supported by the host fixture/site runs below. No replacement engine runs inside
 DihOS yet. Ladybird's corpus run, guest software-rendering costs and memory
@@ -32,11 +42,16 @@ Servo's executable SHA-256 is recorded in `servo-0.7.0.json` in addition to the
 published archive checksum. Both Windows test engines use x64 binaries on this
 ARM64 host. Their timings cannot predict native DihOS or Hyper-V performance.
 
-The Ubuntu prerequisite probe reported `aarch64` and approximately 15.4 GiB RAM.
-It found no `cmake`, `ninja`, `clang++` or `pkg-config`, and no Qt6 package.
+The initial Ubuntu prerequisite probe reported `aarch64` and approximately 15.4 GiB RAM.
+At that time it found no `cmake`, `ninja`, `clang++` or `pkg-config`, and no Qt6 package.
 Ladybird requires a substantial toolchain setup before a meaningful run:
 [upstream build instructions](https://github.com/LadybirdBrowser/ladybird/blob/afb87db4b7f55029ec7b7d14d756184b67d22986/Documentation/BuildInstructionsLadybird.md).
 This is an unevaluated compatibility result, rather than a failed site test.
+
+The subsequent [pinned WPE/JavaScriptCore ARM64 build probe](wpe-arm64.md)
+installs the smaller runtime's build prerequisites and records actual source,
+configuration and runtime evidence separately. It does not complete Ladybird's
+evaluation or establish a DihOS WebKit port.
 
 ## Repeatable fixture and live-site observations
 

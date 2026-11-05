@@ -10,6 +10,7 @@ void *memmove(void *dst, const void *src, size_t size);
 void *memset(void *dst, int value, size_t size);
 int memcmp(const void *a, const void *b, size_t size);
 void *memchr(const void *data, int value, size_t size);
+void *memmem(const void *data,size_t size,const void *needle,size_t needle_size);
 size_t strlen(const char *text);
 size_t strnlen(const char *text, size_t maximum);
 int strcmp(const char *a, const char *b);

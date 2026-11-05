@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-30",
+  "evidence": "User-provided Hyper-V terminal transcript",
+  "full_suite_completed": false,
+  "suite_observed_state": "ready",
+  "suite_last_log": "JSC suite: allocation batch OK",
+  "suite_slices_hex": "1DE11",
+  "suite_calls_hex": "1DDF7",
+  "suite_preemptions_hex": "1A",
+  "suite_waits_hex": "242E",
+  "suite_wakes_hex": "242E",
+  "suite_threads_live": 2,
+  "busy_engine_preemptions": 22641,
+  "busy_engine_calls": 75,
+  "busy_engine_log": "JSC native: evaluating script",
+  "busy_engine_stop_reported_success": true,
+  "desktop_responsiveness_measured": false,
+  "notes": "The main suite had not exited when another proc:run was issued. Do not treat this as a full Hyper-V suite pass. The busy test demonstrates repeated preemption and a successful explicit stop; no input latency measurement was supplied."
+}

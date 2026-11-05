@@ -1,0 +1,13 @@
+{
+  "date": "2026-11-02",
+  "source": "User-provided Hyper-V screenshot in this chat",
+  "package": "build/dihos-native-https-20261101",
+  "build": "20261101T212124Z-58BF4248BCA0",
+  "observation": "The native browsing preview displays https://example.com/ and renders its document.",
+  "live_https_render_reported": true,
+  "live_invalid_certificate_tests_reported": false,
+  "limits": [
+    "Package identification follows the preceding deployment instructions; the screenshot itself does not show a build ID.",
+    "The screenshot demonstrates a successful rendered page, not broader site or media compatibility."
+  ]
+}

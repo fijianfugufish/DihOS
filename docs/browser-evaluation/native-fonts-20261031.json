@@ -1,0 +1,83 @@
+{
+  "date": "2026-10-31",
+  "target": "aarch64-none-elf",
+  "qemu_groups_passed": 31,
+  "elf_sha256": "2a503f0b9155d3b39b300b3974076865106d0e4760f17251ef1223d5bc1ba73a",
+  "elf_bytes": 42544984,
+  "loader": {
+    "result": 0,
+    "file_bytes": 42544984,
+    "image_bytes": 41902080,
+    "segments": 3,
+    "relocations": 4882,
+    "tls_bytes": 1224,
+    "file_limit": 67108864,
+    "image_limit": 67108864
+  },
+  "exit_status": 114,
+  "all_process_pages_reclaimed": true,
+  "font_versions": {
+    "FreeType": "2.14.1",
+    "HarfBuzz": "11.4.5"
+  },
+  "fonts_embedded": true,
+  "host_fonts_used": false,
+  "thread_safe_harfbuzz": true,
+  "filesystem_grant": false,
+  "network_grant": false,
+  "native_image_text_painted": true,
+  "dom_executed": false,
+  "html_page_rendered": false,
+  "browser_integrated": false,
+  "hyperv_validated": false,
+  "physical_hardware_validated": false,
+  "working_tree_kernel_unchanged": true,
+  "sources": {
+    "tools/webcore_dihos/build_fonts.py": "7c314ed477c312c001ae8cf2d32640e9e7de6374eb1a59000975b933f660ad5f",
+    "tools/webcore_dihos/build_font_graphics.py": "b912f0ef28ba926a1b0ee9509483694016b205f322c28f09b446d9c9d46f81a3",
+    "tools/webcore_dihos/build_font_fixture.py": "55d3956d9cb6935f7206b03cd30ccd5fff54c87391dd18a48f4b7238360494dc",
+    "tools/webcore_dihos/font_fixture.cpp": "e297113433f2dc9759dfdd6150d5c821b673cd4fbaccbaafe4fcc9bcb302a1e6",
+    "tools/webcore_dihos/font_cairo_abi.h": "5779fdecb08e5777283acfe647aab196250033a5e190b67ddc3c732039f39401",
+    "tools/embed_user_programs.py": "5feeea2a179dad59f402e0e002f754766889196525eccdb01686234ea5ead606",
+    "tools/test_user_runtime_qemu.ps1": "bf8c126387408f367e2ef48e28862e5965806abb170c52bddc6ea77ad26a44e1",
+    "tools/user_runtime_qemu_tests.c": "a4cb5ac4f3fb56ed373734f06df915090f9e10a5ec4eb6f0eada4c97a3459cd2"
+  },
+  "inputs": {
+    "tools/webcore_dihos/font_fixture.cpp": "e297113433f2dc9759dfdd6150d5c821b673cd4fbaccbaafe4fcc9bcb302a1e6",
+    "OS/System/Fonts/Web/Sans.ttf": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d",
+    "OS/System/Fonts/Web/Serif.ttf": "4d8e6761424656867019081a1a01336f3cb086982682698714054fc33f782713",
+    "OS/System/Fonts/Web/Mono.ttf": "2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081",
+    "OS/System/Fonts/Web/notosans-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a",
+    "OS/System/Fonts/Web/notosansmono-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a",
+    "OS/System/Fonts/Web/notoserif-OFL.txt": "cee9892f9f0cc8fe882c9e9537ee6a89621d86ee7ceaf70b02e2b2b1c25c061a"
+  },
+  "artifacts": {
+    "build/font-validation-20261031/painting/build-user-font-paint-loader-check.log": "a2f31b731faad0cc94c5d2f047ab600987e8995534f38c5441cf986e724994cd",
+    "build/font-validation-20261031/painting/build-user-font-paint-report.json": "54050c0f8c2ec063afa8d2eefc6adc1724bcfee71afcd3daf2eb2a3d296f32d2",
+    "build/font-validation-20261031/painting/build-user-runtime-qemu.log": "a070440d0e8b3f4c0abff7c3adca5d601b304c121083200beea24d5c73edbd2c",
+    "build/font-validation-20261031/painting/build-webcore-font-graphics-report.json": "cf34de9b45453cc4b28b77a028c17d7db932c58000a09ee39f649964f368d21a",
+    "build/font-validation-20261031/painting/build-webcore-fonts-report.json": "106d672d85008cfa329aaf4ca351022dd79520573c28c26a3bde5c79e07e81af"
+  },
+  "coverage": [
+    "packaged sans/serif/monospace advances",
+    "fractional sizes and baselines",
+    "ICU Unicode clusters",
+    "OpenType ligatures and combining marks",
+    "zoom",
+    "missing glyph detection",
+    "malformed font rejection",
+    "FreeType bitmap ink",
+    "three concurrent workers",
+    "HarfBuzz glyphs painted through Cairo FreeType",
+    "pixel bounds and image guards",
+    "complete process cleanup"
+  ],
+  "limits": [
+    "No WebCore font-selection/cache integration yet",
+    "Fontconfig contract unresolved",
+    "No complete Page/Frame clients or visible document",
+    "No font download security/fuzzing claim",
+    "No Arabic/emoji coverage claim",
+    "No browser responsiveness measurement or modern-site compatibility claim"
+  ]
+}

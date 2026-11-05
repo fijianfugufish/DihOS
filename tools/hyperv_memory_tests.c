@@ -17,5 +17,18 @@ int main(void)
         assert(pool_hi_count==1 && pool_hi[0].len==64*0x100000ull);
     }
     puts("PASS: adjacent firmware/free memory coalescing; 32000 allocations/frees without losing range slots");
+    efi_mdesc map[3]={{.PhysicalStart=64ull<<30,.NumberOfPages=256},
+                     {.Type=11,.PhysicalStart=96ull<<30,.NumberOfPages=1},
+                     {.PhysicalStart=4096,.NumberOfPages=1}};
+    user_map=(uintptr_t)map;user_map_bytes=sizeof(map);user_map_stride=sizeof(map[0]);
+    assert(!pmem_user_arena_available(64ull<<30,16ull<<30));
+    assert(!pmem_user_arena_available(96ull<<30,16ull<<30));
+    assert(pmem_user_arena_available(112ull<<30,16ull<<30));
+    user_boot_guards[0]=(range_t){112ull<<30,4096};
+    assert(!pmem_user_arena_available(112ull<<30,16ull<<30));user_boot_guards[0]=(range_t){0};
+    g_pa2va_delta=128ull<<30;
+    assert(!pmem_user_arena_available((128ull<<30)+4096,4096));g_pa2va_delta=0;
+    user_map_stride=1;assert(!pmem_user_arena_available(112ull<<30,16ull<<30));
+    puts("PASS: sparse arena excludes all firmware types, boot resources, physical aliases and malformed maps");
     return 0;
 }

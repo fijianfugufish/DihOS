@@ -4,6 +4,8 @@
 #include <string.h>
 #include "../kernel/net/knet_usb.c"
 static uint64_t now;
+static int entropy_error;
+int dihos_entropy_fill(void *out,size_t bytes){if(entropy_error)return entropy_error;memset(out,0x5a,bytes);return 0;}
 static int online=1,drop_replies;
 static uint32_t delay_polls, empty_polls;
 static uint8_t reply_frames[4][1536];

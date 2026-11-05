@@ -1,0 +1,22 @@
+{
+  "png": {
+    "bytes": 77,
+    "sha256": "b2f4ee9174130e875ce7b28081505007cdf14c872d89aa7aa97b6cba3b0e73b7"
+  },
+  "jpeg": {
+    "bytes": 633,
+    "sha256": "e6c1b0c298d81d7abe472373aad972a90ca1710202a69d345643ffae4303d3d8"
+  },
+  "gif": {
+    "bytes": 48,
+    "sha256": "155ab830e105ede57e5463707a92d9b17ee7406ac0c725b65dfe3bef36c2c07f"
+  },
+  "bmp": {
+    "bytes": 102,
+    "sha256": "6c8e745e4448a303a295674d9f35bef27c853009d5e79491812fc36197646321"
+  },
+  "webp": {
+    "bytes": 38,
+    "sha256": "345790d5c1d1f45edc9af00e70d4b22456c425df5eee93c26484d2c34f81b092"
+  }
+}

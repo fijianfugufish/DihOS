@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-31",
+  "target": "aarch64-none-elf",
+  "qemu_execution": true,
+  "hyperv_graphics_tested": false,
+  "physical_hardware_tested": false,
+  "dom_executed": false,
+  "page_rendered": false,
+  "shipping_browser_changed": false,
+  "working_tree_kernel_unchanged": true,
+  "full_regression_groups": 45,
+  "final_focused_groups": 30,
+  "scope": "Native Cairo/Pixman userspace pixels, concurrency, recovery, controlled critical OOM and process cleanup; four actual WebCore units compile",
+  "full_suite_note": "Full 45-group suite passed before the final bilinear-only stack padding and scaled-image fixture addition. The final graphics libraries and new bilinear test then passed the focused 30-group runtime/graphics suite.",
+  "sources": {
+    "tools/webcore_dihos/build_graphics.py": "3f690bc9b6d6466261c696358008cb866fd25f05c15abdaeb837fee2f1f776a3",
+    "tools/webcore_dihos/build_raster_fixture.py": "4f3c3a750faf8e5677a8f00b0798736db30e1ae042f8ef5f0dc7da9bf1f5f872",
+    "tools/webcore_dihos/configure_native.py": "4f6fafac55877179d0bdce4cda55965a65122e3013bd557dc206d1065bb152b9",
+    "tools/webcore_dihos/compile_units.py": "9cf150b2fa3d2b29e8164e2b765091733b63ac3dbfbc6059f27ba9bd2db9a7af",
+    "tools/embed_user_programs.py": "e07dc974694913ba076bfa1e8cdf5303ccab0c442f7bd0cf34c0c8c6edb674f7",
+    "tools/test_user_runtime_qemu.ps1": "b832eae581de1d8cb1e623d4f2ed30d0892e48562ed3b9124b55d1d8b025d6b1",
+    "tools/user_runtime_qemu_tests.c": "3c25e9edf5cc78c043358f81f984fb182948ba8ac9fdd125220467ef7ce6d1a7",
+    "tools/webcore_dihos/graphics/cairo_c_support.c": "8aeeb1103e07fa834cb41fe9c382354fa49e5b37d29689d09050371c5c883feb",
+    "tools/webcore_dihos/graphics/cairo_mutex_dihos.c": "38cda3d35e1d27c2b583a184b1358945c218cf52043641f2c17870080d0fe7a5",
+    "tools/webcore_dihos/graphics/cairo_mutex_dihos.h": "92e154b145505b0575dc5e51fb1925566e95d27b896318b37b0f14bf4c83b2ac",
+    "tools/webcore_dihos/graphics/errno.h": "f60befd065d7447e8d32d325fe96d440e1e25281095a5e115f8af69ba559a12d",
+    "tools/webcore_dihos/graphics/math.h": "4e658068b327b6b4baf64312b68a26ec8e1bbcbcb086cc79f34f74bd9a4ce949",
+    "tools/webcore_dihos/graphics/raster_fixture.cpp": "3e3998e9f863606f71d06e495ca5e290e6321d27c57ebdc5a4c9441de33064be",
+    "tools/webcore_dihos/graphics/setjmp.h": "9ebfa8dfbee9bb8f518cc52308b5b3ce66b48fde6de3a1cfbd6efa0d88612e95",
+    "tools/webcore_dihos/graphics/stdio.h": "ddb9b64fa1f0b5b9b85b9172b39da351722fea677e4d4f99fde4a37bbca11b6d"
+  },
+  "artifacts": {
+    "build/cairo-validation-20261031/full-suite/qemu.log": "e6c3b39df37a82817c61e54239c3e79125390aee288ba183412b3d8823e118a9",
+    "build/cairo-validation-20261031/final-focused/qemu.log": "7a193cdc3f550453f248f59afcff89c105d4a71f8c1b9c2d402689439dc4c5c6",
+    "build/webcore-graphics/report.json": "8b19adb29ca58679e472766f8f2636a93418814ad31da93d6dfbb97c69e746a1",
+    "build/user-cairo/report.json": "406b96098afb6d77cb7b60a2cd31a2eb1f854d5f4e215f12ae65480f6ec3a2d2",
+    "build/user-cairo-oom/report.json": "a37f9712742c47dc85cadce926998c442ce6473bcfe6079a7af2191dee0b22d5",
+    "build/webcore-cairo/report.json": "63bb0fce76f80780cf5b64ea9e65101e4aab25357a703d47266eabd199990607",
+    "build/webcore-cairo/units/report.json": "bb5da9b3f15a9f7ddd2e7105c0978f94fdfcb08b6a9737464db7f126f48bb087"
+  },
+  "webcore_units": [
+    {
+      "unit": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3-cairo/Source/WebCore/dom/Document.cpp",
+      "exit_code": 0
+    },
+    {
+      "unit": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3-cairo/Source/WebCore/html/parser/HTMLDocumentParser.cpp",
+      "exit_code": 0
+    },
+    {
+      "unit": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3-cairo/Source/WebCore/rendering/RenderView.cpp",
+      "exit_code": 0
+    },
+    {
+      "unit": "/home/joshu/.cache/dihos-webcore-native/source-5288979d57d3-cairo/Source/WebCore/platform/graphics/cairo/GraphicsContextCairo.cpp",
+      "exit_code": 0
+    }
+  ],
+  "remaining": [
+    "Complete WebCore library and Page/Frame integration",
+    "Native FreeType/HarfBuzz and packaged fonts",
+    "Window/surface/input services",
+    "DOM/script local page execution",
+    "Modern-site validation",
+    "Media support including video decoding; audio output deferred"
+  ]
+}

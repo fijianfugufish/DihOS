@@ -49,6 +49,11 @@ $tls = Join-Path $root 'build\hyperv_tls_tests.exe'
 if ($LASTEXITCODE) { throw 'TLS transport test compilation failed' }
 & $tls
 if ($LASTEXITCODE) { throw 'TLS transport tests failed' }
+$modernTls = Join-Path $root 'build\hyperv_modern_tls_tests.exe'
+& $Clang '-std=c11' '-O1' "-I$root\kernel\include" "-I$root\third_party\BearSSL\inc" '-iquote' "$root\include" (Join-Path $root 'tools\hyperv_modern_tls_tests.c') '-o' $modernTls
+if ($LASTEXITCODE) { throw 'Modern TLS transport test compilation failed' }
+& $modernTls
+if ($LASTEXITCODE) { throw 'Modern TLS transport tests failed' }
 $wallpaper = Join-Path $root 'build\hyperv-assets\OS\System\Images\bgpaper.jpg'
 if (Test-Path -LiteralPath $wallpaper) {
   $test = Join-Path $root 'build\hyperv_wallpaper_tests.exe'

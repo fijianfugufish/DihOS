@@ -122,6 +122,17 @@ if ($Action -eq 'Package') {
   }
   if ($IncludeDihscover) {
     $binaries['OS\System\Programs\Dihscover\Dihscover.sacx'] = 'build\sacx\Dihscover.sacx'
+    $browserMetadataPath=Join-Path $ProjectRoot 'build\sacx\Dihscover-engine.json'
+    if (Test-Path -LiteralPath $browserMetadataPath) {
+      $browserMetadata=Get-Content -LiteralPath $browserMetadataPath -Raw | ConvertFrom-Json
+      if ($browserMetadata.engine -eq 'WebCore') {
+        foreach ($item in @(@('build\sacx\Dihscover.sacx',$browserMetadata.frontend_sha256),@('build\sacx\Dihscover-WebCore.bin',$browserMetadata.engine_sha256))) {
+          $itemPath=Join-Path $ProjectRoot $item[0]
+          if (!(Test-Path -LiteralPath $itemPath) -or (Get-FileHash -LiteralPath $itemPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $item[1]) {throw "Dihscover artifact missing or changed: $itemPath"}
+        }
+        $binaries['OS\System\Programs\Dihscover\WebCore.bin']='build\sacx\Dihscover-WebCore.bin'
+      }
+    }
     $licenseRoot = Join-Path $PackagePath 'OS\System\Programs\Dihscover\Licenses'
     foreach($font in @('Sans.ttf','Serif.ttf','Mono.ttf','notosans-OFL.txt','notoserif-OFL.txt','notosansmono-OFL.txt')) {
       if(!(Test-Path -LiteralPath (Join-Path $PackagePath "OS\System\Fonts\Web\$font"))){throw "Required browser font/license missing: $font"}

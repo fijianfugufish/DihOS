@@ -19,11 +19,15 @@ void browser_heap_set_api(const sacx_api *api)
 int browser_heap_init(void)
 {
     static const uint32_t heap_options[] = {
+#ifdef DIHSCOVER_WEBCORE
+        2u*1024u*1024u,1u*1024u*1024u
+#else
         BROWSER_HEAP_BYTES,
         48u * 1024u * 1024u,
         32u * 1024u * 1024u,
         24u * 1024u * 1024u,
         16u * 1024u * 1024u
+#endif
     };
     if (!g_tlsf && g_heap_api && SACX_API_HAS(g_heap_api, mem_alloc))
     {

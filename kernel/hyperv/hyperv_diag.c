@@ -6,6 +6,7 @@
 #include "kwrappers/kfile.h"
 #include "net/knet_usb.h"
 #include "system/dihos_time.h"
+#include "system/entropy.h"
 #include "terminal/terminal_api.h"
 #include "memory/pmem.h"
 #include "apps/sacx_runtime.h"
@@ -77,6 +78,12 @@ void hyperv_diag_print(void)
         terminal_print_hex32(timing_slow[i]);
     }
     hyperv_net_diag_print();
+    dihos_entropy_info rng;dihos_entropy_status(&rng);
+    terminal_print_inline("RNG ready/sources/hardware/error/requests/reseeds: ");
+    terminal_print_inline_hex32(rng.ready);terminal_print_inline_hex32(rng.sources);
+    terminal_print_inline_hex32(rng.hardware);terminal_print_inline_hex32(rng.last_error);
+    terminal_print_inline_hex64(rng.requests);terminal_print_hex64(rng.reseeds);
+    terminal_print_inline("RNG firmware EFI status: ");terminal_print_hex64(rng.firmware_status);
     sacx_network_stats requests;sacx_runtime_get_network_stats(&requests);
     terminal_print_inline("HTTP service slices/active ms/max slice ms/active/queued: ");
     terminal_print_inline_hex64(requests.slices);terminal_print_inline_hex64(requests.elapsed_ms);terminal_print_inline_hex64(requests.max_slice_ms);

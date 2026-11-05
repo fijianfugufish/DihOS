@@ -31,6 +31,7 @@ int feof(FILE *stream);
 int ferror(FILE *stream);
 int fflush(FILE *stream);
 void setbuf(FILE *stream,char *buffer);
+int setvbuf(FILE *stream,char *buffer,int mode,size_t size);
 int remove(const char *path);
 int rename(const char *old_path,const char *new_path);
 #ifdef __cplusplus
@@ -38,6 +39,10 @@ int rename(const char *old_path,const char *new_path);
 #endif
 
 #define EOF (-1)
+#define BUFSIZ 4096
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
 #define SEEK_SET 0
 #define SEEK_CUR 1
 #define SEEK_END 2

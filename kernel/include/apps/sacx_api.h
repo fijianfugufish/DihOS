@@ -724,6 +724,8 @@ extern "C"
         /* Stream first response; let the browser resolve redirects and cache headers. */
         int (*net_request_start_stream)(const sacx_net_request_desc_ex *desc,uint32_t *out_request_id);
         int (*net_response_headers_read)(uint32_t request_id,uint32_t offset,void *dst,uint32_t capacity,uint32_t *out_read);
+        /* Append-only browser frontend extension; engine remains in EL0. */
+        int (*browser_session)(uint32_t operation,void *payload,uint32_t bytes);
     };
 
     static inline int sacx_app_set_console_visible(const sacx_api *api, uint32_t visible)

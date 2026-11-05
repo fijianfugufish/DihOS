@@ -27,6 +27,9 @@ void pmem_free_pages(void *p, uint64_t n); // naive free (optional)
 void pmem_get_stats(pmem_stats *out_stats);
 /* Largest contiguous allocation available from the ordinary page pools. */
 uint64_t pmem_largest_free_pages(void);
+/* True only for an identity-VA window outside every firmware-described
+ * physical resource and boot allocation. Used by private sparse user arenas. */
+int pmem_user_arena_available(uint64_t base,uint64_t bytes);
 
 /* Address conversion helpers for page-table/MMIO code. */
 void *pmem_phys_to_virt(uint64_t phys);

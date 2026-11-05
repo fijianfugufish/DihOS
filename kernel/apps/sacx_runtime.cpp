@@ -32,8 +32,13 @@ extern "C"
 #include "system/smp.h"
 #include "system/kimage_clipboard.h"
 #include "terminal/terminal_api.h"
+#include "process/dihos_user_loader.h"
+#include "process/dihos_user_runtime.h"
+#include "process/dihos_user_window.h"
+#include "process/dihos_browser_bridge.h"
 
 extern const boot_info *k_bootinfo_ptr;
+void dihos_user_window_desktop_init(const kfont*);
 }
 
 #define SACX_MAX_TASKS 16u
@@ -66,6 +71,7 @@ extern const boot_info *k_bootinfo_ptr;
 #define SACX_SCHED_DEFAULT_QUANTUM_TICKS 1u
 
 typedef struct sacx_task sacx_task;
+static void sacx_browser_close_task(uint64_t owner);
 
 typedef struct sacx_file_slot
 {
@@ -202,6 +208,7 @@ typedef struct sacx_async_image_save_slot
 
 #include "apps/sacx_network_internal.h"
 static sacx_net_request_slot *G_net_active_slot;
+#include "sacx_user_network.inc"
 
 typedef struct sacx_memory_slot
 {
@@ -1990,6 +1997,7 @@ static void sacx_task_finish(sacx_task *task, int32_t status, const char *messag
         return;
 
     if(task->launch_pending){task->launch_cancelled=1;return;}
+    sacx_browser_close_task(task->task_id);
     if(smp_current_logical_id()==0u&&kfiber_is_current(&task->execution)) {
         task->exit_requested=1;task->pending_exit_status=status;
         sacx_copy_trunc(task->pending_exit_message,sizeof(task->pending_exit_message),message?message:"");
@@ -2683,6 +2691,10 @@ static int sacx_net_is_redirect(uint32_t status) {return status==301||status==30
 static int sacx_net_stream_sink(const uint8_t *data,uint32_t bytes,void *context)
 {
     sacx_net_request_slot *slot=(sacx_net_request_slot*)context;
+    if(slot->tls_required){
+        if(!knet_usb_tls_verified()){sacx_copy_trunc(slot->info.error,sizeof(slot->info.error),"Unauthenticated HTTPS response rejected");return -1;}
+        slot->tls_verified=1;
+    }
     if(http_stream_feed(&slot->stream,data,bytes)) return -1;
     if(!slot->stream.headers_ready||(!slot->no_follow&&sacx_net_is_redirect(slot->stream.http_status))) return slot->stream.complete;
     slot->info.http_status=slot->stream.http_status;
@@ -2695,9 +2707,9 @@ static int sacx_net_stream_sink(const uint8_t *data,uint32_t bytes,void *context
 static void sacx_net_request_worker(void *ctx)
 {
     sacx_net_request_slot *slot = (sacx_net_request_slot *)ctx;
-    char current_url[768];
-    char location[768];
-    char next_url[768];
+    char current_url[SACX_HTTP_URL_MAX+1];
+    char location[SACX_HTTP_URL_MAX+1];
+    char next_url[SACX_HTTP_URL_MAX+1];
     uint32_t redirects = 0u;
     int rc = -1;
     if (!slot || !slot->used || !slot->buffer)
@@ -2716,13 +2728,14 @@ static void sacx_net_request_worker(void *ctx)
         slot->body_size = 0u;
         slot->truncated = 0u;
         memset(&slot->info, 0, sizeof(slot->info));
+        slot->tls_required=strncmp(current_url,"https://",8u)==0;slot->tls_verified=0;
         http_stream_init(&slot->stream,slot->buffer,slot->capacity);
         sacx_copy_trunc(slot->info.final_url,sizeof(slot->info.final_url),current_url);
         knet_usb_set_worker_quiet(1u);
         knet_usb_set_stream_sink(sacx_net_stream_sink,slot);
-        rc = knet_usb_fetch_request(current_url, slot->method,
+        rc = knet_usb_fetch_request_headers(current_url, slot->method,
                                     slot->request_body, slot->request_body_size,
-                                    slot->content_type, slot->buffer, slot->capacity,
+                                    slot->content_type,slot->request_headers,slot->request_header_bytes, slot->buffer, slot->capacity,
                                     &slot->raw_size, &slot->truncated, &slot->cancelled,
                                     slot->timeout_ms);
         knet_usb_set_stream_sink(0,0);
@@ -2736,7 +2749,7 @@ static void sacx_net_request_worker(void *ctx)
         if (rc != 0 && !slot->stream.complete)
         {
             sacx_copy_trunc(slot->info.error, sizeof(slot->info.error),
-                            slot->stream.failed ? slot->stream.error : rc == -4 ? "network request timed out" : rc == -2 ? "network transport busy" : knet_usb_last_fetch_error()[0] ? knet_usb_last_fetch_error() : "network request failed");
+                            slot->stream.failed ? slot->stream.error : knet_usb_last_fetch_error()[0] ? knet_usb_last_fetch_error() : rc == -4 ? "network request timed out" : rc == -2 ? "network transport busy" : "network request failed");
             slot->info.status = SACX_NET_STATUS_FAILED;
             __atomic_store_n(&slot->status, SACX_NET_STATUS_FAILED, __ATOMIC_RELEASE);
             asm_dma_clean_range(slot, sizeof(*slot));
@@ -2778,7 +2791,7 @@ static void sacx_net_request_worker(void *ctx)
             continue;
         }
         sacx_copy_trunc(slot->info.final_url, sizeof(slot->info.final_url), current_url);
-        slot->info.tls_unverified = strncmp(current_url, "https://", 8u) == 0 ? 1u : 0u;
+        slot->info.tls_unverified = slot->tls_required && !slot->tls_verified;
         slot->info.status = SACX_NET_STATUS_DONE;
         asm_dma_clean_range(slot->buffer, slot->body_size);
         __atomic_store_n(&slot->status, SACX_NET_STATUS_DONE, __ATOMIC_RELEASE);
@@ -2792,6 +2805,7 @@ static void sacx_net_request_worker(void *ctx)
 extern "C" void sacx_runtime_get_network_stats(sacx_network_stats *out) {
     if(!out)return;*out={G_net_slices,G_net_elapsed_ms,G_net_max_slice_ms,G_net_active_slot?1u:0u,0};
     for(auto &task:G_tasks)for(auto &slot:task.net_requests)if(slot.used&&slot.status==SACX_NET_STATUS_QUEUED)++out->queued;
+    for(auto &slot:G_user_http)if(slot.request.used&&slot.request.status==SACX_NET_STATUS_QUEUED)++out->queued;
 }
 
 #include "sacx_network_start.inc"
@@ -5874,6 +5888,7 @@ static int sacx_api_k3d_scene_add_obstacle_cube(uint32_t scene_handle, uint32_t 
 }
 
 #include "sacx_api_guards.inc"
+#include "sacx_browser_session.inc"
 
 static void sacx_task_init_api(sacx_task *task)
 {
@@ -6145,6 +6160,7 @@ static void sacx_task_init_api(sacx_task *task)
     task->api.time_utc=sacx_guard_time_utc;
     task->api.net_request_start_stream=sacx_guard_net_request_start_stream;
     task->api.net_response_headers_read=sacx_guard_net_response_headers_read;
+    task->api.browser_session=sacx_api_browser_session;
 }
 
 extern "C" int sacx_runtime_init(const kfont *font)
@@ -6152,6 +6168,7 @@ extern "C" int sacx_runtime_init(const kfont *font)
     for (uint32_t i = 0u; i < SACX_MAX_TASKS; ++i)
         sacx_task_reset(&G_tasks[i]);
     G_runtime_font = font;
+    dihos_user_window_desktop_init(font);
     G_next_task_id = 1u;
     G_rr_cursor = 0u;
     G_current_task = 0;

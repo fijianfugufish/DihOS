@@ -161,6 +161,8 @@ static inline EFI_FREE_POOL BsFreePool(void *BS) { return *(EFI_FREE_POOL *)((ch
 static inline EFI_LOCATE_HANDLE_BUFFER BsLocateHandles(void *BS) { return *(EFI_LOCATE_HANDLE_BUFFER *)((char *)BS + 0x138); }
 static inline EFI_LOCATE_PROTOCOL BsLocate(void *BS) { return *(EFI_LOCATE_PROTOCOL *)((char *)BS + 0x140); }
 static inline EFI_SET_WATCHDOG_TIMER BsWatchdog(void *BS) { return *(EFI_SET_WATCHDOG_TIMER *)((char *)BS + 0x100); }
+
+#include "stage2_rng.inc"
 enum
 {
     AllocateAnyPages = 0,
@@ -1968,7 +1970,7 @@ EFI_STATUS reopen_same_volume(EFI_SYSTEM_TABLE *st, EFI_HANDLE image, void **out
 /*  Externs from stage2_load_kernel.c                                         */
 /* -------------------------------------------------------------------------- */
 EFI_STATUS load_kernel_elf(EFI_SYSTEM_TABLE *, EFI_HANDLE, const wchar_t *, EFI_PHYSICAL_ADDRESS *, boot_info *);
-EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *, EFI_HANDLE, const boot_info *, EFI_PHYSICAL_ADDRESS);
+EFI_STATUS exit_boot_and_jump(EFI_SYSTEM_TABLE *, EFI_HANDLE, boot_info *, EFI_PHYSICAL_ADDRESS);
 
 /* -------------------------------------------------------------------------- */
 /*  Stage-2 entry                                                             */
@@ -1982,7 +1984,7 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         W(0, 0, 0, 0);
 
     boot_info bi = (boot_info){0};
-    bi.version = 2;
+    bi.version = 3;
     bi.stage2_report_len = 0;
     bi.stage2_report[0] = 0;
     g_stage2_report_bi = &bi;
@@ -2104,6 +2106,8 @@ EFI_STATUS EfiMain(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     stage2_snapshot_boot_volume(st, image, &bi);
 
     stage2_capture_clock(st,&bi);
+    stage2_capture_rng(st,&bi);
+    println(st, bi.boot_rng_flags ? L"[RNG] firmware seed captured" : L"[RNG] firmware seed unavailable");
     println(st, bi.boot_time_flags ? L"[CLOCK] firmware RTC captured" : L"[CLOCK] firmware RTC unavailable");
     println(st, L"[CHAIN] ExitBootServices -> kernel");
     exit_boot_and_jump(st, image, &bi, entry);

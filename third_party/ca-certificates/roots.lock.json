@@ -1,0 +1,10 @@
+{
+  "url": "https://curl.se/ca/cacert-2026-10-20.pem",
+  "sha256": "796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe",
+  "certificates": 118,
+  "upstream": "Mozilla CA store converted by curl",
+  "license": "MPL-2.0",
+  "license_sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+  "note": "The PEM conversion does not retain additional Mozilla policy constraints; see curl CA Extract documentation.",
+  "generated_sha256": "2c3d70add0c10a0084ab56644a4fe9b021cafb8865296f1ff8020ee88326ff92"
+}

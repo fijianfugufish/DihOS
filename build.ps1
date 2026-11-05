@@ -26,6 +26,7 @@ param(
   # Crash maps are useful for symbolised panic reports but expensive to
   # regenerate.  Opt in when investigating a crash; normal builds remove any
   # stale deployed map so it cannot describe the wrong kernel.
+  [switch]$KernelOnly,
   [switch]$CrashMap
 )
 
@@ -80,6 +81,7 @@ $BearDir = Join-Path $ProjectRoot "third_party\BearSSL"
 $BearSrc = Join-Path $BearDir "src"
 $BearInc = Join-Path $BearDir "inc"
 $BearCompat = Join-Path $BearDir "compat"
+$MbedDir = Join-Path $ProjectRoot "third_party\mbedtls"
 $SimpleWebPDir = Join-Path $ProjectRoot "third_party\simplewebp"
 $SimpleWebPCompat = Join-Path $SimpleWebPDir "freestanding"
 
@@ -163,6 +165,7 @@ function New-Kernel-CFlags {
     $flags += "-DDIHOS_BUILD_DEBUG=0"
   }
   $flags += Kernel-Arch-Defines -Arch $Arch
+  $flags += '-DDIHOS_TLS_MODERN=1'
   $flags += Include-Flags -Dirs (Kernel-Include-Dirs -Arch $Arch)
   return ,$flags
 }
@@ -278,6 +281,9 @@ function Compile-C {
       # Fault reporting must work even with alignment checking enabled.
       # In particular, packed RGB constants must not become unaligned LDRH.
       $fileCFlags = @($CFlags)
+      if ([IO.Path]::GetFileName($f) -in @('knet_tls.c','knet_tls_platform.c')) {
+        $fileCFlags = (Include-Flags -Dirs @((Join-Path $MbedDir 'compat'),(Join-Path $MbedDir 'include'),(Join-Path $MbedDir 'library'))) + $fileCFlags
+      }
       if ([IO.Path]::GetFileName($f) -eq 'aa64_exceptions.c' -and
           ($CFlags -match 'aarch64')) {
         $fileCFlags += '-mstrict-align'
@@ -327,6 +333,19 @@ function Build-Kernel {
     )
     $objs += Compile-C -Sources ($bearSources.FullName) -ObjDir $ObjDir -CFlags $bearFlags
   }
+
+  $mbedLockPath = Join-Path $MbedDir 'source.lock.json'
+  if (!(Test-Path -LiteralPath $mbedLockPath)) { throw 'Pinned native TLS sources are missing' }
+  $mbedLock = Get-Content -LiteralPath $mbedLockPath -Raw | ConvertFrom-Json
+  foreach ($file in $mbedLock.files.PSObject.Properties) {
+    $path = Join-Path $MbedDir $file.Name
+    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $file.Value) { throw "Changed pinned TLS source: $($file.Name)" }
+  }
+  $mbedObj = Join-Path $ObjDir 'mbedtls'
+  New-Item -ItemType Directory -Force $mbedObj | Out-Null
+  $mbedFlags = (Include-Flags -Dirs @((Join-Path $MbedDir 'compat'),(Join-Path $MbedDir 'include'),(Join-Path $MbedDir 'library'))) + @($cflags) + @('-DNDEBUG','-include',(Join-Path $KerInc 'net/dihos_tls_build.h'))
+  $mbedSources = Get-ChildItem -LiteralPath (Join-Path $MbedDir 'library') -Filter '*.c' -File
+  $objs += Compile-C -Sources ($mbedSources.FullName) -ObjDir $mbedObj -CFlags $mbedFlags
 
   Remove-ExistingOutput -Path $OutFile
   $linkRsp = Join-Path $ObjDir "kernel_link.rsp"
@@ -389,6 +408,8 @@ if ($CrashMap) {
 if (!$ArmOnly) {
   Build-Kernel -Arch "x64" -Target "x86_64-unknown-none-elf" -ObjDir $ObjKX64 -OutFile $KernelX64OutFull -LinkerScript $ldsX64
 }
+
+if ($KernelOnly) { return }
 
 # ---- IMAGE EDITOR SACX (fat AA64 + x64 package) ----
 $imageEditorBuild = Join-Path $ProjectRoot "build_sacx_app.ps1"

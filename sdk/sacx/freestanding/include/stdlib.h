@@ -8,6 +8,7 @@ extern "C" {
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
+void *aligned_alloc(size_t alignment, size_t size);
 void free(void *ptr);
 int abs(int value);
 long strtol(const char *text, char **end, int base);
@@ -19,7 +20,7 @@ float strtof(const char *text, char **end);
 int atoi(const char *text);
 void qsort(void *base, size_t count, size_t size, int (*compare)(const void *, const void *));
 void *bsearch(const void *key, const void *base, size_t count, size_t size, int (*compare)(const void *, const void *));
-void abort(void);
+__attribute__((noreturn)) void abort(void);
 void exit(int status);
 int atexit(void (*function)(void));
 int rand(void);

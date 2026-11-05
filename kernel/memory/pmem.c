@@ -13,10 +13,17 @@ typedef struct
 
 static inline int is_reclaimable_type(uint32_t t)
 {
-    // After ExitBootServices, BootServicesCode/Data and Conventional memory are reclaimable.
+    /* ARM64 still executes on the firmware entry stack and translation
+     * tables after ExitBootServices. Their BootServices allocations remain
+     * live until we install an owned stack/map; reclaiming them can silently
+     * corrupt the running kernel during later UI allocations. */
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || defined(DIHOS_PMEM_KEEP_FIRMWARE)
+    return t == EFI_CONVENTIONAL_MEMORY;
+#else
     return (t == EFI_BOOT_SERVICES_CODE ||
             t == EFI_BOOT_SERVICES_DATA ||
             t == EFI_CONVENTIONAL_MEMORY);
+#endif
 }
 
 static range_t pool[256];
@@ -208,6 +215,30 @@ static inline void pmem_try_learn_va_delta(void)
     }
 }
 
+static uint64_t user_map,user_map_bytes,user_map_stride;
+static range_t user_boot_guards[5];
+static int user_overlap(uint64_t a,uint64_t n,uint64_t b,uint64_t m){
+    if(!n || !m)return 0;
+    if(a>UINT64_MAX-n || b>UINT64_MAX-m)return 1;
+    return a<b+m && b<a+n;
+}
+int pmem_user_arena_available(uint64_t base,uint64_t bytes){
+    if(!bytes || base>UINT64_MAX-bytes || !user_map ||
+       user_map_stride<sizeof(efi_mdesc) || !user_map_bytes || user_map>UINT64_MAX-user_map_bytes ||
+       user_map_bytes%user_map_stride || user_map_bytes/user_map_stride>4096)return 0;
+    for(unsigned i=0;i<5;++i)
+        if(user_overlap(base,bytes,user_boot_guards[i].base,user_boot_guards[i].len))return 0;
+    for(uint64_t offset=0;offset<user_map_bytes;offset+=user_map_stride){
+        const efi_mdesc *d=(const efi_mdesc*)(uintptr_t)(user_map+offset);
+        if(d->NumberOfPages>UINT64_MAX/PAGE_SIZE)return 0;
+        if(user_overlap(base,bytes,d->PhysicalStart,d->NumberOfPages*PAGE_SIZE))return 0;
+        if(g_pa2va_delta && d->NumberOfPages){
+            if(d->PhysicalStart>UINT64_MAX-g_pa2va_delta)return 0;
+            if(user_overlap(base,bytes,d->PhysicalStart+g_pa2va_delta,d->NumberOfPages*PAGE_SIZE))return 0;
+        }
+    }
+    return 1;
+}
 void pmem_init(const boot_info *bi)
 {
     pool_count = 0;
@@ -215,6 +246,13 @@ void pmem_init(const boot_info *bi)
     g_pmem_total_pages = 0;
 
     pmem_try_learn_va_delta();
+    user_map=bi->mmap;user_map_bytes=bi->mmap_size;
+    user_map_stride=bi->mmap_desc_size?bi->mmap_desc_size:sizeof(efi_mdesc);
+    user_boot_guards[0]=(range_t){bi->kernel_base_phys,bi->kernel_size_bytes};
+    user_boot_guards[1]=(range_t){bi->fb.fb_base,bi->fb.fb_size?bi->fb.fb_size:(uint64_t)bi->fb.pitch*bi->fb.height};
+    user_boot_guards[2]=(range_t){bi->mmap,bi->mmap_size};
+    user_boot_guards[3]=(range_t){bi->sacx_exec_pool_base_phys,bi->sacx_exec_pool_size_bytes};
+    user_boot_guards[4]=(range_t){bi->boot_volume_base_phys,bi->boot_volume_size_bytes};
 
     // 1) read the firmware memory map
     uint8_t *p = (uint8_t *)(uintptr_t)bi->mmap;

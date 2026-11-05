@@ -7,6 +7,14 @@
 #include "system/dihos_time.h"
 #include "bearssl.h"
 #include "asm/asm.h"
+#include "system/entropy.h"
+#include "net/tls_verify.h"
+#include "net/tcp_receive.h"
+#include "net/http_limits.h"
+#if defined(DIHOS_TLS_MODERN)
+#include "net/knet_tls.h"
+#endif
+#include "tls_roots.inc"
 
 #define KNET_ETH_TYPE_IPV4 0x0800u
 #define KNET_ETH_TYPE_ARP 0x0806u
@@ -37,17 +45,17 @@ static uint16_t g_ip_id = 1u;
 static uint16_t g_tcp_port = 49152u;
 static uint32_t g_tcp_sequence = 0x44494831u;
 
-typedef struct knet_x509_noanchor_context
-{
-    const br_x509_class *vtable;
-    const br_x509_class **inner;
-} knet_x509_noanchor_context;
-
+#if !defined(DIHOS_TLS_MODERN)
 static br_ssl_client_context g_tls_client;
 static br_x509_minimal_context g_tls_x509;
-static knet_x509_noanchor_context g_tls_noanchor;
+static dihos_tls_verifier g_tls_verifier;
+#endif
+static uint32_t g_fetch_tls_verified;
+uint32_t knet_usb_tls_verified(void){return __atomic_load_n(&g_fetch_tls_verified,__ATOMIC_ACQUIRE);}
+#if !defined(DIHOS_TLS_MODERN)
 static uint8_t g_tls_iobuf[BR_SSL_BUFSIZE_BIDI];
 static uint8_t g_tls_pending[2048];
+#endif
 static uint8_t *g_fetch_output;
 static uint32_t g_fetch_capacity;
 static uint32_t g_fetch_size;
@@ -57,6 +65,8 @@ static volatile uint32_t g_fetch_busy;
 static uint64_t g_fetch_deadline;
 static volatile uint32_t g_worker_quiet;
 static char g_fetch_error[128];
+static const char *g_fetch_phase="network";
+static uint32_t g_fetch_tcp_packets,g_fetch_noncontiguous;
 const char *knet_usb_last_fetch_error(void) { return g_fetch_error; }
 static void knet_record_error(const char *text)
 {
@@ -72,6 +82,26 @@ static void knet_record_tls_error(const char *prefix,uint32_t code)
     do {digits[count++]=(char)('0'+code%10u);code/=10u;} while(code&&count<sizeof digits);
     while(count&&n+1u<sizeof g_fetch_error)g_fetch_error[n++]=digits[--count];
     g_fetch_error[n]=0;
+}
+static void knet_error_append(const char *text,uint32_t value)
+{
+    uint32_t n=0;while(g_fetch_error[n])++n;
+    while(*text && n+1u<sizeof(g_fetch_error))g_fetch_error[n++]=*text++;
+    char digits[10];uint32_t count=0;
+    do{digits[count++]=(char)('0'+value%10u);value/=10u;}while(value && count<sizeof(digits));
+    while(count && n+1u<sizeof(g_fetch_error))g_fetch_error[n++]=digits[--count];g_fetch_error[n]=0;
+}
+static void knet_record_timeout(void)
+{
+    knet_record_error(g_fetch_phase);
+    knet_error_append(" timeout; bytes=",g_fetch_size);
+    knet_error_append(" tcp=",g_fetch_tcp_packets);
+    knet_error_append(" gaps/dups=",g_fetch_noncontiguous);
+#if defined(DIHOS_TLS_MODERN)
+    int code=knet_tls_last_error();knet_error_append(" tls=",code<0?(uint32_t)-(int64_t)code:(uint32_t)code);
+#else
+    knet_error_append(" tls=",br_ssl_engine_last_error(&g_tls_client.eng));
+#endif
 }
 
 static uint64_t knet_now_ms(void);
@@ -134,69 +164,6 @@ static void knet_log_flush(void) { if (knet_log_enabled()) terminal_flush_log();
 #define terminal_print_inline_hex32 knet_log_hex32
 #define terminal_flush_log knet_log_flush
 
-static void knet_x509_start_chain(const br_x509_class **ctx, const char *server_name)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    (*x->inner)->start_chain(x->inner, server_name);
-}
-
-static void knet_x509_start_cert(const br_x509_class **ctx, uint32_t length)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    (*x->inner)->start_cert(x->inner, length);
-}
-
-static void knet_x509_append(const br_x509_class **ctx, const unsigned char *buf, size_t len)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    (*x->inner)->append(x->inner, buf, len);
-}
-
-static void knet_x509_end_cert(const br_x509_class **ctx)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    (*x->inner)->end_cert(x->inner);
-}
-
-static unsigned knet_x509_end_chain(const br_x509_class **ctx)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    unsigned result = (*x->inner)->end_chain(x->inner);
-    return result == BR_ERR_X509_NOT_TRUSTED ? 0u : result;
-}
-
-static const br_x509_pkey *knet_x509_get_pkey(const br_x509_class *const *ctx,
-                                               unsigned *usages)
-{
-    knet_x509_noanchor_context *x = (knet_x509_noanchor_context *)ctx;
-    return (*x->inner)->get_pkey(x->inner, usages);
-}
-
-static const br_x509_class g_knet_x509_noanchor_vtable = {
-    sizeof(knet_x509_noanchor_context),
-    knet_x509_start_chain,
-    knet_x509_start_cert,
-    knet_x509_append,
-    knet_x509_end_cert,
-    knet_x509_end_chain,
-    knet_x509_get_pkey};
-
-static uint64_t knet_cycle_counter(void)
-{
-#if defined(DIHOS_ARCH_AARCH64)
-    uint64_t value;
-    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
-    return value;
-#elif defined(DIHOS_ARCH_X64)
-    uint32_t lo;
-    uint32_t hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-#else
-    return dihos_time_ticks();
-#endif
-}
-
 static uint64_t knet_now_ms(void)
 {
 #if defined(DIHOS_ARCH_AARCH64)
@@ -209,22 +176,6 @@ static uint64_t knet_now_ms(void)
                ((counter % frequency) * 1000u) / frequency;
 #endif
     return (dihos_time_ticks() * 1000u) / DIHOS_TIME_TICKS_PER_SECOND;
-}
-
-static void knet_tls_entropy(uint8_t out[48])
-{
-    uint64_t x = knet_cycle_counter() ^ dihos_time_ticks() ^ ((uint64_t)g_knet.ip << 17) ^
-                 (uint64_t)(uintptr_t)&g_tls_client ^ 0x9E3779B97F4A7C15ull;
-    for (uint32_t i = 0u; i < 6u; ++i)
-        x ^= (uint64_t)g_knet.mac[i] << ((i * 9u) & 63u);
-    for (uint32_t i = 0u; i < 48u; ++i)
-    {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x += knet_cycle_counter() ^ dihos_time_ticks() ^ ((uint64_t)i << 32);
-        out[i] = (uint8_t)(x >> ((i & 7u) * 8u));
-    }
 }
 
 static void knet_copy(char *dst, uint32_t cap, const char *src)
@@ -891,9 +842,11 @@ void knet_usb_get_status(knet_usb_status *out_status)
     *out_status=last;
 }
 
+#include "net/http_request_headers.h"
 static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                                 const char *method, const uint8_t *request_body,
-                                uint32_t request_body_size, const char *content_type)
+                                uint32_t request_body_size, const char *content_type,
+                                const char *request_headers,uint32_t request_header_bytes)
 {
     typedef struct tcp_packet
     {
@@ -910,8 +863,8 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
     static const uint8_t tcp_ack = 0x10u;
     static const uint8_t tcp_fin = 0x01u;
     char host[128];
-    char path[512];
-    uint8_t request[6144];
+    char path[SACX_HTTP_URL_MAX+1];
+    uint8_t request[SACX_HTTP_URL_MAX+SACX_HTTP_REQUEST_HEADERS_MAX+SACX_HTTP_REQUEST_BODY_MAX+1024];
     uint8_t next_mac[6];
     uint32_t server_ip = 0u;
     uint16_t server_port = 80u;
@@ -940,6 +893,8 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_error("net:get needs a URL");
         return -1;
     }
+    uint32_t url_bytes=0;while(url_bytes<=SACX_HTTP_URL_MAX && url[url_bytes])++url_bytes;
+    if(url_bytes>SACX_HTTP_URL_MAX){knet_record_error("URL exceeds native request limit");return -1;}
     if (knet_starts_with(url, "https://"))
     {
         use_tls = 1u;
@@ -986,11 +941,13 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         while (*p && i + 1u < sizeof(path))
             path[i++] = *p++;
     path[i] = 0;
+    if(*p){knet_record_error("URL exceeds native request limit");return -1;}
 
     if (max_bytes < 128u)
         max_bytes = 128u;
     if (max_bytes > (g_fetch_output ? g_fetch_capacity : 65536u))
         max_bytes = g_fetch_output ? g_fetch_capacity : 65536u;
+    g_fetch_phase="DHCP/link";g_fetch_tcp_packets=g_fetch_noncontiguous=0;
     reused_configuration = g_knet.configured;
     if (!g_knet.configured && knet_dhcp_locked(4u) != 0)
         return -1;
@@ -1000,6 +957,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
        refresh the router MAC so the next DNS/TCP exchange starts cleanly. */
     if (reused_configuration && g_knet.router)
     {
+        g_fetch_phase="router ARP";
         terminal_print("net: validating router path");
         terminal_flush_log();
         if (arp_resolve(g_knet.router, next_mac, 2u) != 0)
@@ -1013,6 +971,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_success("net: router path ready");
     }
 
+    g_fetch_phase="DNS/route";
     /* Parse a dotted IPv4 host, otherwise perform a minimal DNS A query. */
     {
         uint32_t part = 0u;
@@ -1244,6 +1203,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         uint32_t tcp_hlen_ = (syn_opts_) ? 24u : 20u; \
         uint32_t tcp_len_ = tcp_hlen_ + (uint32_t)(payload_len_); \
         uint32_t frame_len_ = 14u + 20u + tcp_len_; \
+        if (frame_len_ > sizeof(g_tx) || tcp_len_ + 20u > 1500u) return -1; \
         uint32_t sum_ = 0u; \
         uint32_t ci_; \
         memcpy(g_tx, next_mac, 6u); memcpy(g_tx + 6u, g_knet.mac, 6u); \
@@ -1256,7 +1216,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         put_be16(g_tx + 34u, local_port); put_be16(g_tx + 36u, server_port); \
         put_be32(g_tx + 38u, (seq_)); put_be32(g_tx + 42u, (ack_)); \
         g_tx[46u] = (uint8_t)((tcp_hlen_ / 4u) << 4); g_tx[47u] = (uint8_t)(flags_); \
-        put_be16(g_tx + 48u, 64240u); put_be16(g_tx + 50u, 0u); put_be16(g_tx + 52u, 0u); \
+        put_be16(g_tx + 48u, DIHOS_TCP_RECEIVE_WINDOW); put_be16(g_tx + 50u, 0u); put_be16(g_tx + 52u, 0u); \
         if (syn_opts_) { g_tx[54u] = 2u; g_tx[55u] = 4u; put_be16(g_tx + 56u, 1460u); } \
         if ((payload_len_)) memcpy(g_tx + 14u + 20u + tcp_hlen_, (payload_), (payload_len_)); \
         KNET_TCP_SUM_ADD(sum_, (g_knet.ip >> 16) & 0xFFFFu); KNET_TCP_SUM_ADD(sum_, g_knet.ip & 0xFFFFu); \
@@ -1282,12 +1242,13 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                 if (thl_ >= 20u && ihl_ + thl_ <= total_ && 14u + total_ <= got_) { \
                     (packet_).seq = get_be32(g_rx + to_ + 4u); (packet_).ack = get_be32(g_rx + to_ + 8u); \
                     (packet_).flags = g_rx[to_ + 13u]; (packet_).payload = g_rx + to_ + thl_; \
-                    (packet_).payload_len = (uint16_t)(total_ - ihl_ - thl_); (ok_) = 1u; \
+                    (packet_).payload_len = (uint16_t)(total_ - ihl_ - thl_); (ok_) = 1u; ++g_fetch_tcp_packets; \
                 } \
             } \
         } \
     } while (0)
 
+    g_fetch_phase="TCP connect";
     terminal_print_inline("net: TCP connect ");
     print_ip_inline(server_ip);
     terminal_print_inline(":");
@@ -1349,7 +1310,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_error("net:get unsupported HTTP method");
         return -1;
     }
-    if (request_body_size > 4096u || (request_body_size && !request_body))
+    if (request_body_size > SACX_HTTP_REQUEST_BODY_MAX || (request_body_size && !request_body))
     {
         terminal_error("net:get HTTP request body is too large");
         return -1;
@@ -1359,15 +1320,25 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
     KNET_REQ_TEXT(path);
     KNET_REQ_TEXT(" HTTP/1.1\r\nHost: ");
     KNET_REQ_TEXT(host);
-    KNET_REQ_TEXT("\r\nUser-Agent: Mozilla/5.0 (DIHOS; Dihscover/0.2) AppleWebKit/537.36 Safari/537.36\r\nAccept: */*\r\nAccept-Encoding: identity\r\n");
-    if (request_body_size)
+    KNET_REQ_TEXT("\r\n");
+    if(dihos_http_validate_request_headers(request_headers,request_header_bytes))return -1;
+    if(!dihos_http_request_has_header(request_headers,request_header_bytes,"user-agent"))
+        KNET_REQ_TEXT("User-Agent: Mozilla/5.0 (DIHOS; Dihscover/0.2) AppleWebKit/537.36 Safari/537.36\r\n");
+    if(!dihos_http_request_has_header(request_headers,request_header_bytes,"accept"))KNET_REQ_TEXT("Accept: */*\r\n");
+    KNET_REQ_TEXT("Accept-Encoding: identity\r\n");
+    if(request_header_bytes>sizeof(request)-request_len)return -1;
+    if(request_header_bytes){memcpy(request+request_len,request_headers,request_header_bytes);request_len+=request_header_bytes;}
+    if (request_body_size || strcmp(method,"POST")==0)
     {
         char decimal[16];
         uint32_t value = request_body_size, digits = 0u;
         do { decimal[digits++] = (char)('0' + value % 10u); value /= 10u; } while (value && digits < sizeof(decimal));
-        KNET_REQ_TEXT("Content-Type: ");
-        KNET_REQ_TEXT(content_type && content_type[0] ? content_type : "application/x-www-form-urlencoded");
-        KNET_REQ_TEXT("\r\nContent-Length: ");
+        if(!dihos_http_request_has_header(request_headers,request_header_bytes,"content-type")){
+            KNET_REQ_TEXT("Content-Type: ");
+            KNET_REQ_TEXT(content_type && content_type[0] ? content_type : "application/x-www-form-urlencoded");
+            KNET_REQ_TEXT("\r\n");
+        }
+        KNET_REQ_TEXT("Content-Length: ");
         while (digits && request_len < sizeof(request)) request[request_len++] = (uint8_t)decimal[--digits];
         KNET_REQ_TEXT("\r\n");
     }
@@ -1390,6 +1361,10 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 
     if (use_tls)
     {
+#if defined(DIHOS_TLS_MODERN)
+#include "knet_modern_https.inc"
+#else
+        g_fetch_phase="TLS handshake";
         uint8_t entropy[48];
         uint32_t request_off = 0u;
         uint32_t pending_len = 0u;
@@ -1398,8 +1373,8 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         uint8_t request_flushed = 0u;
         uint8_t tcp_fin_seen = 0u;
 
-        terminal_warn("net: TLS root trust store not installed; chain and hostname checks only");
-        terminal_warn("net: TLS entropy is provisional until a hardware RNG driver is available");
+        __atomic_store_n(&g_fetch_tls_verified,0,__ATOMIC_RELEASE);
+        terminal_print("net: TLS certificate verification with Mozilla roots " DIHOS_TLS_ROOTS_DATE);
         uint64_t utc_seconds;
         if (dihos_time_utc(&utc_seconds)) {
             terminal_error("net:get TLS clock unavailable; update stage2 and check VM firmware time");
@@ -1409,16 +1384,20 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_print_inline("net: TLS UTC Unix seconds ");
         terminal_print_inline_hex32((uint32_t)(utc_seconds>>32));
         terminal_print_inline_hex32((uint32_t)utc_seconds);terminal_print("");
+        if(dihos_entropy_fill(entropy,sizeof(entropy))){
+            memset(entropy,0,sizeof(entropy));
+            terminal_error("net:get TLS random service unavailable");
+            KNET_SEND_TCP(tx_seq,rx_seq,tcp_rst|tcp_ack,0,0u,0u);return -1;
+        }
 
-        br_ssl_client_init_full(&g_tls_client, &g_tls_x509, 0, 0u);
+        br_ssl_client_init_full(&g_tls_client, &g_tls_x509, DIHOS_TLS_ROOTS, DIHOS_TLS_ROOTS_COUNT);
         br_x509_minimal_set_time(&g_tls_x509, 719528u+(uint32_t)(utc_seconds/86400),
                                  (uint32_t)(utc_seconds%86400));
-        g_tls_noanchor.vtable = &g_knet_x509_noanchor_vtable;
-        g_tls_noanchor.inner = &g_tls_x509.vtable;
-        br_ssl_engine_set_x509(&g_tls_client.eng, &g_tls_noanchor.vtable);
+        dihos_tls_verifier_init(&g_tls_verifier,&g_tls_x509.vtable);
+        br_ssl_engine_set_x509(&g_tls_client.eng, &g_tls_verifier.vtable);
+        br_ssl_engine_add_flags(&g_tls_client.eng,BR_OPT_NO_RENEGOTIATION);
         br_ssl_engine_set_versions(&g_tls_client.eng, BR_TLS12, BR_TLS12);
         br_ssl_engine_set_buffer(&g_tls_client.eng, g_tls_iobuf, sizeof(g_tls_iobuf), 1);
-        knet_tls_entropy(entropy);
         br_ssl_engine_inject_entropy(&g_tls_client.eng, entropy, sizeof(entropy));
         memset(entropy, 0, sizeof(entropy));
         if (!br_ssl_client_reset(&g_tls_client, host, 0))
@@ -1478,6 +1457,11 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 
             if ((state & BR_SSL_SENDAPP) && request_off < request_len)
             {
+                if(!g_tls_verifier.checked || !g_tls_verifier.verified){
+                    terminal_error("net:get TLS peer authentication did not complete");return -1;
+                }
+                __atomic_store_n(&g_fetch_tls_verified,1,__ATOMIC_RELEASE);
+                g_fetch_phase="HTTPS response";
                 uint32_t take;
                 tls_buf = br_ssl_engine_sendapp_buf(&g_tls_client.eng, &tls_len);
                 take = request_len - request_off;
@@ -1504,6 +1488,7 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
 
             if (state & BR_SSL_RECVAPP)
             {
+                if(!knet_usb_tls_verified() || !g_tls_verifier.verified){terminal_error("net:get unauthenticated TLS application data rejected");return -1;}
                 uint32_t take;
                 tls_buf = br_ssl_engine_recvapp_buf(&g_tls_client.eng, &tls_len);
                 take = (uint32_t)tls_len;
@@ -1573,18 +1558,21 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                         terminal_error("net:get TLS TCP connection reset");
                         return -1;
                     }
-                    if (packet.payload_len && packet.seq == rx_seq)
+                    uint32_t skip=dihos_tcp_receive_skip(rx_seq,packet.seq,packet.payload_len);
+                    if(packet.payload_len && packet.seq!=rx_seq)++g_fetch_noncontiguous;
+                    if (packet.payload_len && skip < packet.payload_len)
                     {
-                        if (packet.payload_len > sizeof(g_tls_pending))
+                        uint32_t accepted=packet.payload_len-skip;
+                        if (accepted > sizeof(g_tls_pending))
                         {
                             terminal_error("net:get TLS TCP segment too large");
                             KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
                             return -1;
                         }
-                        memcpy(g_tls_pending, packet.payload, packet.payload_len);
-                        pending_len = packet.payload_len;
+                        memcpy(g_tls_pending, packet.payload+skip, accepted);
+                        pending_len = accepted;
                         pending_off = 0u;
-                        rx_seq += packet.payload_len;
+                        rx_seq += accepted;
                         tls_deadline = knet_now_ms() + 30000u;
                         KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
                     }
@@ -1592,10 +1580,9 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
                     {
                         KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
                     }
-                    if (packet.flags & tcp_fin)
+                    if ((packet.flags & tcp_fin) && dihos_tcp_receive_fin(rx_seq,packet.seq,packet.payload_len))
                     {
-                        if (packet.seq + packet.payload_len == rx_seq)
-                            ++rx_seq;
+                        ++rx_seq;
                         tcp_fin_seen = 1u;
                         KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
                     }
@@ -1610,14 +1597,20 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         terminal_print("");
         KNET_SEND_TCP(tx_seq, rx_seq, tcp_rst | tcp_ack, 0, 0u, 0u);
         return -1;
+#endif
     }
 
+    g_fetch_phase="HTTP response";
     terminal_print_inline("net: HTTP ");
     terminal_print_inline(method);
     terminal_print_inline(" ");
     terminal_print(path);
-    KNET_SEND_TCP(tx_seq, rx_seq, tcp_psh | tcp_ack, request, request_len, 0u);
-    tx_seq += request_len;
+    for(uint32_t offset=0;offset<request_len;){
+        if(knet_fetch_cancelled())return -3;
+        uint32_t take=request_len-offset;if(take>1300u)take=1300u;
+        KNET_SEND_TCP(tx_seq, rx_seq, tcp_psh | tcp_ack, request+offset, take, 0u);
+        tx_seq+=take;offset+=take;
+    }
 
     {
     uint32_t http_polls = 0u;
@@ -1639,13 +1632,15 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
             terminal_error("net:get TCP connection reset");
             return -1;
         }
-        if (packet.payload_len && packet.seq == rx_seq)
+        uint32_t skip=dihos_tcp_receive_skip(rx_seq,packet.seq,packet.payload_len);
+        if(packet.payload_len && packet.seq!=rx_seq)++g_fetch_noncontiguous;
+        if (packet.payload_len && skip < packet.payload_len)
         {
-            uint32_t take = packet.payload_len;
-            rx_seq += packet.payload_len;
+            uint32_t take = packet.payload_len-skip;
+            rx_seq += take;
             if (take > max_bytes - printed)
                 take = max_bytes - printed;
-            knet_response_emit(packet.payload, take);
+            knet_response_emit(packet.payload+skip, take);
             printed += take;
             KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
             if (printed >= max_bytes)
@@ -1661,10 +1656,9 @@ static int knet_usb_request_url(const char *url, uint32_t max_bytes,
         {
             KNET_SEND_TCP(tx_seq, rx_seq, tcp_ack, 0, 0u, 0u);
         }
-        if (packet.flags & tcp_fin)
+        if ((packet.flags & tcp_fin) && dihos_tcp_receive_fin(rx_seq,packet.seq,packet.payload_len))
         {
-            if (packet.seq + packet.payload_len == rx_seq)
-                ++rx_seq;
+            ++rx_seq;
             KNET_SEND_TCP(tx_seq, rx_seq, tcp_fin | tcp_ack, 0, 0u, 0u);
             terminal_print("");
             terminal_success("net:get HTTP response complete");
@@ -1687,7 +1681,11 @@ int knet_usb_get_url(const char *url, uint32_t max_bytes)
 {
     uint32_t expected=0;
     if (!__atomic_compare_exchange_n(&g_fetch_busy,&expected,1,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) return -2;
-    int rc=knet_usb_request_url(url, max_bytes, "GET", 0, 0u, 0);
+    __atomic_store_n(&g_fetch_tls_verified,0,__ATOMIC_RELEASE);
+    int rc=knet_usb_request_url(url, max_bytes, "GET", 0, 0u, 0,0,0);
+#if defined(DIHOS_TLS_MODERN)
+    knet_tls_end();
+#endif
     __atomic_store_n(&g_fetch_busy,0,__ATOMIC_RELEASE);
     return rc;
 }
@@ -1697,9 +1695,9 @@ void knet_usb_set_worker_quiet(uint32_t quiet)
     __atomic_store_n(&g_worker_quiet, quiet ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
-int knet_usb_fetch_request(const char *url, const char *method,
+int knet_usb_fetch_request_headers(const char *url, const char *method,
                            const uint8_t *body, uint32_t body_size,
-                           const char *content_type,
+                           const char *content_type,const char *headers,uint32_t header_bytes,
                            uint8_t *response, uint32_t capacity,
                            uint32_t *out_size, uint8_t *out_truncated,
                            volatile uint32_t *cancelled, uint32_t timeout_ms)
@@ -1712,13 +1710,14 @@ int knet_usb_fetch_request(const char *url, const char *method,
         *out_size = 0u;
     if (out_truncated)
         *out_truncated = 0u;
-    if (!url || !response || capacity < 128u || !out_size)
+    if (!url || !response || capacity < 128u || !out_size || dihos_http_validate_request_headers(headers,header_bytes))
         return -1;
     if (!__atomic_compare_exchange_n(&g_fetch_busy, &expected, 1u, 0,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return -2;
 
     g_fetch_error[0]=0;
+    __atomic_store_n(&g_fetch_tls_verified,0,__ATOMIC_RELEASE);
     g_stream_stopped=0;
     g_fetch_output = response;
     g_fetch_capacity = capacity;
@@ -1729,9 +1728,13 @@ int knet_usb_fetch_request(const char *url, const char *method,
     if (!knet_link_is_hyperv()) usbh_background_network_set(1u);
     terminal_print("net: request begin");
     terminal_flush_log();
-    rc = knet_usb_request_url(url, capacity, method, body, body_size, content_type);
+    rc = knet_usb_request_url(url, capacity, method, body, body_size, content_type,headers,header_bytes);
     was_cancelled = cancelled && __atomic_load_n(cancelled, __ATOMIC_ACQUIRE);
     timed_out = !was_cancelled && g_fetch_deadline && knet_now_ms() >= g_fetch_deadline;
+    if(timed_out)knet_record_timeout();
+#if defined(DIHOS_TLS_MODERN)
+    knet_tls_end();
+#endif
     if (rc != 0 || was_cancelled || timed_out)
     {
         knet_link_status eth_status;
@@ -1757,6 +1760,14 @@ int knet_usb_fetch_request(const char *url, const char *method,
     return was_cancelled ? -3 : (timed_out ? -4 : rc);
 }
 
+int knet_usb_fetch_request(const char *url,const char *method,
+                           const uint8_t *body,uint32_t body_size,const char *content_type,
+                           uint8_t *response,uint32_t capacity,uint32_t *out_size,uint8_t *out_truncated,
+                           volatile uint32_t *cancelled,uint32_t timeout_ms)
+{
+    return knet_usb_fetch_request_headers(url,method,body,body_size,content_type,0,0,response,capacity,
+        out_size,out_truncated,cancelled,timeout_ms);
+}
 int knet_usb_fetch_url(const char *url, uint8_t *response, uint32_t capacity,
                        uint32_t *out_size, uint8_t *out_truncated,
                        volatile uint32_t *cancelled, uint32_t timeout_ms)

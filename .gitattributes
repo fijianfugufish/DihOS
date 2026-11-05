@@ -3,3 +3,5 @@ third_party/freetype/** text=auto eol=lf
 third_party/harfbuzz/** text=auto eol=lf
 OS/System/Fonts/Web/*.txt text eol=lf
 OS/System/Fonts/Web/*.ttf binary
+third_party/mbedtls/** text=auto eol=lf
+third_party/ca-certificates/** text=auto eol=lf
